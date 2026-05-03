@@ -1,0 +1,115 @@
+# Global: Auto-detect text files and use native line endings on checkout
+* text=auto
+
+# Files that MUST use LF (cross-platform compatibility)
+*.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
+*.fish text eol=lf
+
+# Files that MUST use CRLF (Windows-specific)
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Configuration and data files
+*.json text
+*.yaml text
+*.yml text
+*.toml text
+*.ini text
+*.cfg text
+*.conf text
+*.env text
+*.env.* text
+
+# Documentation
+*.md text diff=markdown
+*.rst text
+*.txt text
+
+# Programming languages
+*.py text diff=python
+*.pyw text diff=python
+*.pyi text diff=python
+
+# Python-specific files
+*.pyc binary export-ignore
+*.pyo binary export-ignore
+*.pyd binary
+
+# Database and migration files
+*.sql text eol=lf
+
+# Docker and containerization
+Dockerfile text eol=lf
+*.dockerignore text eol=lf
+docker-compose*.yml text eol=lf
+
+# CI/CD files
+.github/**/*.yml text eol=lf
+.github/**/*.yaml text eol=lf
+
+# Package management
+requirements*.txt text eol=lf
+pixi.lock merge=binary linguist-language=YAML linguist-generated=true
+
+# Git files
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.gitmodules text eol=lf
+
+# IDE and editor files
+.editorconfig text eol=lf
+.vscode/*.json text eol=lf
+
+# Binary files
+*.pdf binary
+*.doc binary
+*.docx binary
+*.xls binary
+*.xlsx binary
+*.ppt binary
+*.pptx binary
+*.zip binary
+*.tar binary
+*.tar.gz binary
+*.tgz binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.bin binary
+*.dat binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Image files
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.svg text
+*.webp binary
+
+# Font files
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+
+# Certificate and key files (LF for deployment consistency)
+*.pem text eol=lf
+*.crt text eol=lf
+*.key text eol=lf
+*.pub text eol=lf
+
+# cat-watcher binary additions
+*.mp4 binary
+*.dav binary
+*.pt binary
+*.onnx binary

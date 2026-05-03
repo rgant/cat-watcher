@@ -84,12 +84,12 @@ Two machines, one repository:
 flowchart LR
   subgraph Dev["MacBook (Apple Silicon) — development"]
     direction TB
-    devTasks["clone of repo<br/>uv venv + sample data<br/>tests, lint, format<br/>local CLI exercise"]
+    devTasks["clone of repo<br/>pixi env + sample data<br/>tests, lint, format<br/>local CLI exercise"]
   end
 
   subgraph Prod["Mac mini 2018 (Intel x86_64) — production"]
     direction TB
-    prodTasks["clone of repo<br/>uv venv<br/>internal_root: ~/Library/Application Support/cat-watcher<br/>storage_root: /Volumes/Data/cat-watcher<br/>4 LaunchAgents<br/>SQLite DB (internal)"]
+    prodTasks["clone of repo<br/>pixi env<br/>internal_root: ~/Library/Application Support/cat-watcher<br/>storage_root: /Volumes/Data/cat-watcher<br/>4 LaunchAgents<br/>SQLite DB (internal)"]
   end
 
   cam1["Camera 1 — Pantry<br/>256 GB SD"]
@@ -171,24 +171,32 @@ Wraps the cat-detection model. Input: path to .mp4. Output:
 ```python
 @dataclass(frozen=True)
 class DetectionResult:
-  has_cat: bool
-  max_score: float
-  frames_sampled: int
-  frames_with_cat: int
-  best_box_xyxy: tuple[float, float, float, float] | None
-  detector_version: str  # model name + checksum
+    has_cat: bool
+    max_score: float
+    frames_sampled: int
+    frames_with_cat: int
+    best_box_xyxy: tuple[float, float, float, float] | None
+    detector_version: str  # model name + checksum
 ```
 
 Internally: ffmpeg samples N evenly-spaced frames (default 5), ultralytics
 YOLOv11n runs inference on each, results aggregated. The detector interface is
 pluggable so models can be swapped in phase 2 without touching callers.
 
-**License:** ultralytics is AGPL-3.0; the project repo will be licensed AGPL-3.0
-to match.
+**License:** ultralytics is AGPL-3.0; the project repo is licensed
+AGPL-3.0-or-later to match.
 
 **Phase 1 model:** `yolov11n.pt` (nano, ~6 MB) with confidence threshold 0.35.
 The COCO "cat" class (id 15) is the only class checked. Model weights are
-downloaded once on first run (or via a setup recipe) into `models/`; gitignored.
+downloaded once on first run (or via a setup recipe) into
+`internal_root/models/`; gitignored.
+
+**Wheel availability note.** PyTorch dropped macOS-x86_64 wheels from PyPI
+around v2.3 (early 2024); the production Mac mini is Intel x86_64. This drives
+the package-manager choice in §10 — pixi sources `pytorch` (and other ML
+packages) from conda-forge, which still maintains osx-64 builds. The runtime
+detector code is unaffected; the constraint is purely about how dependencies are
+sourced.
 
 ### 4.4. `cat_watcher.poller`
 
@@ -196,9 +204,9 @@ Periodic entrypoint. On startup the poller:
 
 1. Acquires an exclusive file lock on `<internal_root>/.poller.pid`
    (`fcntl.flock` with `LOCK_EX | LOCK_NB`). If another poller process holds the
-   lock — for example, a manual `just poll-once` overlapping with a LaunchAgent
-   tick — the new process exits cleanly with code 0. This prevents concurrent
-   downloads and partial-byte races on the same files.
+   lock — for example, a manual `pixi run poll-once` overlapping with a
+   LaunchAgent tick — the new process exits cleanly with code 0. This prevents
+   concurrent downloads and partial-byte races on the same files.
 2. Performs the storage-availability wait (§4.13) — the poller writes to the
    external drive (`clips/`, `thumbs/`) so it cannot proceed without it.
 3. Inserts a row into `agent_starts(agent_name='poller', started_at=now)`.
@@ -231,11 +239,16 @@ Then per camera, on each tick:
      `ok` to non-`ok`; clear (NULL) on any transition back to `ok`; leave
      unchanged while still non-`ok`.
 6. Write heartbeat row.
-7. Run retention sweep: delete clips, thumbs, and DB rows where
-   `start_ts < now - 30 days`. Per clip: delete the DB row first (in a
-   transaction), then the files. A crash between the two leaves an orphan file,
-   which the next sweep cleans up by scanning the directory tree for files older
-   than 30 days with no matching row.
+7. Run retention sweep — two passes:
+   1. **DB-driven pass.** For each clip with `start_ts < now - 30 days`: delete
+      the row inside a transaction, then unlink the clip and thumbnail files.
+      Row-first ordering means a crash between the two leaves only an orphan
+      file, never a dangling row pointing at a missing file.
+   2. **Orphan sweep.** Scan `clips/` and `thumbs/` for files with mtime older
+      than 30 days that have no matching row, and unlink them. This cleans up
+      the orphans the DB-driven pass leaves behind on crash, plus any other
+      stray files that may have appeared (e.g., a partially-written download
+      from before the file-before-row ordering was added).
 
 The poller swallows per-camera errors so one camera's failure does not abort the
 other camera's poll.
@@ -279,7 +292,10 @@ the cat, the camera, or the network.
 
 **Frequency rule** — fires if:
 
-- `count(clips where camera_id=cam AND COALESCE(manual_has_cat, has_cat)=true AND start_ts > now - 6h) >= frequency_threshold_count`
+- ```sql
+  count(clips where camera_id=cam AND COALESCE(manual_has_cat, has_cat)=true AND start_ts > now - 6h) >= frequency_threshold_count
+  ```
+
   (default 8)
 
 The `COALESCE(manual_has_cat, has_cat)` form means the rule respects user
@@ -306,14 +322,20 @@ threshold; a model false-positive you marked as not-a-cat doesn't.
   (poller, backup); the alerts agent does its own one-shot probe per tick.
 - `BACKUP_STALE` if no file matching `backups/cat_watcher-*.sqlite` has an mtime
   within the last 36 hours. Catches silent backup failure. **24h cool-down.**
-  Skipped when `STORAGE_UNAVAILABLE` is currently firing, to avoid
-  double-alerting on the same root cause.
+  Skipped when the most recent `alerts_sent` row for `STORAGE_UNAVAILABLE` is
+  newer than `now - storage_unavailable_cooldown` (i.e., its cool-down window is
+  still open) — that suppresses double-alerting on the same root cause.
 
 Each emitted alert is recorded in `alerts_sent`. **Default cool-down: 6 hours
-per (camera, alert_type) pair.** Specific alert types override the default —
-`WEB_FLAPPING` is 1h, `DISK_LOW` and `BACKUP_STALE` are 24h. The override values
-live alongside their rule definitions, not in this paragraph. A second
-consecutive tick of the same condition (within cool-down) does not re-fire.
+per (camera, alert_type) pair**, configurable via `[alerts].cooldown_hours` in
+`config.toml`. Specific alert types override that default with **hard-coded**
+values that live alongside their rule definitions: `WEB_FLAPPING` is 1h,
+`DISK_LOW` and `BACKUP_STALE` are 24h. These overrides are intentionally not
+exposed in `config.toml` — their values follow from the rule semantics (a flap
+detector with a 6h cool-down would miss the next flap; a once-per-24h backup's
+staleness check would fire repeatedly within a single missed run if the
+cool-down were hours-scale). A second consecutive tick of the same condition
+(within cool-down) does not re-fire.
 
 The alerts agent also writes its own heartbeat. The poller checks the alerts
 heartbeat and emits `ALERTS_STUCK` if older than 30 min. This provides symmetric
@@ -348,6 +370,7 @@ FastAPI app. Routes:
 | GET    | `/media/clip/{id}.mp4`  | File served with `Range:` support                    |
 | GET    | `/media/thumb/{id}.jpg` | Thumbnail                                            |
 | GET    | `/stats`                | Daily/hourly activity charts (chart.js or similar)   |
+| GET    | `/cameras`              | Per-camera health: status, last_*, recent alerts     |
 | GET    | `/alerts`               | Alert history (last 30 days)                         |
 | GET    | `/health`               | Liveness probe; returns latest heartbeat (read-only) |
 
@@ -448,6 +471,11 @@ Each `main()` accepts `--once` (run a single iteration and exit) and
 exposes sub-commands for ad-hoc operations (e.g.,
 `cat-watcher inspect <clip-id>`).
 
+**Config-path precedence:** `--config PATH` (CLI flag) > `CAT_WATCHER_CONFIG`
+(env var) > `./config.toml` (default). The CLI flag exists primarily for tests;
+LaunchAgents in production set the env var via `EnvironmentVariables` in their
+plists (§11.4).
+
 Additionally, `cat-watcher-poller --once` accepts these scoping flags for ad-hoc
 fetches, first-run backfill control, and dev-cache priming:
 
@@ -470,10 +498,13 @@ diagnostics (no LaunchAgent invokes these — they're for human use):
   `agent_starts` count in the last 24h for all four agents, last 5 alerts of
   each type. Run on the Mac mini (or via `ssh mac-mini cat-watcher status`) as
   the "is everything OK?" command.
-- `cat-watcher test-cameras` — for each configured camera, exercise
-  `iter_recordings(since=now-1m)` and report success / typed-exception failure.
-  Run during install (before `just install-agents`) to catch hostname /
-  credential errors immediately rather than after the first scheduled tick.
+- `cat-watcher test-cameras` — for each configured camera: exercise
+  `iter_recordings(since=now-1m)` and report success / typed-exception failure;
+  fetch the camera's reported clock and compare against the host clock,
+  reporting drift (warn at >60 s, fail-loudly-but-don't-exit at >5 min). Run
+  during install (before `pixi run install-agents`) to catch hostname /
+  credential errors and clock drift immediately rather than after the first
+  scheduled tick.
 - `cat-watcher test-notification` — emit one synthetic alert through the full
   notifier path (email + macOS notification). Run during install so the macOS
   "send notifications" permission prompt appears at a moment you're paying
@@ -500,11 +531,20 @@ timezone happens only at the edges:
 - **Camera-supplied filenames** (e.g., `06.47.04-06.48.58[M][0@0][0].mp4`) use
   the camera's configured local time. `amcrest_client` converts these at the
   ingest boundary so every datetime that flows past it is already UTC. The
-  camera's clock is assumed set to the same `display_timezone` as the Mac mini.
+  camera's clock and timezone are **verified at install time** (§4.10's
+  `cat-watcher test-cameras` fetches the camera's reported clock and reports
+  drift against the host) — not assumed. The exact tolerance and which API call
+  to use will be settled by experimentation during implementation; until
+  measured, the spec's commitment is "verified, not assumed."
 
 This rule keeps the 12-hour inactivity watchdog and 6-hour rolling frequency
 window correct across DST transitions; UTC arithmetic has no spring/fall
-discontinuities.
+discontinuities. Camera-clock drift between install-time verifications is a
+known risk: a camera that drifts hours into the future would file clips with
+future `start_ts` values and skew both watchdog and frequency rules. A periodic
+drift re-check (e.g., on every Nth poll tick) is a candidate for phase-2
+hardening; phase 1 relies on the install-time check plus manual re-runs of
+`cat-watcher test-cameras` during operations.
 
 ### 4.12. `cat_watcher.backup`
 
@@ -560,12 +600,12 @@ mask the real problem.
 
 **Which agents need the external drive at startup:**
 
-| Agent    | Needs external drive?            | Behavior on missing drive                                                     |
-| -------- | -------------------------------- | ----------------------------------------------------------------------------- |
-| `poller` | Yes (writes `clips/`, `thumbs/`) | Waits up to 10 min on startup, then exits                                     |
-| `backup` | Yes (writes `backups/`)          | Waits up to 10 min on startup, then exits                                     |
-| `alerts` | No (state is on internal)        | Runs normally; fires `STORAGE_UNAVAILABLE` per tick                           |
-| `web`    | No (DB on internal)              | Runs normally; serves UI; `/media/clip/{id}` returns 503 if file inaccessible |
+| Agent    | Needs external drive?            | Behavior on missing drive                                      |
+| -------- | -------------------------------- | -------------------------------------------------------------- |
+| `poller` | Yes (writes `clips/`, `thumbs/`) | Waits up to 10 min on startup, then exits                      |
+| `backup` | Yes (writes `backups/`)          | Waits up to 10 min on startup, then exits                      |
+| `alerts` | No (state is on internal)        | Runs normally; fires `STORAGE_UNAVAILABLE` per tick            |
+| `web`    | No (DB on internal)              | Runs normally; UI works; `/media/{clip,thumb}/{id}` return 503 |
 
 **At startup, agents that require external storage** (`poller`, `backup`) do:
 
@@ -593,6 +633,16 @@ than silently materializing a wrong directory.
 `internal_root` is always available (it's on the always-mounted internal drive),
 so the alerts and web agents can write to the DB and serve the UI even when the
 external drive is offline.
+
+**Web UI degradation during outage.** The timeline view (§4.7.1) renders inline
+`<img>` thumbnails sourced from `/media/thumb/{id}`. When storage is offline,
+those routes return 503 and browsers show the standard broken-image icon per
+cell. Templates render a small static placeholder (a single bundled SVG) via an
+`onerror` handler so the timeline still reads as a structured event list rather
+than a wall of broken-image glyphs. The server-side template also surfaces a
+thin banner — "External storage offline — clip playback and thumbnails
+unavailable" — sourced from a one-shot probe in the request handler so users
+aren't left guessing why media isn't loading.
 
 ### 4.14. Alert message templates
 
@@ -727,7 +777,8 @@ flowchart TD
 flowchart TD
   start([alerts tick]) --> per_camera["For each camera:<br/>• inactivity check (3 branches; see §4.5)<br/>• frequency check (≥8 cat-clips in 6h window)"]
   per_camera --> watchdog["Watchdog checks:<br/>• poller heartbeat stale &gt; 15 min → POLLER_STUCK<br/>• web heartbeat stale &gt; 5 min → WEB_DOWN<br/>• agent_starts rows ≥ 5/30min for web → WEB_FLAPPING"]
-  watchdog --> per_alert{For each<br/>candidate alert}
+  watchdog --> storage["Storage checks (every tick):<br/>• write probe to storage_root fails → STORAGE_UNAVAILABLE<br/>• shutil.disk_usage().free/total &lt; 0.10 → DISK_LOW (skip if storage offline)<br/>• newest backups/*.sqlite mtime older than 36h → BACKUP_STALE (skip if STORAGE_UNAVAILABLE in cool-down)"]
+  storage --> per_alert{For each<br/>candidate alert}
   per_alert -->|cool-down active| skip[skip]
   per_alert -->|cool-down clear| send["notifier.send_email +<br/>notifier.send_macos_notification<br/>db.insert(AlertSent(...))"]
   skip --> per_alert
@@ -916,9 +967,9 @@ the UI.
 
 ### 6.3. Migrations
 
-Alembic with autogenerate from day one. `just db-revision m="..."`,
-`just db-upgrade`, `just db-downgrade`. Migration tests verify `upgrade head`
-followed by `downgrade base` round-trips cleanly.
+Alembic with autogenerate from day one. `pixi run db-revision "..."`,
+`pixi run db-upgrade`, `pixi run db-downgrade`. Migration tests verify
+`upgrade head` followed by `downgrade base` round-trips cleanly.
 
 ## 7. Configuration and secrets
 
@@ -1148,8 +1199,8 @@ session start, `make_clip.py` runs ffmpeg to build a few seconds of synthetic
 
 The test pipeline never uses real camera footage — tests must remain
 reproducible from a clean clone with no network access. For ad-hoc development
-and exploration, `just fetch-clips` populates `data/clips/` from real cameras;
-those files are gitignored and are not referenced from any test.
+and exploration, `pixi run fetch-clips` populates `data/clips/` from real
+cameras; those files are gitignored and are not referenced from any test.
 
 ### 9.4. Critical paths with explicit tests
 
@@ -1171,11 +1222,10 @@ those files are gitignored and are not referenced from any test.
 
 ### 9.5. CI
 
-- **Primary gate:** `just test-on-mini` — ssh to Mac mini, pull, `uv sync`,
-  `uv run pytest`. Truth is what runs on the deploy target.
+- **Primary gate:** `pixi run test-on-mini` — ssh to Mac mini, pull,
+  `pixi install`, `pixi run pytest`. Truth is what runs on the deploy target.
 - **Nice-to-have:** GitHub Actions on `ubuntu-latest` running ruff +
-  basedpyright + mypy + pylint + pytest. If wheel availability for ultralytics
-  on Linux x86_64 ever causes friction, drop this.
+  basedpyright + mypy + pylint + pytest under pixi.
 - **Workflow security:** all third-party actions pinned to commit SHAs (Renovate
   or Dependabot keeps them current). Minimal `permissions:` per workflow.
   `actionlint` and `zizmor` run on every change to `.github/workflows/`.
@@ -1184,9 +1234,16 @@ those files are gitignored and are not referenced from any test.
 
 ## 10. Repo and tooling
 
-Bootstrapped with `uv init --package cat-watcher`. Dependencies added via
-`uv add` and `uv add --dev` only — never edit `pyproject.toml` manifests by
-hand.
+Managed by [pixi](https://pixi.sh) — a conda+PyPI hybrid package manager that
+sources native-extension wheels from conda-forge while still supporting
+PyPI-only packages. This is the only workable choice for the prod target: the
+2018 Intel Mac mini cannot install PyTorch (and several other ML packages) from
+PyPI, because PyPI dropped macOS-x86_64 wheels for them around 2024. conda-forge
+maintains osx-64 builds.
+
+Dependencies are managed exclusively through the pixi CLI (`pixi add`,
+`pixi add --feature <name>`, `pixi remove`) — never edit `pyproject.toml`'s
+`[tool.pixi.*]` blocks by hand.
 
 ### 10.1. Repo layout
 
@@ -1202,7 +1259,6 @@ cat-watcher/
 ├── .gitignore
 ├── .markdownlint.jsonc
 ├── .markdownlintignore
-├── .python-version               # 3.14
 ├── Brewfile
 ├── LICENSE                       # AGPL-3.0
 ├── LICENSES.md                   # third-party attribution (cat photo, ultralytics, etc.)
@@ -1218,8 +1274,7 @@ cat-watcher/
 │   └── specs/
 │       └── 2026-05-01-cat-watcher-design.md
 ├── dprint.jsonc
-├── justfile
-├── pyproject.toml
+├── pyproject.toml                # also hosts [tool.pixi.*] config + tasks (§10.3, §10.4)
 ├── scripts/
 │   ├── install_launchagents.sh
 │   ├── uninstall_launchagents.sh
@@ -1260,20 +1315,32 @@ where appropriate at bootstrap):
 - `.editorconfig` — 2-space default, 4-space Python, 140 line limit, 80 for
   `.md`, LF
 - `.gitattributes` — comprehensive line-ending and binary classification
-- `.python-version` — `3.14`
 - `dprint.jsonc` — same plugin set
 - `.markdownlint.jsonc` + `.markdownlintignore`
-- `pyproject.toml` shape — `build-backend = "uv_build"`,
-  `[dependency-groups].dev`, ruff `select=["ALL"]` with same minimal ignores,
-  pylint dedupe block, mypy `strict=true`, basedpyright execution-environment
-  for tests, pyproject-fmt config, pytest `filterwarnings=["error"]` +
-  `--strict-markers --strict-config
-  --tb=short`, coverage `branch=true` and
-  `fail_under=90`
+- `pyproject.toml` shape — all `[tool.*]` lint / type / test / coverage blocks
+  (ruff `select=["ALL"]` with the same minimal ignores, pylint dedupe block,
+  mypy `strict=true`, basedpyright execution-environment for tests,
+  pyproject-fmt config, pytest `filterwarnings=["error"]` +
+  `--strict-markers --strict-config --tb=short`, coverage `branch=true` and
+  `fail_under=90`). Two structural changes from the reference template:
+  - `[build-system]` switches from `uv_build` to `hatchling.build`
+    (`requires = ["hatchling"]`). Hatchling is the default that
+    `pixi init --format pyproject` produces and is the conventional choice for
+    pixi-managed Python projects; no behavioral change vs. uv_build.
+  - Dependency lists move out of `[project].dependencies` /
+    `[dependency-groups]` and into `[tool.pixi.*]` blocks (§10.3).
 
 ### 10.3. Tooling adjustments for this project
 
-- **`.gitattributes`** — append `*.mp4 binary`, `*.dav binary`
+The pixi-managed `pyproject.toml` is bootstrapped with
+`pixi init --format pyproject` (which produces `[project]`, `[build-system]`
+with `hatchling.build`, `[tool.pixi.workspace]`, and an empty
+`[tool.pixi.tasks]`). The project-specific blocks below are layered on top of
+that skeleton; hand-editing of `[tool.pixi.*]` blocks is forbidden after
+bootstrap (§10 preamble).
+
+- **`.gitattributes`** — append `*.mp4 binary`, `*.dav binary`, `*.pt binary`,
+  `*.onnx binary`.
 - **`.gitignore`** — append cat-watcher additions:
 
   ```gitignore
@@ -1281,6 +1348,9 @@ where appropriate at bootstrap):
   data/
   config.toml
   .env
+
+  # pixi-managed environment (per-machine, not committed)
+  .pixi/
 
   # Local model cache and trained weights
   models/
@@ -1292,82 +1362,111 @@ where appropriate at bootstrap):
   *.sqlite-shm
   ```
 
-- **`Brewfile`** — trimmed. Keep: `just`, `uv`, `dprint`, `markdownlint-cli`,
-  `shellcheck`, `shfmt`, `git`, `git-absorb`, `git-machete`. Add: `ffmpeg`,
-  `actionlint`, `zizmor`. Drop: `awscli`, `hadolint`, `terraform-docs`,
-  `tflint`, `opentofu`.
+- **`Brewfile`** — keeps the development tools that aren't Python-managed:
+  `shellcheck`, `dprint`, `markdownlint-cli`, `shfmt`, `actionlint`, `zizmor`,
+  `ffmpeg`, `git`, and `pixi` itself. `uv` and `just` are gone (both replaced by
+  pixi — pixi handles package management _and_ serves as the task runner via
+  `[tool.pixi.tasks]`).
+- **Python version source-of-truth.** Python version is specified once, in
+  `[tool.pixi.dependencies].python` (`python = "3.14.*"`). The repo
+  intentionally does **not** ship a `.python-version` file — pixi resolves the
+  interpreter from its own dependency table, and a stray `.python-version` would
+  only invite confusion about which file is authoritative.
 - **`pyproject.toml`** — `name = "cat-watcher"`, `requires-python = ">=3.14"`,
-  `[project.scripts]` for the four CLIs.
-- **Dev group additions:** `pytest-randomly`, `pytest-mock`, `pytest-cov`,
-  `respx` (httpx mock for Amcrest tests), `aiosmtpd` (real SMTP for
-  integration), and the same pylint plugin set: `pylint-pytest>=2.0.0a1`
-  (pre-release pin required for current pylint and Python 3.14 support),
-  `pylint-per-file-ignores`, `pylint-venv`.
-- **Runtime deps:** `fastapi`, `uvicorn[standard]`, `jinja2`, `httpx`,
-  `sqlalchemy>=2`, `alembic`, `pydantic-settings`, `python-dotenv`,
-  `ultralytics`, `opencv-python`, `numpy`, `pillow`.
+  `[project.scripts]` for the five CLIs (`cat-watcher`, `cat-watcher-poller`,
+  `cat-watcher-alerts`, `cat-watcher-web`, `cat-watcher-backup`).
+- **`[tool.pixi.workspace]`** — `channels = ["conda-forge"]`,
+  `platforms = ["osx-arm64", "osx-64", "linux-64"]` (Apple Silicon dev,
+  Intel-Mac prod, Linux CI).
+- **`[tool.pixi.dependencies]`** (conda-forge): `python = "3.14.*"`, `pytorch`,
+  `ultralytics`, `opencv`, `numpy`, `pillow`, `ffmpeg`. These are the packages
+  whose macOS-x86_64 wheels exist on conda-forge but not on PyPI; conda-forge is
+  the only working source for prod.
+- **`[tool.pixi.pypi-dependencies]`** (PyPI): `fastapi`, `uvicorn[standard]`,
+  `jinja2`, `sqlalchemy>=2`, `alembic`, `httpx`, `pydantic-settings`,
+  `python-dotenv`, plus `cat-watcher = { path = ".", editable = true }` so the
+  package itself is installed in editable mode for `pixi run pytest`.
+- **`[tool.pixi.feature.dev.dependencies]`** (conda-forge): `pytest`,
+  `pytest-cov`, `pytest-mock`, `pytest-randomly`, `respx`, `aiosmtpd`, `ruff`,
+  `basedpyright`, `mypy`, `pylint`, `pyproject-fmt`.
+- **`[tool.pixi.feature.dev.pypi-dependencies]`**: `pylint-pytest>=2.0.0a1`
+  (pre-release pin required for current pylint + Python 3.14; conda-forge
+  doesn't carry the pre-release), `pylint-per-file-ignores`, `pylint-venv`.
+- **`[tool.pixi.environments]`** — one entry, `default`, with
+  `features = ["dev"]` and `solve-group = "default"`. The default environment is
+  what `pixi install` populates and what `pixi run` uses.
 
-### 10.4. `justfile` — extending the reference template
+### 10.4. Pixi tasks — `[tool.pixi.tasks]` in `pyproject.toml`
 
-Adopt the reference verbatim for `lint`, `lint-ruff`, `lint-pyright`,
-`lint-mypy`, `lint-pylint`, `lint-sh`, `fmt-sh`, `fmt-sh-check`, `format`,
-`format-check`, `fmt-toml`, `lint-md`, `test`, `test-cov`, `outdated`, `deps`,
-`clean`, `check`. The `setup` recipe stays but drops `playwright install`,
-`tflint --init`. Drop all Terraform / Docker / ECS recipes.
+Pixi serves both as the package manager (§10.3) and the task runner — there is
+no separate `justfile` or `pixi.toml`. Tasks live under `[tool.pixi.tasks]` in
+`pyproject.toml` (or `[tool.pixi.feature.dev.tasks]` for dev-only tasks that
+should not appear when the dev feature is excluded). `pixi task list` shows all
+available tasks. Each task is invoked with `pixi run <task-name> [args...]`;
+when a task does not declare an `args` block, any trailing CLI arguments are
+forwarded to the underlying command verbatim — this covers the variadic recipes
+the reference template expressed with `*flags`.
 
-Add cat-watcher recipes (in the same group-annotated style):
+Adopt the same set of conventional task names as the reference tooling template:
+`lint`, `lint-ruff`, `lint-pyright`, `lint-mypy`, `lint-pylint`, `lint-sh`,
+`fmt-sh`, `fmt-sh-check`, `format`, `format-check`, `fmt-toml`, `lint-md`,
+`test`, `test-cov`, `outdated`, `deps`, `clean`, `check`. The `setup` task stays
+but drops `playwright install` and `tflint --init`. Drop all Terraform / Docker
+/ ECS tasks. Composite tasks (`lint`, `format`, `check`, `test-cov`) use pixi's
+`depends-on` to chain sub-tasks rather than shelling out to the runner
+recursively. Lint and format tasks that wrap Python tools call them directly
+(e.g., `cmd = "ruff check ."`); pixi runs every task inside the resolved
+environment, so an explicit `pixi run` prefix would be redundant.
 
-```just
+A few translation notes vs. the reference justfile:
+
+- **Variadic args (`*flags`, `*paths`, `*args` in just)** — omit any `args`
+  block and let pixi forward trailing CLI arguments. Example: a `poll-once` task
+  whose `cmd` is just `cat-watcher-poller --once` will, when invoked as
+  `pixi run poll-once --since 2026-04-30 --limit 5`, append those flags.
+- **Positional defaults (`m=""`, `path="."` in just)** — declared as a list of
+  `args` entries with a `default` field, then templated with Jinja-style
+  `{{ name }}` placeholders inside `cmd`. (See the `db-revision` example below
+  for the canonical pattern.)
+- **Dotenv loading** — pixi does not load `.env` automatically the way `just`
+  did with `set dotenv-load := true`. Tasks that need secrets read them from the
+  process environment; LaunchAgents inject `CAT_WATCHER_CONFIG` and the app
+  loads `.env` itself via `pydantic-settings` / `python-dotenv` (§10.3 already
+  lists both as runtime dependencies).
+- **`[confirm]` prompts** — no native pixi equivalent. The only confirm-gated
+  recipe in the reference template is `clean`; if a confirmation is wanted, wrap
+  the destructive command in a small shell prompt inside the `cmd` string.
+  Otherwise drop the gate.
+
+Add cat-watcher tasks (TOML, illustrative — exact arg templating decided at
+implementation time):
+
+```toml
 # === app ===
-[group('app')]
-dev:                    uv run cat-watcher-web --reload
-[group('app')]
-poll-once *flags:       uv run cat-watcher-poller --once {{ flags }}
-[group('app')]
-fetch-clips *flags:     uv run cat-watcher-poller --once --no-detect {{ flags }}
-[group('app')]
-alerts-once:            uv run cat-watcher-alerts --once
-[group('app')]
-backup:                 uv run cat-watcher-backup
-[group('app')]
-status:                 uv run cat-watcher status
-[group('app')]
-test-cameras:           uv run cat-watcher test-cameras
-[group('app')]
-test-notification:      uv run cat-watcher test-notification
+[tool.pixi.tasks]
+dev = { cmd = "cat-watcher-web --reload", description = "Run web app with reload" }
+poll-once = { cmd = "cat-watcher-poller --once", description = "One-shot poll (extra flags forwarded)" }
+fetch-clips = { cmd = "cat-watcher-poller --once --no-detect", description = "Poll without YOLO inference" }
+alerts-once = { cmd = "cat-watcher-alerts --once" }
+backup = { cmd = "cat-watcher-backup" }
+status = { cmd = "cat-watcher status" }
+test-cameras = { cmd = "cat-watcher test-cameras" }
+test-notification = { cmd = "cat-watcher test-notification" }
 
 # === db ===
-[group('db')]
-db-revision m="":   uv run alembic revision --autogenerate -m "{{ m }}"
-[group('db')]
-db-upgrade:         uv run alembic upgrade head
-[group('db')]
-db-downgrade:       uv run alembic downgrade -1
+db-revision = { cmd = "alembic revision --autogenerate -m \"{{ message }}\"", args = [{ arg = "message", default = "" }] }
+db-upgrade = { cmd = "alembic upgrade head" }
+db-downgrade = { cmd = "alembic downgrade -1" }
 
 # === deploy (mac mini) ===
-[group('deploy')]
-install-agents:     bash scripts/install_launchagents.sh
-[group('deploy')]
-uninstall-agents:   bash scripts/uninstall_launchagents.sh
-[group('deploy')]
-agents-status:      launchctl list | grep cat-watcher
-[group('deploy')]
-test-on-mini:       ssh mac-mini 'cd ~/Programming/cat-watcher && git pull && uv sync && uv run pytest'
-
-[group('deploy')]
-deploy-update:
-    ssh mac-mini 'set -e; \
-      cd ~/Programming/cat-watcher && \
-      git pull && \
-      uv sync && \
-      uv run alembic upgrade head && \
-      for a in poller alerts web backup; do \
-        launchctl kickstart -k gui/$(id -u)/com.robgant.cat-watcher.$a; \
-      done'
+install-agents = { cmd = "bash scripts/install_launchagents.sh" }
+uninstall-agents = { cmd = "bash scripts/uninstall_launchagents.sh" }
+agents-status = { cmd = "launchctl list | grep cat-watcher" }
+test-on-mini = { cmd = "ssh mac-mini 'cd ~/Programming/cat-watcher && git pull && pixi install && pixi run pytest'" }
+deploy-update = { cmd = "ssh mac-mini 'set -e; cd ~/Programming/cat-watcher && git pull && pixi install && pixi run alembic upgrade head && for a in poller alerts web backup; do launchctl kickstart -k gui/$(id -u)/com.robgant.cat-watcher.$a; done'" }
 
 # === actions ===
-[group('lint')]
-lint-actions:       actionlint && zizmor .github/workflows
+lint-actions = { cmd = "actionlint && zizmor .github/workflows" }
 ```
 
 ### 10.5. Pre-commit hooks
@@ -1375,8 +1474,8 @@ lint-actions:       actionlint && zizmor .github/workflows
 - Native: `check-added-large-files` (max 500 KB), `check-merge-conflict`,
   `check-yaml`, `check-toml`, `end-of-file-fixer`, `trailing-whitespace`,
   `detect-secrets`
-- Local (via `uv run`): `ruff check --fix`, `ruff format`, `basedpyright`,
-  `mypy`, `pylint`, `pyproject-fmt` (via `uvx`)
+- Local (via `pixi run`): `ruff check --fix`, `ruff format`, `basedpyright`,
+  `mypy`, `pylint`, `pyproject-fmt`
 - `dprint fmt` for `*.md`, `*.json`, `*.yaml`
 - `markdownlint` for `*.md`
 - `actionlint` + `zizmor` for `.github/workflows/`
@@ -1394,22 +1493,23 @@ Mirrors production minus the external drive and LaunchAgents. The gitignored
 git clone <repo-url> cat-watcher
 cd cat-watcher
 brew bundle
-uv sync
+pixi install
 
 cp config.example.toml config.toml   # both roots default to "./data" — works as-is
 cp .env.example .env                 # fill in real camera passwords + Gmail app password
 mkdir data                           # subfolders (clips/thumbs/backups under storage, models/logs under internal) auto-created by the app on first run (§4.13)
-uv run alembic upgrade head
+pixi run alembic upgrade head
 
 # verify wiring (must be on home LAN or SSH-tunneled)
-just test-cameras
-just poll-once --since 2026-04-30T00:00:00 --limit 5  # small ad-hoc fetch
-just dev                                              # web app on localhost:8000
+pixi run test-cameras
+pixi run poll-once --since 2026-04-30T00:00:00 --limit 5  # small ad-hoc fetch
+pixi run dev                                              # web app on localhost:8000
 ```
 
 No LaunchAgents on dev. The poller and alerts agent are driven manually with
-`just poll-once` / `just alerts-once` / `just backup`. Storage availability
-checks (§4.13) pass trivially because `./data` always exists in the repo.
+`pixi run poll-once` / `pixi run alerts-once` / `pixi run backup`. Storage
+availability checks (§4.13) pass trivially because `./data` always exists in the
+repo.
 
 ### 11.1. Initial setup (Mac mini)
 
@@ -1419,7 +1519,7 @@ cd ~/Programming
 git clone <repo-url> cat-watcher
 cd cat-watcher
 brew bundle
-uv sync
+pixi install                         # resolves osx-64 packages from conda-forge
 
 # configure
 cp config.example.toml config.toml   # ⚠ change BOTH roots:
@@ -1431,17 +1531,17 @@ cp .env.example .env                 # fill in passwords; chmod 600
 # initialize the two storage roots (subfolders auto-created by the app on first run, §4.13)
 mkdir -p ~/Library/Application\ Support/cat-watcher    # internal: DB, locks, models, logs
 mkdir /Volumes/Data/cat-watcher                         # external: clips, thumbs, backups
-uv run alembic upgrade head
+pixi run alembic upgrade head
 
 # verify camera connectivity BEFORE installing agents
-just test-cameras    # exits non-zero on hostname/auth/network failure
+pixi run test-cameras    # exits non-zero on hostname/auth/network failure
 
 # install LaunchAgents (poller, alerts, web, backup)
-just install-agents
-just agents-status   # verify all four loaded
+pixi run install-agents
+pixi run agents-status   # verify all four loaded
 
 # trigger the macOS notification permission prompt deliberately
-just test-notification
+pixi run test-notification
 # macOS will pop a "send notifications" prompt for the script-runner;
 # approve it. If you dismiss it, all subsequent alerts will silently
 # fail to deliver via macOS notification (email still works).
@@ -1464,27 +1564,27 @@ totaling ~1 GB. Expect the first poll to run for 15–30 minutes; subsequent tic
 process only new recordings since `cameras.last_polled_at`.
 
 If you want a smaller initial cache (e.g., on the dev MacBook or a fresh
-production install), run
-`uv run cat-watcher-poller --once --since
-<recent-iso8601>` once before
-`just install-agents`. That seeds `cameras.last_polled_at` to the requested
+production install), run a one-shot poller invocation with
+`--since
+<recent-iso8601>` (via `cat-watcher-poller --once --since ...`) before
+`pixi run install-agents`. That seeds `cameras.last_polled_at` to the requested
 start time; the LaunchAgent's subsequent ticks pick up from there. Combine with
-`--no-detect` (or use `just fetch-clips`) to skip the YOLO model entirely while
-priming a dev cache.
+`--no-detect` (or use `pixi run fetch-clips`) to skip the YOLO model entirely
+while priming a dev cache.
 
 ### 11.2. Updates
 
 ```bash
 cd ~/Programming/cat-watcher
 git pull
-uv sync
-uv run alembic upgrade head        # if migrations
+pixi install
+pixi run alembic upgrade head        # if migrations
 for a in poller alerts web backup; do
   launchctl kickstart -k gui/$(id -u)/com.robgant.cat-watcher.$a
 done
 ```
 
-Or wrapped as `just deploy-update` (defined in §10.4).
+Or wrapped as `pixi run deploy-update` (defined in §10.4).
 
 ### 11.3. Backup
 
@@ -1567,9 +1667,10 @@ the labeled training set: every UI correction becomes a labeled example.
 `cat:marcel` / `cat:both`) so the same labeling UI doubles as training-data
 collection without schema churn. Likely a small image classifier (resnet18 /
 mobilenet) fine-tuned on crops cut from `best_box_xyxy`. Training on the MacBook
-(Apple Silicon, MPS); inference exported to ONNX and run on the Mac mini via
-`onnxruntime`. Schema gain: `clips.cat_id` (FK to a new `cats` table). Per-cat
-stats become possible.
+(Apple Silicon, MPS); inference runs on the Mac mini directly via PyTorch
+(sourced from conda-forge through pixi, same path as phase 1's YOLO inference).
+Schema gain: `clips.cat_id` (FK to a new `cats` table). Per-cat stats become
+possible.
 
 ### Phase 2b — Framing/coverage alert
 
@@ -1603,9 +1704,15 @@ dataset.
   with manual digest auth. Decide at implementation time based on
   `python-amcrest`'s current maintenance status and coverage of the required API
   endpoints (recording listing + download).
-- Exact YOLO model variant (`yolov11n` vs `yolov8n`) — pick at implementation
-  based on the cleanest x86_64-darwin wheel availability. Both are
-  accuracy-equivalent for this task.
+- First-run model-cache strategy. Phase 1 commits to `yolov11n.pt` (§4.3); the
+  open question is _when_ the weights land in `internal_root/models/`. Two
+  options: (a) lazy — first poller tick downloads on demand, with the price
+  being a slow, network-dependent first poll on a host that may not have great
+  internet at install; (b) eager — `pixi run setup` (or a dedicated
+  `cat-watcher fetch-models` sub-command) pulls weights at install time, so the
+  first poller tick is offline-safe. Lean toward (b) but settle in the plan once
+  we know whether ultralytics' lazy-download path tolerates the prod machine's
+  network reliably.
 - Whether Alembic's autogenerate produces a clean initial migration, or whether
   the first migration is hand-written.
 - Specific public-domain cat photo for the test fixture (Wikimedia search at
@@ -1621,8 +1728,12 @@ dataset.
 ## 14. References
 
 - `docs/resources/Amcrest-HTTP_API_V3.26.pdf` — camera HTTP API reference
-- CLAUDE.md global instructions (signed commits, `uv add`, no manifest edits,
-  test-doubles preference order, etc.)
+- User-global CLAUDE.md at `~/.claude/CLAUDE.md` (signed commits,
+  package-manager CLI for all dependency edits, test-doubles preference order,
+  etc.). The repo intentionally does **not** ship a project-local CLAUDE.md;
+  these conventions live one tier up because they apply across the user's
+  projects, not just cat-watcher.
+- pixi documentation: <https://pixi.sh>
 - Reference project conventions copied to `tmp-env-template/` (deleted once
   bootstrap copies the relevant files into final positions, along with the
   existing `tmp.py` and `cat-watcher.sublime-{project,workspace}` scratch files)

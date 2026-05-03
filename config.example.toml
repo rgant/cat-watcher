@@ -1,0 +1,71 @@
+internal_root = "./data" # DB, locks, models, logs
+storage_root = "./data" # clips, thumbs, backups
+log_level = "INFO"
+
+[[cameras]]
+name = "pantry"
+display_name = "Pantry Litter Box Camera"
+host = "<pantry.example.com>"
+port = 80
+# Optional. Override per-camera local timezone if it differs from web.display_timezone.
+# Leave unset (or omit) to fall back to web.display_timezone.
+# timezone = "America/New_York"
+# username + password from env: CAT_WATCHER_PANTRY_{USERNAME,PASSWORD}
+
+[[cameras]]
+name = "office"
+display_name = "Office Litter Box Camera"
+host = "<office.example.com>"
+port = 80
+# username + password from env: CAT_WATCHER_OFFICE_{USERNAME,PASSWORD}
+
+[detector]
+model = "yolov11n.pt"
+confidence_threshold = 0.35
+frames_to_sample = 5
+
+[poller]
+cadence_seconds = 300 # how often the poller LaunchAgent fires (rendered into the plist at install)
+
+[storage]
+wait_interval_seconds = 10 # poll interval while waiting for the external drive to mount
+wait_timeout_seconds = 600 # give up after this; agent exits non-zero
+
+[retention]
+clip_days = 30 # how long to keep clip + thumbnail files (and Clip rows)
+agent_starts_days = 30 # how long to keep agent_starts rows (drives WEB_FLAPPING horizon + UI history)
+alerts_sent_days = 30 # how long to keep alerts_sent rows (drives /alerts page horizon)
+
+[backup]
+keep_count = 7 # rolling daily SQLite backups retained on the external drive
+cadence_hour = 3 # daily backup local hour (0-23) — rendered into the plist
+cadence_minute = 0 # daily backup local minute (0-59)
+
+[alerts]
+cadence_seconds = 900 # how often the alerts LaunchAgent fires
+inactivity_hours = 12 # INACTIVITY rule: no clips / no cats for this long
+frequency_window_hours = 6 # FREQUENCY rule: rolling window
+frequency_threshold_count = 8 # FREQUENCY rule: cat-positive clips in window before firing
+cooldown_hours = 6 # default per-(camera, alert_type) cool-down
+poller_stuck_minutes = 15 # POLLER_STUCK if poller heartbeat older than this
+web_down_minutes = 5 # WEB_DOWN if web heartbeat older than this
+alerts_stuck_minutes = 30 # ALERTS_STUCK if alerts heartbeat older than this (poller fires)
+web_flapping_window_minutes = 30 # WEB_FLAPPING window
+web_flapping_threshold_count = 5 # WEB_FLAPPING fires when web restarts >= this in the window
+backup_stale_hours = 36 # BACKUP_STALE if newest backup file is older than this
+disk_low_threshold_fraction = 0.10 # DISK_LOW fires when free / total falls below this
+
+[alerts.email]
+enabled = true
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+
+[alerts.macos]
+enabled = true
+
+[web]
+host = "0.0.0.0"
+port = 8000
+heartbeat_interval_seconds = 60
+public_url = "http://mac-mini.local:8000"
+display_timezone = "America/New_York"

@@ -1,0 +1,13 @@
+{
+  "code-block-style": {
+    "style": "fenced",
+  },
+  "line-length": {
+    "code_blocks": false,
+    "heading_line_length": 100,
+    "tables": false,
+  },
+  "no-duplicate-heading": {
+    "siblings_only": true,
+  },
+}
