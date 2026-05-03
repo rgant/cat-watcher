@@ -10,14 +10,12 @@ port = 80
 # Optional. Override per-camera local timezone if it differs from web.display_timezone.
 # Leave unset (or omit) to fall back to web.display_timezone.
 # timezone = "America/New_York"
-# username + password from env: CAT_WATCHER_PANTRY_{USERNAME,PASSWORD}
 
 [[cameras]]
 name = "office"
 display_name = "Office Litter Box Camera"
 host = "<office.example.com>"
 port = 80
-# username + password from env: CAT_WATCHER_OFFICE_{USERNAME,PASSWORD}
 
 [detector]
 model = "yolov11n.pt"

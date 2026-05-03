@@ -1564,14 +1564,13 @@ packages:
 - pypi: ./
   name: cat-watcher
   version: 0.1.0
-  sha256: d204ed34a21918067ded20d518df28107f57b76d9910c7afc5d5353793105456
+  sha256: ebebb7d2aabda4568a2a5558af58a249b40b6989916b03eb8a7c8ebf738766b0
   requires_dist:
   - alembic>=1.18.4,<2
   - fastapi[standard]>=0.136.1,<0.137
   - httpx>=0.28.1,<0.29
   - jinja2>=3.1.6,<4
   - pydantic-settings>=2.14.0,<3
-  - python-dotenv>=1.2.2,<2
   - sqlalchemy>=2.0.49,<3
   - uvicorn[standard]>=0.46.0,<0.47
   requires_python: '>=3.14'

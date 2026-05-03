@@ -15,14 +15,14 @@ pixi run db-upgrade
 pixi run dev
 ```
 
-`brew bundle` installs system tools (including pixi itself); `pixi install`
-then provisions the Python/conda environment. Both are required and must run
-in that order.
+`brew bundle` installs system tools (including pixi itself); `pixi install` then
+provisions the Python/conda environment. Both are required and must run in that
+order.
 
 ## Useful commands
 
-Run `pixi task list` to see all configured tasks. A few common operations
-aren't wrapped as tasks — invoke their underlying binaries directly via pixi:
+Run `pixi task list` to see all configured tasks. A few common operations aren't
+wrapped as tasks — invoke their underlying binaries directly via pixi:
 
 ```bash
 pixi run cat-watcher status              # show service health
