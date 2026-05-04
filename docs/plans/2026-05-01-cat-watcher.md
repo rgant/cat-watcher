@@ -843,7 +843,34 @@ sample data.
 
 ---
 
-### Task 16: Retention Sweep
+### Task 16: Retention Sweep — DONE
+
+**Status:** core landed. 14 unit tests, 92% coverage (the misses are
+race-condition guards against rows vanishing between SELECT and per-row DELETE).
+All four linters clean, pylint 10.00/10.
+
+**Implementation surface:**
+
+- `sweep(*, engine, storage_root, retention, now) -> RetentionReport` — one
+  entry point that runs all five sub-passes (DB-driven clip removal, orphan
+  filesystem sweep, empty date-directory cleanup, `agent_starts` prune,
+  `alerts_sent` prune) and returns a frozen `RetentionReport` with per-pass
+  counts.
+- **Pass 1:** queries aged Clip IDs, then for each ID opens its own transaction
+  and deletes the row before unlinking the files. Row-first ordering guarantees
+  a crash leaves only an orphan file (handled by pass 2), never a dangling DB
+  row.
+- **Pass 2:** loads the surviving `Clip.file_path` + `Clip.thumb_path` set once,
+  walks `<storage_root>/clips` and `<storage_root>/thumbs` via `rglob`, and
+  unlinks files whose mtime is past the cutoff and whose relative path is not in
+  the survivor set. O(N + M).
+- **Empty date-dir cleanup:** `rmdir` each `<top>/<slug>/<YYYY-MM-DD>/`
+  directory; raises on non-empty (intentional — caught and skipped).
+- **`agent_starts` / `alerts_sent` pruning:** independent `DELETE WHERE` per
+  table using the corresponding cutoff from `RetentionConfig`.
+- **Resilience:** every filesystem operation is wrapped — unlink failures and
+  stat failures log WARNING and continue; the sweep never raises through to the
+  caller.
 
 **Files:**
 
