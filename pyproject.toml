@@ -140,8 +140,9 @@ cmd = """\
   mypy "$@" || e=$?
   pylint "$@" || e=$?
   find scripts tests/fixtures -name "*.sh" -type f -exec shellcheck "{}" + || e=$?
-  actionlint || e=$?
-  zizmor .github/workflows || e=$?
+  # Uncomment when we have GitHub Actions
+  # actionlint || e=$?
+  # zizmor .github/workflows || e=$?
   exit $e' _ {{ paths }}\
   """
 args = [ { arg = "paths", default = "." } ]
