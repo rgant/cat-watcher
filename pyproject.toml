@@ -46,7 +46,7 @@ dev = [
 
 [tool.pixi.dependencies]
 python = "3.14.*"
-ffmpeg = ">=8.1.0,<9"
+ffmpeg = ">=8.1.1,<9"
 numpy = ">=2.4.3,<3"
 opencv = ">=4.13.0,<5"
 pytorch = ">=2.10.0,<3"
