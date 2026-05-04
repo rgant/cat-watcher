@@ -109,7 +109,7 @@ cmd = """\
 args = [ { arg = "path", default = "." }, { arg = "dprint_cmd", default = "fmt --allow-no-files" } ]
 description = "dprint with the directory-recursion glob fix; pass dprint_cmd=check for dry-run"
 [tool.pixi.tasks.fmt-sh]
-cmd = "shfmt --write scripts/"
+cmd = "shfmt --write scripts/ tests/fixtures/"
 description = "Format shell scripts with shfmt"
 [tool.pixi.tasks.fmt-toml]
 cmd = "pyproject-fmt --no-print-diff pyproject.toml"
@@ -118,7 +118,7 @@ description = "Format pyproject.toml with pyproject-fmt"
 cmd = """\
   bash -c 'e=0
   pyproject-fmt --no-print-diff pyproject.toml || e=$?
-  shfmt --write scripts/ || e=$?
+  shfmt --write scripts/ tests/fixtures/ || e=$?
   markdownlint --fix . || e=$?
   ruff check --fix --silent "$@" || e=$?
   ruff format "$@" || e=$?
@@ -139,7 +139,7 @@ cmd = """\
   basedpyright "$@" || e=$?
   mypy "$@" || e=$?
   pylint "$@" || e=$?
-  shellcheck scripts/*.sh || e=$?
+  find scripts tests/fixtures -name "*.sh" -type f -exec shellcheck "{}" + || e=$?
   actionlint || e=$?
   zizmor .github/workflows || e=$?
   exit $e' _ {{ paths }}\
@@ -155,8 +155,8 @@ cmd = """\
   """
 description = "Lint GitHub Actions workflows (actionlint + zizmor)"
 [tool.pixi.tasks.lint-sh]
-cmd = "shellcheck scripts/*.sh"
-description = "Lint shell scripts with shellcheck"
+cmd = "bash -c \"find scripts tests/fixtures -name '*.sh' -type f -exec shellcheck '{}' +\""
+description = "Lint shell scripts with shellcheck (across scripts/ and tests/fixtures/)"
 [tool.pixi.tasks.outdated]
 cmd = "pixi update --dry-run"
 description = "Show what would be updated"
@@ -523,7 +523,9 @@ collapse_tables = [ "project.authors" ]
 [tool.mypy]
 disallow_any_unimported = true
 files = [ "src", "tests" ]
-mypy_path = "src"
+# ``tests/fixtures`` mirrors ``[tool.pytest.ini_options].pythonpath`` so mypy resolves
+# ``from make_clip import make_clip`` in tests/conftest.py the same way pytest does.
+mypy_path = [ "src", "tests/fixtures" ]
 show_column_numbers = true
 strict = true
 warn_unreachable = true
@@ -542,6 +544,10 @@ addopts = [
   "-ra",                     # Show summary of all test outcomes (passed, failed, skipped, etc.)
 ]
 testpaths = [ "tests" ]
+# Put tests/fixtures on sys.path so conftest can ``from make_clip import make_clip`` directly,
+# bypassing the ``tests`` namespace (which a third-party package — ultralytics — shadows by
+# shipping its own ``tests/__init__.py`` in site-packages).
+pythonpath = [ "tests/fixtures" ]
 filterwarnings = [
   "error", # Treat warnings as errors to catch issues early
 ]
@@ -559,12 +565,21 @@ source = [ "src" ]
 omit = [ "**/test_*.py", "**/tests/*" ]
 
 [tool.basedpyright]
-allowedUntypedLibraries = [ "_pytest.pytester" ]
+# Pixi-managed virtualenv; required so basedpyright can resolve installed dependencies.
+venvPath = ".pixi/envs/"
+venv = "default"
+# Disabled because ruff's ISC001 is also ignored project-wide (it conflicts with the formatter).
+# Both tools agree to not flag implicit string concatenation.
 reportImplicitStringConcatenation = false
+# Mirrors ``[tool.pytest.ini_options].pythonpath`` so basedpyright resolves
+# ``from make_clip import make_clip`` in tests/conftest.py the same way pytest does at runtime.
+extraPaths = [ "tests/fixtures" ]
 exclude = [
   "**/.*",
   "**/__pycache__",
 ]
+# Tests may access ``_underscored`` private members of the modules they exercise; this is the
+# basedpyright analog of ruff's ``SLF001`` per-file-ignore for tests.
 executionEnvironments = [
   { root = "tests", reportPrivateUsage = "none" },
 ]
