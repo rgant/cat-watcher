@@ -560,7 +560,21 @@ typed-result data class to ensure consistency across the application.
 
 ---
 
-### Task 13: Notifier — Email + macOS Notifications
+### Task 13: Notifier — Email + macOS Notifications — DONE
+
+**Status:** core landed. 11 tests, all four linters clean, basedpyright baseline
+now captures the unavoidable `MagicMock`-attribute `reportAny` warnings (created
+at `.basedpyright/baseline.json`). The lint task in `pyproject.toml` had
+`actionlint` and `zizmor` commented out pending creation of
+`.github/workflows/`.
+
+**Test-double approach:** `create_autospec(smtplib.SMTP)` for the constructor
+(validates the call signature), `MagicMock(spec=smtplib.SMTP)` for the instance
+(the SMTP class lacks class-level annotations for the attributes set in
+`__init__`, so `create_autospec(...,
+instance=True)` rejects them).
+`subprocess.CompletedProcess` is constructed as a real object; `subprocess.run`
+is patched via `create_autospec(subprocess.run)`.
 
 **Files:**
 
@@ -613,7 +627,59 @@ typed-result data class to ensure consistency across the application.
 
 ---
 
-### Task 14: Amcrest Client — Lazy Iteration and Streaming
+### Task 14: Amcrest Client — Lazy Iteration and Streaming — DONE
+
+**Status:** core landed. 19 tests, 99% coverage on
+`src/cat_watcher/amcrest_client.py`, all four linters clean, pylint 10.00/10.
+PR-ready pending commit.
+
+**Deviations from the original plan (verified against
+`docs/resources/Amcrest-HTTP_API_V3.26.pdf`):**
+
+- **`factory.create` method is GET, not POST.** The original plan and the
+  bad-plan-phase-2 sketch both used POST; the PDF's "Create a media files
+  finder" entry documents GET. Implementation + tests now use GET.
+- **`condition.Channel="1"`, not `"0"`.** PDF documents the channel index as
+  "starting from 1" with sample requests using `condition.Channel=1`. Our
+  cameras are single-channel units, so 1 is the correct value; if multi-channel
+  devices arrive later, add a `CameraConfig.channel` field with default 1.
+- **Constructor takes `CameraSecrets` separately from `CameraConfig`.** The
+  original plan pre-dates the Task 8c retrospective that moved
+  `username`/`password` out of `CameraConfig` into a shared `CameraSecrets`. The
+  client signature now reflects that:
+  `AmcrestClient(camera, secrets, *, camera_tz, retry_attempts=3, retry_delay_seconds=10.0)`.
+- **Exception name `CameraUnreachableError` (not `CameraUnreachable`).** Renamed
+  for consistency with `CameraAuthError`/`CameraAPIError` and to satisfy ruff
+  `N818`. Other three exception names are unchanged from the plan.
+- **Timezone resolution lives in the caller, not the client.** The plan's TZ
+  semantics (`camera_config.timezone or web.display_timezone`) are implemented
+  as a caller responsibility — `AmcrestClient` takes a pre-resolved `ZoneInfo`
+  and converts. The "display_timezone fallback" test the plan calls for
+  therefore moves to `test_poller.py` in Task 17, where the caller actually
+  performs that resolution.
+
+**Documented camera invariant (what we can and can't claim):** the Amcrest API
+spec documents `StartTime`/`EndTime` only as bare `"Y-M-D H-m-S"` strings with
+no explicit timezone metadata. The camera does maintain TZ config (readable via
+`configManager.cgi?action=getConfig&name=NTP` → `table.NTP.TimeZone` /
+`table.NTP.TimeZoneDesc`), strongly implying recordings are camera-local time,
+but this is inferred rather than asserted in the spec. The umbrella CLI's
+`test-cameras` clock-drift check (Task 25) calls that endpoint to verify
+operator setup.
+
+**5xx-during-download retry — bug found and fixed.** Initial implementation
+called `response.raise_for_status()` in the streaming path, which raises
+`HTTPStatusError` on 5xx; that exception was not in the retry tuple, so 5xx
+leaked out as an HTTPStatusError instead of being retried. Fixed by explicitly
+checking `status_code >= 500` in `_stream_to_part` and raising
+`httpx.RemoteProtocolError` (already in the retry tuple), mirroring how
+`_request_with_retries` handles 5xx for the search-flow.
+
+**Test isolation note:** alembic's `env.py` calls
+`logging.config.fileConfig(...)` which disables existing loggers by default. The
+`test_iter_recordings_destroy_failure_logged_not_raised` test re-enables
+`cat_watcher.amcrest_client`'s logger before asserting on caplog so it passes
+regardless of test ordering.
 
 **Files:**
 

@@ -1681,7 +1681,7 @@ packages:
 - pypi: ./
   name: cat-watcher
   version: 0.1.0
-  sha256: cbe0d8eb7b84a246647106ce1e3ed4698f7d2d7dc428dd9c67d8f0d6bc8a0929
+  sha256: d061be9b0294272e1cb52fe61fc19bac700d59ba1b1eb45f5de2f6b5b57e2ec4
   requires_dist:
   - alembic>=1.18.4,<2
   - fastapi[standard]>=0.136.1,<0.137
