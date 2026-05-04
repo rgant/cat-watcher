@@ -53,7 +53,7 @@ class CameraConfig(BaseModel, extra="forbid"):
 class DetectorConfig(BaseModel, extra="forbid"):
     """YOLO detector tuning."""
 
-    model: str = "yolov11n.pt"
+    model: str = "yolo11n.pt"
     confidence_threshold: Annotated[float, Field(ge=0.0, le=1.0)] = 0.35
     frames_to_sample: Annotated[int, Field(ge=1)] = 5
 

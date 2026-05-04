@@ -50,6 +50,7 @@ ffmpeg = ">=8.1.1,<9"
 numpy = ">=2.4.3,<3"
 opencv = ">=4.13.0,<5"
 pytorch = ">=2.10.0,<3"
+torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
 ultralytics = ">=8.4.46,<9"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }

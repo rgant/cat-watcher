@@ -63,7 +63,7 @@ def _make_clip(camera: Camera, *, source_filename: str = "2026/05/03/12.00.00-12
         max_score=0.92,
         frames_sampled=5,
         frames_with_cat=3,
-        detector_version="yolov11n.pt@deadbeef",
+        detector_version="yolo11n.pt@deadbeef",
         ingested_at=datetime(2026, 5, 3, 12, 1, 0, tzinfo=UTC),
     )
 

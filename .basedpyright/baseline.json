@@ -1,5 +1,15 @@
 {
     "files": {
+        "./tests/unit/test_detector.py": [
+            {
+                "code": "reportAny",
+                "range": {
+                    "startColumn": 8,
+                    "endColumn": 13,
+                    "lineCount": 1
+                }
+            }
+        ],
         "./tests/unit/test_notifier.py": [
             {
                 "code": "reportAny",

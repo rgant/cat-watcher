@@ -1,6 +1,5 @@
 """Shared pytest fixtures for the cat-watcher test suite."""
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,17 +9,15 @@ from cat_watcher.db import Base, create_engine
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
     from sqlalchemy.engine import Engine
 
 
-_CAT_IMAGE = Path(__file__).parent / "fixtures" / "cat_image.jpg"
-
-
 @pytest.fixture(scope="session")
 def synthetic_clip_path() -> Path:
-    """A 2-second H.264 MP4 of the calico-kitten fixture image; built once per pytest session."""
-    return make_clip(_CAT_IMAGE)
+    """A 2-second H.264 MP4 synthesized via ffmpeg's testsrc filter; built once per session."""
+    return make_clip()
 
 
 @pytest.fixture

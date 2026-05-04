@@ -25,7 +25,7 @@ _VALID_TOML = textwrap.dedent("""\
     port = 80
 
     [detector]
-    model = "yolov11n.pt"
+    model = "yolo11n.pt"
     confidence_threshold = 0.35
     frames_to_sample = 5
 
@@ -466,7 +466,7 @@ def test_empty_cameras_list_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         log_level = "INFO"
 
         [detector]
-        model = "yolov11n.pt"
+        model = "yolo11n.pt"
         confidence_threshold = 0.35
         frames_to_sample = 5
 
