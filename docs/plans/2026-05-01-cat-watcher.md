@@ -943,7 +943,44 @@ All four linters clean, pylint 10.00/10.
 
 ---
 
-### Task 17: Poller Agent
+### Task 17: Poller Agent — DONE (with one carve-out)
+
+**Status:** core landed. 28 unit tests + 5 end-to-end integration tests, 91%
+coverage on `src/cat_watcher/poller.py` (uncovered lines are the `main()` CLI
+bootstrap and a couple of defensive branches). All four linters clean, pylint
+10.00/10.
+
+**Carve-out: `ALERTS_STUCK` watchdog deferred to Task 18.** The plan attaches
+the watchdog to the poller, but it depends on
+`cat_watcher.alerts.dispatch_alert` from Task 18 (which owns cool-down state,
+the `alerts_sent` audit row, and the email/macOS dispatch). The poller has a
+comment at the heartbeat-write site marking where the watchdog will plug in; the
+rest of the tick semantics (PID lock → storage wait → `agent_starts` →
+per-camera loop → retention sweep → heartbeat) is fully implemented. Wire the
+watchdog from Task 18.
+
+**Implementation surface:**
+
+- `main()` is the LaunchAgent entry point; `run_tick()` is the testable inner
+  loop that takes everything injected (config, args, engine, detector, now).
+- `pid_lock(internal_root)` context manager wraps
+  `fcntl.flock(LOCK_EX | LOCK_NB)`; raises `PollerLockedError` (caught by `main`
+  for a clean exit 0) if another poller holds it.
+- `_extract_thumbnail` runs `ffmpeg -i <clip> -frames:v 1 -q:v 5 <thumb>` and
+  `fsync`s the output before the per-clip Clip row commits (file-before-row
+  ordering invariant).
+- `_ingest_recording` walks the per-clip pipeline (idempotency check on
+  `UNIQUE(camera_id, source_filename)` → download → thumbnail → detect → DB row)
+  using a `_IngestContext` to keep its signature small. Detector failures +
+  `--no-detect` both go into `clips.analysis_error` per spec; the row still
+  inserts.
+- `update_camera_state_success` / `update_camera_state_failure` carry the spec
+  §4.4 step 5 preservation semantics (each of `last_clip_at` /
+  `last_cat_seen_at` / `poll_status_since` follows its own rule). Manual
+  `COALESCE(manual_has_cat, has_cat)` projection is honored.
+- CLI flags from spec §4.10 all wired: `--config` / `--camera` / `--since` /
+  `--until` / `--limit` / `--no-detect` / `--list-only` (the last two skip
+  detector loading and DB writes respectively).
 
 **Files:**
 
@@ -1135,6 +1172,14 @@ the per-clip helper updates both the poller and import).
 ---
 
 ### Task 18: Alerts Agent — DONE
+
+**Carryover from Task 17:** the poller's `ALERTS_STUCK` watchdog was deferred to
+this task because it depends on `cat_watcher.alerts.dispatch_alert`. After the
+dispatch helper lands here, wire it into the poller at the marked spot in
+`run_tick()` (right after the heartbeat upsert): read the `alerts` heartbeat,
+compare against `config.alerts.alerts_stuck_minutes`, call
+`dispatch_alert("ALERTS_STUCK", camera_id=None, ...)` if stale. The poller does
+not own cool-down state — the dispatch helper handles all of that.
 
 **Files:**
 

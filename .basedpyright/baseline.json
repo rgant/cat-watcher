@@ -1,5 +1,23 @@
 {
     "files": {
+        "./tests/integration/test_poller_end_to_end.py": [
+            {
+                "code": "reportAny",
+                "range": {
+                    "startColumn": 4,
+                    "endColumn": 19,
+                    "lineCount": 1
+                }
+            },
+            {
+                "code": "reportAny",
+                "range": {
+                    "startColumn": 4,
+                    "endColumn": 19,
+                    "lineCount": 1
+                }
+            }
+        ],
         "./tests/unit/test_detector.py": [
             {
                 "code": "reportAny",
@@ -208,6 +226,24 @@
                 "range": {
                     "startColumn": 4,
                     "endColumn": 12,
+                    "lineCount": 1
+                }
+            }
+        ],
+        "./tests/unit/test_poller.py": [
+            {
+                "code": "reportAny",
+                "range": {
+                    "startColumn": 8,
+                    "endColumn": 28,
+                    "lineCount": 1
+                }
+            },
+            {
+                "code": "reportAny",
+                "range": {
+                    "startColumn": 8,
+                    "endColumn": 28,
                     "lineCount": 1
                 }
             }
