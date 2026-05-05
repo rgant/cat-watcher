@@ -44,13 +44,14 @@ from cat_watcher.detector import Detector, DetectorError
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 
     from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
     from cat_watcher.amcrest_client import Recording
     from cat_watcher.config import CameraConfig
+
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ def upsert_heartbeat(session: Session, *, agent_name: str, now: datetime) -> Non
 # --- thumbnail extraction -------------------------------------------------------------------------
 
 
-def _extract_thumbnail(clip_path: Path, thumb_path: Path) -> None:
+def extract_thumbnail(clip_path: Path, thumb_path: Path) -> None:
     """Extract the first frame of ``clip_path`` to ``thumb_path`` as a JPEG, then ``fsync`` it.
 
     Per spec §4.4 step 4: thumbnails are fsynced before the ``clips`` row commits so the web UI
@@ -200,7 +201,7 @@ def _extract_thumbnail(clip_path: Path, thumb_path: Path) -> None:
 # --- per-clip ingestion ---------------------------------------------------------------------------
 
 
-def _relative_paths_for(camera_name: str, start_ts_local: datetime, suffix_mp4: str = "mp4", suffix_jpg: str = "jpg") -> tuple[str, str]:
+def relative_paths_for(camera_name: str, start_ts_local: datetime, suffix_mp4: str = "mp4", suffix_jpg: str = "jpg") -> tuple[str, str]:
     """Compute the canonical ``clips/<slug>/<YYYY-MM-DD>/<HHMMSS>.mp4`` + thumbs sibling.
 
     Both paths use the camera-local date and time so the on-disk layout matches what the operator
@@ -214,7 +215,7 @@ def _relative_paths_for(camera_name: str, start_ts_local: datetime, suffix_mp4: 
     )
 
 
-def _detection_fields_for(detector: Detector | None, clip_full: Path) -> dict[str, object]:
+def detection_fields_for(detector: Detector | None, clip_full: Path) -> dict[str, object]:
     """Run the detector (or substitute the ``--no-detect`` markers) and return the Clip kwargs."""
     if detector is None:
         return {
@@ -251,8 +252,8 @@ def _detection_fields_for(detector: Detector | None, clip_full: Path) -> dict[st
 
 
 @dataclass(frozen=True)
-class _IngestContext:
-    """Bundle of per-camera state passed into ``_ingest_recording`` to keep its signature small."""
+class IngestContext:
+    """Bundle of per-camera state shared by the poller and ``import_local`` per-clip pipelines."""
 
     engine: Engine
     storage_root: Path
@@ -263,37 +264,47 @@ class _IngestContext:
     now: datetime
 
 
-def _ingest_recording(rec: Recording, *, client: AmcrestClient, ctx: _IngestContext) -> Clip | None:
-    """Download + thumbnail + detect + insert. Returns the Clip on success, None if duplicate."""
+def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible per-clip contract (identity + IO + ctx)
+    *,
+    source_filename: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    materialize_clip: Callable[[Path], None],
+    materialize_thumb: Callable[[Path, Path], None],
+    ctx: IngestContext,
+) -> Clip | None:
+    """Run the per-clip pipeline shared by the poller and ``import_local``.
+
+    Steps: duplicate-check (idempotent on ``(camera_id, source_filename)``) -> compute canonical
+    paths + mkdir -> ``materialize_clip(clip_full)`` -> ``materialize_thumb(clip_full, thumb_full)``
+    -> detect -> insert ``clips`` row. The materializer callbacks must complete (with fsync) before
+    this function inserts the row, preserving file-before-row ordering per spec §4.4.
+    """
     with get_session(ctx.engine) as session:
         existing = session.scalar(
-            select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == rec.source_filename),
+            select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == source_filename),
         )
     if existing is not None:
-        logger.info("skip duplicate: camera=%s source=%s", ctx.camera_name, rec.source_filename)
+        logger.info("skip duplicate: camera=%s source=%s", ctx.camera_name, source_filename)
         return None
 
-    local_dt = rec.start_ts.astimezone(ctx.camera_tz)
-    rel_clip, rel_thumb = _relative_paths_for(ctx.camera_name, local_dt)
+    local_dt = start_ts.astimezone(ctx.camera_tz)
+    rel_clip, rel_thumb = relative_paths_for(ctx.camera_name, local_dt)
     clip_full = ctx.storage_root / rel_clip
     thumb_full = ctx.storage_root / rel_thumb
     clip_full.parent.mkdir(parents=True, exist_ok=True)
     thumb_full.parent.mkdir(parents=True, exist_ok=True)
 
-    # Download (Amcrest client fsyncs the .part before atomic rename — see Task 14).
-    client.download_recording(rec.camera_path, dest=clip_full)
-    # Thumbnail + fsync.
-    _extract_thumbnail(clip_full, thumb_full)
-    # Detector outcome (real result or no-detect / error markers).
-    detect_kwargs = _detection_fields_for(ctx.detector, clip_full)
+    materialize_clip(clip_full)
+    materialize_thumb(clip_full, thumb_full)
+    detect_kwargs = detection_fields_for(ctx.detector, clip_full)
 
-    duration = (rec.end_ts - rec.start_ts).total_seconds()
     clip = Clip(
         camera_id=ctx.cam_id,
-        source_filename=rec.source_filename,
-        start_ts=rec.start_ts,
-        end_ts=rec.end_ts,
-        duration_seconds=duration,
+        source_filename=source_filename,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        duration_seconds=(end_ts - start_ts).total_seconds(),
         file_path=rel_clip,
         thumb_path=rel_thumb,
         file_size_bytes=clip_full.stat().st_size,
@@ -303,6 +314,23 @@ def _ingest_recording(rec: Recording, *, client: AmcrestClient, ctx: _IngestCont
     with get_session(ctx.engine) as session:
         session.add(clip)
     return clip
+
+
+def _ingest_recording(rec: Recording, *, client: AmcrestClient, ctx: IngestContext) -> Clip | None:
+    """Poller per-clip wrapper: download via the camera client, then run the shared pipeline."""
+
+    def download(dest: Path) -> None:
+        # Amcrest client fsyncs the .part before atomic rename — see Task 14.
+        client.download_recording(rec.camera_path, dest=dest)
+
+    return materialize_and_persist_clip(
+        source_filename=rec.source_filename,
+        start_ts=rec.start_ts,
+        end_ts=rec.end_ts,
+        materialize_clip=download,
+        materialize_thumb=extract_thumbnail,
+        ctx=ctx,
+    )
 
 
 # --- per-camera tick ------------------------------------------------------------------------------
@@ -360,7 +388,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
     """
     camera_tz = ZoneInfo(cam_cfg.timezone or config.web.display_timezone)
     since, until = _resolve_window(db_camera=db_camera, args=args, retention_days=config.retention.clip_days, now=now)
-    ctx = _IngestContext(
+    ctx = IngestContext(
         engine=engine,
         storage_root=config.storage_root,
         camera_name=cam_cfg.name,
@@ -448,7 +476,7 @@ def _parse_iso_datetime(raw: str) -> datetime:
     return parsed
 
 
-def _ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
+def ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
     """Return the ``Camera`` row for ``cam_cfg.name``, creating it if absent."""
     with get_session(engine) as session:
         existing = session.scalar(select(Camera).where(Camera.name == cam_cfg.name))
@@ -473,7 +501,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
         raise PollerError(msg)
 
     for cam_cfg in cameras_to_poll:
-        db_camera = _ensure_db_camera(engine, cam_cfg)
+        db_camera = ensure_db_camera(engine, cam_cfg)
         try:
             outcome = _poll_camera(
                 config=config,

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from cat_watcher.config import EmailRulesConfig, EmailSecrets, MacOsRulesConfig
 
+
 logger = logging.getLogger(__name__)
 
 _SMTP_TIMEOUT_SECONDS = 30

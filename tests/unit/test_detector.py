@@ -24,11 +24,11 @@ _DEFAULT_THRESHOLD = 0.35
 
 def _fake_results(*, cls_ids: list[float], confidences: list[float], boxes: list[list[float]]) -> list[MagicMock]:
     """Build a one-element list mimicking ``ultralytics.engine.results.Results``."""
-    fake_boxes: MagicMock = MagicMock(spec=Boxes)
+    fake_boxes = MagicMock(spec=Boxes)
     fake_boxes.cls = np.asarray(cls_ids)
     fake_boxes.conf = np.asarray(confidences)
     fake_boxes.xyxy = np.asarray(boxes).reshape(-1, 4) if boxes else np.empty((0, 4))
-    fake: MagicMock = MagicMock(spec=Results)
+    fake = MagicMock(spec=Results)
     fake.boxes = fake_boxes
     return [fake]
 
@@ -41,7 +41,7 @@ def _make_detector(
     confidence_threshold: float = _DEFAULT_THRESHOLD,
 ) -> tuple[Detector, MagicMock]:
     """Build a Detector with an injected, autospec'd YOLO mock and return both."""
-    mock_model: MagicMock = MagicMock(spec=YOLO)
+    mock_model = MagicMock(spec=YOLO)
     if side_effect is not None:
         mock_model.side_effect = side_effect
     elif return_value is not None:
@@ -218,7 +218,7 @@ def test_detect_calls_model_with_numpy_arrays(synthetic_clip_path: Path) -> None
 
 def test_detect_skips_results_without_boxes_attribute(synthetic_clip_path: Path) -> None:
     """A Results object with ``boxes=None`` (defensive against future ultralytics versions) is skipped."""
-    no_boxes: MagicMock = MagicMock(spec=Results)
+    no_boxes = MagicMock(spec=Results)
     no_boxes.boxes = None
     detector, _ = _make_detector(return_value=[no_boxes], frames_to_sample=2)
 

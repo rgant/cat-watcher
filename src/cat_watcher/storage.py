@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+
 _INTERNAL_SUBDIRS: tuple[str, ...] = ("models", "logs")
 _STORAGE_SUBDIRS: tuple[str, ...] = ("clips", "thumbs", "backups")
 

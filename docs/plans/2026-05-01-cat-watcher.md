@@ -1098,7 +1098,23 @@ watchdog from Task 18.
 
 ---
 
-### Task 17b: Local SD-card import sub-command
+### Task 17b: Local SD-card import sub-command — DONE
+
+**Status (2026-05-04):** implemented and committed. The umbrella `cat-watcher`
+CLI now exposes `import-local`. Files added: `src/cat_watcher/import_local.py`
+(SD-card walk + per-clip pipeline), `src/cat_watcher/__main__.py` (umbrella
+scaffold; Task 25 will add the remaining sub-commands),
+`tests/unit/test_import_local.py` (20 unit tests covering filename parser, jpg
+locator, scan), `tests/integration/test_import_local_end_to_end.py` (9
+integration tests covering happy path, `--no-detect`, idempotency, ffmpeg thumb
+fallback, orphan/stray skipping, `--limit`, lock contention, unknown camera,
+per-clip error isolation), `tests/unit/test_cli.py` (10 tests for the umbrella
+scaffold + handler exit codes). Renamed five poller helpers from `_foo` to `foo`
+so `import_local` could share them as a public API (`extract_thumbnail`,
+`relative_paths_for`, `detection_fields_for`, `IngestContext`,
+`ensure_db_camera`); extracted `materialize_and_persist_clip` so the poller and
+`import_local` share the file-before-row + idempotent insert pipeline literally
+rather than structurally.
 
 **Added during planning of Phase 1 (2026-05-03)** to handle pre-existing camera
 SD-card snapshots the operator wants ingested without waiting for the poller to

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from cat_watcher.config import RetentionConfig
 
+
 logger = logging.getLogger(__name__)
 
 _CLIPS_DIR = "clips"

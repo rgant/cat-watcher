@@ -16,6 +16,7 @@ from cat_watcher.storage import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+
 _INTERNAL_SUBDIRS = ("models", "logs")
 _STORAGE_SUBDIRS = ("clips", "thumbs", "backups")
 

@@ -12,9 +12,6 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
 from cat_watcher.amcrest_client import (
     AmcrestClient,
     CameraAPIError,
@@ -23,6 +20,10 @@ from cat_watcher.amcrest_client import (
     Recording,
 )
 from cat_watcher.config import CameraConfig, CameraSecrets
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 
 _BASE_URL = "http://cam.example.com:80"
 _FIND_URL = f"{_BASE_URL}/cgi-bin/mediaFileFind.cgi"

@@ -19,6 +19,7 @@ from alembic import op
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+
 # revision identifiers, used by Alembic.
 revision: str = "fda18cd0b832"
 down_revision: str | Sequence[str] | None = None

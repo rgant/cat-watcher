@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from cat_watcher.config import CameraConfig, CameraSecrets
 
+
 logger = logging.getLogger(__name__)
 
 _FIND_PAGE_SIZE = 100

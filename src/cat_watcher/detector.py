@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]
     from ultralytics.engine.results import Results
 
+
 logger = logging.getLogger(__name__)
 
 _COCO_CAT_CLASS_ID = 15

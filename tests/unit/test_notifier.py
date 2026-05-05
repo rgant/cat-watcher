@@ -39,7 +39,7 @@ def _patch_smtp(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     The real SMTP class returns ``self`` from ``__enter__``; the instance mock has to do the same so
     ``with smtplib.SMTP(...) as smtp:`` rebinds to the object the assertions inspect.
     """
-    smtp_instance: MagicMock = MagicMock(spec=smtplib.SMTP)
+    smtp_instance = MagicMock(spec=smtplib.SMTP)
     smtp_instance.__enter__.return_value = smtp_instance
     smtp_instance.__exit__.return_value = False
     ctor: MagicMock = create_autospec(smtplib.SMTP, return_value=smtp_instance)

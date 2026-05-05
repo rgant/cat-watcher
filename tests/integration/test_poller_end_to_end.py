@@ -55,7 +55,7 @@ def _seed_amcrest_mocks(payload: bytes) -> None:
 
 def _make_detector(*, has_cat: bool) -> MagicMock:
     """A Detector mock that returns a canned DetectionResult."""
-    detector: MagicMock = MagicMock(spec=Detector)
+    detector = MagicMock(spec=Detector)
     detector.version = "yolo11n.pt@deadbeef"
     detector.detect.return_value = DetectionResult(
         has_cat=has_cat,
@@ -340,7 +340,7 @@ def test_full_tick_records_analysis_error_when_detector_fails(
     Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
-    detector: MagicMock = MagicMock(spec=Detector)
+    detector = MagicMock(spec=Detector)
     detector.version = "yolo11n.pt@deadbeef"
     detector.detect.side_effect = DetectorError("ffprobe died")
 

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+
 # In an MP4 file the first top-level box is ``ftyp``: 4-byte big-endian box length, then the 4-byte
 # ASCII box type ``ftyp`` at byte offset 4. ffmpeg's libx264 output reliably emits this.
 _FTYP_OFFSET = 4

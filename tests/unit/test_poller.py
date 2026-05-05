@@ -20,13 +20,13 @@ from cat_watcher.poller import (
     PollerArgs,
     PollerError,
     PollerLockedError,
-    _detection_fields_for,
-    _extract_thumbnail,
     _limited,
     _parse_args,
-    _relative_paths_for,
     _resolve_window,
+    detection_fields_for,
+    extract_thumbnail,
     pid_lock,
+    relative_paths_for,
     run_tick,
     update_camera_state_failure,
     update_camera_state_success,
@@ -315,13 +315,13 @@ def test_pid_lock_raises_when_already_held(tmp_path: Path, monkeypatch: pytest.M
         pass
 
 
-# --- _relative_paths_for --------------------------------------------------------------------------
+# --- relative_paths_for --------------------------------------------------------------------------
 
 
 def test_relative_paths_for_uses_camera_local_date_and_time() -> None:
     """The on-disk layout matches the camera-local clock (operator-friendly date dirs)."""
     local_dt = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
-    rel_clip, rel_thumb = _relative_paths_for("pantry", local_dt)
+    rel_clip, rel_thumb = relative_paths_for("pantry", local_dt)
     assert rel_clip == "clips/pantry/2026-05-01/064704.mp4"
     assert rel_thumb == "thumbs/pantry/2026-05-01/064704.jpg"
 
@@ -373,24 +373,24 @@ def test_resolve_window_args_until_overrides_now(db_engine: Engine) -> None:
     assert until == explicit_until
 
 
-# --- _extract_thumbnail ---------------------------------------------------------------------------
+# --- extract_thumbnail ---------------------------------------------------------------------------
 
 
 def test_extract_thumbnail_produces_valid_jpeg(synthetic_clip_path: Path, tmp_path: Path) -> None:
     """Real ffmpeg invocation against the synthetic clip yields a non-empty JPEG."""
     thumb = tmp_path / "thumb.jpg"
-    _extract_thumbnail(synthetic_clip_path, thumb)
+    extract_thumbnail(synthetic_clip_path, thumb)
     assert thumb.is_file()
     head = thumb.read_bytes()[:3]
     assert head == b"\xff\xd8\xff", f"expected JPEG magic bytes, got {head!r}"
 
 
-# --- _detection_fields_for ------------------------------------------------------------------------
+# --- detection_fields_for ------------------------------------------------------------------------
 
 
 def _make_mock_detector(*, has_cat: bool, version: str = "test@deadbeef", side_effect: BaseException | None = None) -> MagicMock:
     """Build a Detector mock with a canned ``detect()`` return or side effect."""
-    mock_detector: MagicMock = MagicMock(spec=Detector)
+    mock_detector = MagicMock(spec=Detector)
     mock_detector.version = version
     if side_effect is not None:
         mock_detector.detect.side_effect = side_effect
@@ -408,9 +408,7 @@ def _make_mock_detector(*, has_cat: bool, version: str = "test@deadbeef", side_e
 
 def test_detection_fields_for_returns_no_detect_markers_when_detector_is_none(tmp_path: Path) -> None:
     """``--no-detect`` (detector=None) yields the standard skip markers stored in the Clip row."""
-    from cat_watcher.poller import _detection_fields_for
-
-    fields = _detection_fields_for(None, tmp_path / "anyfile.mp4")
+    fields = detection_fields_for(None, tmp_path / "anyfile.mp4")
 
     assert fields["analysis_error"] == "skipped: --no-detect"
     assert fields["has_cat"] is False
@@ -420,7 +418,7 @@ def test_detection_fields_for_returns_no_detect_markers_when_detector_is_none(tm
 def test_detection_fields_for_records_detector_error(tmp_path: Path) -> None:
     """A DetectorError during detect() is captured into ``analysis_error`` (clip still inserts)."""
     detector = _make_mock_detector(has_cat=False, side_effect=DetectorError("ffprobe died"))
-    fields = _detection_fields_for(detector, tmp_path / "anyfile.mp4")
+    fields = detection_fields_for(detector, tmp_path / "anyfile.mp4")
 
     assert fields["has_cat"] is False
     assert fields["analysis_error"] is not None
@@ -442,7 +440,7 @@ def test_update_state_failure_raises_when_camera_missing(db_engine: Engine) -> N
         update_camera_state_failure(session, camera_id=99999, status=PollStatus.ERROR, error="x", now=_NOW)
 
 
-# --- _extract_thumbnail error paths --------------------------------------------------------------
+# --- extract_thumbnail error paths --------------------------------------------------------------
 
 
 def test_extract_thumbnail_raises_when_ffmpeg_missing(synthetic_clip_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,7 +452,7 @@ def test_extract_thumbnail_raises_when_ffmpeg_missing(synthetic_clip_path: Path,
     monkeypatch.setattr("cat_watcher.poller.shutil.which", missing_which)
 
     with pytest.raises(PollerError, match="ffmpeg not on PATH"):
-        _extract_thumbnail(synthetic_clip_path, tmp_path / "thumb.jpg")
+        extract_thumbnail(synthetic_clip_path, tmp_path / "thumb.jpg")
 
 
 def test_extract_thumbnail_raises_on_ffmpeg_failure(tmp_path: Path) -> None:
@@ -462,7 +460,7 @@ def test_extract_thumbnail_raises_on_ffmpeg_failure(tmp_path: Path) -> None:
     bogus = tmp_path / "not-a-video.txt"
     _ = bogus.write_text("definitely not an mp4")
     with pytest.raises(PollerError, match="thumbnail failed"):
-        _extract_thumbnail(bogus, tmp_path / "thumb.jpg")
+        extract_thumbnail(bogus, tmp_path / "thumb.jpg")
 
 
 # --- CLI parsing ---------------------------------------------------------------------------------
