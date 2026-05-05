@@ -1020,7 +1020,8 @@ watchdog from Task 18.
   (`sys.stdout.write`): one line per camera with the search window in the
   camera's IANA timezone plus an outcome ("ingested N", "no new recordings",
   "list-only complete", "tick failed"), and one line for the retention sweep.
-  The full structured-logging design (Task 26b, deferred) replaces this baseline
+  The full structured-logging design — Task 26b plus
+  `docs/specs/2026-05-05-structured-logging-design.md` — replaces this baseline
   when it lands.
 
 **Files:**
@@ -1697,11 +1698,17 @@ diagnostic and maintenance sub-commands. This satisfies the requirements for
 - **CLI Infrastructure:**
   - Use `argparse` to define the `cat-watcher` program and sub-commands.
   - Support the following sub-commands: `status`, `test-cameras`,
-    `test-notification`, `fetch-models`, `backup`, `inspect`, and
+    `test-notification`, `fetch-models`, `reanalyze`, `backup`, `inspect`, and
     `restore-backup`.
   - All sub-commands accept `--config PATH` honoring the precedence
     `--config > CAT_WATCHER_CONFIG > ./config.toml` (delegated to
     `cat_watcher.config.load_config(config_path=...)` per Task 8).
+  - **Logging:** the umbrella CLI's `main()` configures logging via
+    `setup_logging` from Task 26b (`logs/cli.jsonl` + WARNING-on-stderr
+    fallback) — see `docs/specs/2026-05-05-structured-logging-design.md` for the
+    structured-logging design and integration contract. Add `--verbose` / `-v`
+    at the umbrella-parser level to flip the level from WARNING (default) to
+    INFO (mirrors the poller's flag).
 - **Sub-command Logic:**
   - **`status`**: Query the database to display the `poll_status` and last
     activity timestamps for all cameras. Report heartbeats for the `poller`,
@@ -1734,6 +1741,30 @@ diagnostic and maintenance sub-commands. This satisfies the requirements for
     poller tick is offline-safe.
   - **`inspect <clip_id>`**: Fetch and print all metadata fields for the
     specified `Clip` ID, including filesystem existence and file size.
+  - **`reanalyze [--camera <name>] [--limit N] [--all]`**: Run detection on
+    clips that have not been successfully analyzed. Default filter:
+    `analysis_error IS NOT NULL` — picks up both `--no-detect` skip markers
+    (`"skipped: --no-detect"`) and prior detector errors. `--all` opts in to
+    re-scoring every clip regardless of state, which is the path for re-running
+    after a model upgrade. The handler:
+    1. Loads the configured `Detector` once via `Detector.from_weights(...)`
+       (same code path the poller uses); fails loudly with a clear message if
+       `<internal_root>/models/<detector.model>` is absent (operator must run
+       `fetch-models` first).
+    2. Iterates qualifying clips ordered by `start_ts ASC`, optionally filtered
+       by `--camera` and capped by `--limit`. Streams in batches to keep memory
+       bounded against operator-class clip counts (~10⁵).
+    3. For each clip: skip with a WARNING if the underlying file
+       (`<storage_root>/<clip.file_path>`) is missing; otherwise call the same
+       `detection_fields_for(detector, clip_full)` helper the poller uses and
+       update the row with the returned
+       `has_cat`/`max_score`/`frames_with_cat`/`best_box_xyxy`/
+       `detector_version`, clearing `analysis_error`.
+    4. Preserves `manual_has_cat` exactly — operator labels never get
+       overwritten by re-detection. The `COALESCE(manual_has_cat, has_cat)`
+       projection downstream handles the conflict naturally.
+    5. Reports per-camera counts at the end: rescored / skipped-missing /
+       errored.
   - **`backup`**: Proxy to `cat_watcher.backup.run_backup(...)` (same code path
     as the LaunchAgent's `cat-watcher-backup`).
   - **`restore-backup <date>`**: Safe file copy from the storage backup
@@ -1770,6 +1801,36 @@ diagnostic and maintenance sub-commands. This satisfies the requirements for
   `CAT_WATCHER_CONFIG`, which in turn overrides the default.
 - **Inspection:** Seed a `Clip` row; `inspect <id>` outputs the associated
   `source_filename` and file size.
+- **Reanalyze re-scores skip-marker clips:** seed a clip with
+  `analysis_error="skipped: --no-detect"` and a real synthetic clip file; mock
+  the `Detector` to return a known `DetectionResult` with `has_cat=True`; verify
+  the row is updated with the new `has_cat` / `max_score` / `frames_with_cat` /
+  `best_box_xyxy` / `detector_version`, and `analysis_error` is cleared.
+- **Reanalyze re-scores detector-error clips:** seed a clip with
+  `analysis_error="ffmpeg returned 1: …"`; verify it is picked up by the default
+  filter and re-scored on retry.
+- **Reanalyze leaves successfully-analyzed clips alone (default):** seed a clip
+  with `analysis_error=NULL` and a stale `detector_version`; without `--all`,
+  the row is untouched.
+- **Reanalyze --all re-scores every clip:** same setup as above, but with
+  `--all`; verify the row is re-scored and `detector_version` advances.
+- **Reanalyze preserves `manual_has_cat`:** seed a clip with
+  `manual_has_cat=True` and a skip marker; mock the Detector to return
+  `has_cat=False`; verify `manual_has_cat` is still `True` after reanalyze and
+  `has_cat` reflects the new model output.
+- **Reanalyze handles missing files:** seed a clip whose
+  `<storage_root>/<file_path>` does not exist on disk; verify the run logs a
+  WARNING, skips that clip, increments the skipped-missing counter, and
+  continues processing remaining clips without failing.
+- **Reanalyze --limit caps work:** seed N+1 qualifying clips; `--limit N`
+  processes exactly N (ordered by `start_ts ASC`).
+- **Reanalyze --camera filter:** seed clips on two cameras; `--camera
+  <name>`
+  processes only that camera's clips.
+- **Reanalyze refuses to start without weights:** point
+  `<internal_root>/models/yolo11n.pt` at a non-existent path; verify `reanalyze`
+  exits non-zero with a message instructing the operator to run `fetch-models`
+  first; no clip rows are mutated.
 - **Backups:** `backup` produces a new `.sqlite` in the configured backup
   directory.
 - **Restore-backup safety:** mock `launchctl` output indicating agents are
@@ -1865,6 +1926,291 @@ services.
   stylistic consistency.
 - **Verification:** Manual verification on the Mac mini host is required to
   ensure `launchctl` correctly interprets the bootstrapped plists.
+
+The `<agent>.stdout.log` / `<agent>.stderr.log` files redirected here are the
+pre-logging-init / unhandled-traceback fallback sinks. The structured JSONL log
+files (`<agent>.jsonl`) are owned by Task 26b and live in the same `logs/`
+directory.
+
+---
+
+### Task 26b: Structured Logging + `cat-watcher logs` Viewer
+
+**Goal:** Replace each agent's ad-hoc `logging.basicConfig(...)` baseline with a
+structured JSONL-on-disk logger and ship a small viewer sub-command so the
+operator can answer "what happened?" without parsing four LaunchAgent stdout
+files. Full design + rationale + schema tables in
+`docs/specs/2026-05-05-structured-logging-design.md`.
+
+**Files:**
+
+- Create: `src/cat_watcher/logging_setup.py` — `JsonFormatter` +
+  `setup_logging`. Pure config module; no global state beyond the standard
+  `logging` machinery it configures.
+- Create: `tests/unit/test_logging_setup.py`.
+- Create: `tests/unit/test_cli_logs.py`.
+- Modify: `src/cat_watcher/__main__.py` — replace any `logging.basicConfig` call
+  in `main()` with `setup_logging`; add the `logs` sub-command + its `--verbose`
+  flag.
+- Modify: `src/cat_watcher/poller.py` — replace the `logging.basicConfig` call
+  in `main()` with `setup_logging`.
+- Modify: future agents (`alerts.py`, `web/app.py`, `backup.py`) — same
+  `setup_logging` pattern, applied as each `main()` lands in its own task. Task
+  26b only owns the umbrella CLI and the poller; downstream tasks pick up the
+  established pattern.
+- Modify: `pyproject.toml` `[tool.pixi.tasks]` — add a `logs` task wrapping
+  `cat-watcher logs --follow`.
+
+#### Implementation Requirements (`logging_setup.py`)
+
+**`JsonFormatter(logging.Formatter)`:**
+
+- Constructor: `JsonFormatter(*, agent_name: str)`. Stores `agent_name` as an
+  attribute; `pid` is read via `os.getpid()` at format time.
+- `format(record: logging.LogRecord) -> str` returns a single-line JSON string
+  (no embedded newlines) matching the spec's schema:
+  - Required keys: `ts`, `level`, `logger`, `agent`, `pid`, `msg`.
+  - `ts`: ISO 8601 UTC with microseconds, e.g.
+    `"2026-05-05T18:42:13.123456+00:00"`. Derive from `record.created`.
+  - `msg`: the `%`-substituted formatted message (`record.getMessage()`).
+  - Optional `extras`: present when the record carries non-standard attributes
+    (i.e. anything passed via `extra={...}` or set by a `LoggerAdapter`).
+    Compute by enumerating `record.__dict__` and excluding the standard
+    `LogRecord` attribute names. If no non-standard attributes exist, omit the
+    `extras` key entirely (do not emit `{}`).
+  - On exceptions (`record.exc_info` not None or False): emit `exc_type`
+    (fully-qualified class name), `exc_msg` (`str(exc)`), and `traceback` (a
+    single string from `traceback.format_exception(...)`).
+- The single-line invariant matters: if any field contains a newline, the
+  formatter must escape it (`json.dumps(..., ensure_ascii=False)` already
+  handles this for the `\n` literal; tracebacks come out as `\n`-separated
+  strings inside the JSON, which is correct).
+- The standard-attribute set used to compute `extras` must be defined as a
+  module-level frozenset enumerating every attribute Python's `logging` module
+  sets on a `LogRecord` (see `logging.LogRecord.__init__` — `name`, `msg`,
+  `args`, `levelname`, `levelno`, `pathname`, `filename`, `module`, `exc_info`,
+  `exc_text`, `stack_info`, `lineno`, `funcName`, `created`, `msecs`,
+  `relativeCreated`, `thread`, `threadName`, `processName`, `process`,
+  `message`, `taskName`).
+
+**`setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None`:**
+
+- `(internal_root / "logs").mkdir(parents=True, exist_ok=True)` for safety
+  (matches Task 9's `ensure_storage_layout` contract; tolerates being called
+  from a script that hasn't run that yet).
+- Construct
+  `RotatingFileHandler(<internal_root>/logs/<agent_name>.jsonl,
+  maxBytes=10 * 1024 * 1024, backupCount=7, encoding="utf-8")`.
+  Both `maxBytes` and `backupCount` should live in module-level constants so
+  tests can monkey-patch them.
+- Construct `StreamHandler(sys.stderr)` with `level=logging.WARNING` so genuine
+  problems still hit the LaunchAgent's `<agent>.stderr.log` fallback even when
+  the JSONL file isn't being read.
+- Both handlers are wired with `JsonFormatter(agent_name=agent_name)` so
+  structured filtering works on either stream.
+- Call sequence: clear existing handlers from the root logger first, then attach
+  the two new handlers, then set the root logger's level to `level`. This makes
+  `setup_logging` idempotent — calling it twice results in exactly two handlers
+  attached, not four.
+- Do NOT call `logging.basicConfig`. The replacement-not-augment behavior is the
+  reason for the explicit `clear-then-attach` sequence.
+
+#### Implementation Requirements (`cat-watcher logs` viewer)
+
+CLI surface (registered as a sub-command on the umbrella parser in
+`__main__.py`):
+
+```text
+cat-watcher logs [<agent>] [--follow] [--since DURATION_OR_ISO8601]
+                 [--level LEVEL] [--camera NAME] [--grep SUBSTR]
+                 [--json] [--config PATH]
+```
+
+- `<agent>` — positional, optional. Accepts `poller`, `alerts`, `web`, `backup`,
+  `cli`. Omitted: read all four LaunchAgent files merged chronologically by
+  `ts`. `cli.jsonl` is excluded by default to keep the view focused on services
+  rather than command history; passing `cli` explicitly opts it in.
+- `--follow` / `-f` — tail-and-watch loop. Poll selected files at 0.5s cadence
+  using a remembered file-position-and-inode tuple per file so rotations are
+  handled (re-open + replay any missed bytes). Standard SIGINT/EOF exits
+  cleanly.
+- `--since DURATION_OR_ISO8601` — accepts `30m`, `1h`, `7d` (regex
+  `^\d+[smhd]$`) or any ISO 8601 the existing poller `_parse_iso_datetime`
+  helper handles. Naive datetimes are OS-local (the same convention the poller
+  uses).
+- `--level LEVEL` — drop records below this level. Compare against
+  `logging.getLevelName(record_level)`.
+- `--camera NAME` — keep only records whose `extras.camera_name == NAME`.
+  Records without that key are dropped.
+- `--grep SUBSTR` — case-insensitive substring match on `msg`.
+- `--json` — pass-through mode: emit raw JSONL lines unchanged. Useful for
+  piping into `jq`. The pretty format is the default.
+- `--config` — same as the rest of the umbrella CLI; resolves `internal_root` so
+  the viewer knows which `logs/` to read.
+
+Pretty format (default, when stdout is a TTY):
+
+```text
+2026-05-05 14:42:13  INFO   poller   ingested clip   camera=office clip_id=4217
+2026-05-05 14:42:14  WARN   alerts   rule fired      rule=INACTIVITY camera=pantry
+2026-05-05 14:42:15  ERROR  web      handler error   path=/clips/123  [+traceback]
+```
+
+- Timestamp rendered in OS-local time (the operator runs the viewer on the same
+  host they read on).
+- Columns: timestamp, level (right-padded to 5 chars; abbreviated `WARN` and
+  `ERROR` to keep them aligned), agent, msg, extras as space-separated
+  `key=value` pairs sorted by key.
+- Color when `sys.stdout.isatty()`: DEBUG=dim, INFO=default, WARNING=yellow,
+  ERROR=red, CRITICAL=red+bold. Use raw ANSI escape codes; no `rich` dep.
+- Records with exception fields render with a trailing `[+traceback]` marker.
+  The traceback itself is not expanded inline; a future `--show-traceback` flag
+  would do that.
+
+Help text on every flag (the existing umbrella CLI sub-commands are the shape to
+match).
+
+#### Integration Requirements
+
+**`poller.py:main()`:**
+
+- The current `logging.basicConfig(level=log_level, format="...")` call is
+  replaced with:
+  `setup_logging(agent_name="poller", internal_root=config.internal_root,
+  level=logging.INFO if args.verbose else logging.WARNING)`.
+- The replacement preserves the existing `--verbose` semantics (default WARNING,
+  `--verbose` raises to INFO).
+
+**`__main__.py:main()`:**
+
+- Add a `--verbose` / `-v` flag at the umbrella-parser level (mirrors the
+  poller's flag). Sub-commands inherit the parent's namespace.
+- After `load_config`, call
+  `setup_logging(agent_name="cli", internal_root=config.internal_root,
+  level=logging.INFO if args.verbose else logging.WARNING)`.
+  All sub- command output (`import-local`, `logs`, future `status` /
+  `test-cameras` / etc.) thereby logs to `cli.jsonl`.
+- Sub-command name is recorded in `extras.subcommand` so a `--grep`-equivalent
+  query against `cli.jsonl` can filter to a specific sub-command. The handler
+  responsible for that injection is the sub-command's own log calls — no central
+  machinery is required.
+- Register the `logs` sub-command parser per the surface above.
+
+**`pyproject.toml`:**
+
+- Add a pixi task:
+
+  ```toml
+  [tool.pixi.tasks.logs]
+  cmd = "cat-watcher logs --follow"
+  description = "Tail structured logs from all agents (live)"
+  ```
+
+- Use `pixi add --pypi` / `pixi remove` for any new dependencies. (None are
+  expected: stdlib only.)
+
+#### Test Requirements (`tests/unit/test_logging_setup.py`)
+
+Real `tmp_path`, no mocks. Use a fixture that resets the root logger's handlers
+between tests so cross-test leakage cannot mask bugs.
+
+- **Required schema fields:** format an `INFO` record from a logger named
+  `cat_watcher.poller` with no extras; assert the JSON has exactly the six
+  required fields (`ts`, `level`, `logger`, `agent`, `pid`, `msg`) and no
+  `extras` key.
+- **`ts` round-trip:** `datetime.fromisoformat(parsed["ts"])` returns a tz-aware
+  UTC datetime; microsecond precision is preserved.
+- **Per-call extras merging:** call
+  `logger.info("msg",
+  extra={"camera_name": "office", "clip_id": 42})`; assert
+  the JSON has `extras={"camera_name": "office", "clip_id": 42}`.
+- **Standard-attribute filtering:** `pathname`, `funcName`, `lineno`, `args`,
+  `msg` (raw), `levelname`, `module`, `message` MUST NOT appear in `extras`. The
+  frozenset of excluded names is exhaustive; if Python's logging adds a new
+  attribute, the test should fail loudly.
+- **Exception capture:** raise inside a `try` and call `logger.exception` in
+  `except`; assert `exc_type ==
+  "<module>.<class>"`, `exc_msg == str(exc)`,
+  and `traceback` contains the expected stack lines.
+- **`exc_type` for builtin exceptions:** raising `ValueError` produces
+  `exc_type == "builtins.ValueError"` (or whatever Python's qualified name
+  resolves to — pin the actual format in the test).
+- **`setup_logging` idempotency:** call twice with the same args; root logger
+  has exactly one `RotatingFileHandler` and one `StreamHandler`.
+- **`setup_logging` directory creation:** call with an `internal_root` whose
+  `logs/` doesn't exist; assert it's created and the JSONL file appears after
+  the first record.
+- **`setup_logging` does not call `logging.basicConfig`:** monkey-patch
+  `logging.basicConfig` to raise; `setup_logging` must complete without
+  triggering it.
+- **Rotation:** monkey-patch the `_MAX_BYTES` constant down to a tiny value
+  (e.g. 200); write enough records to trigger a rotation; assert `<agent>.jsonl`
+  and `<agent>.jsonl.1` both exist.
+- **Single-line invariant:** a record whose message contains literal `\n`
+  characters must serialize to exactly one physical line (the `\n` is escaped
+  inside the JSON string).
+
+#### Test Requirements (`tests/unit/test_cli_logs.py`)
+
+Use `capsys` for stdout capture; seed JSONL fixture files in `tmp_path`'s
+`logs/` directory; pass `--config` pointing at a `tmp_path` config so the viewer
+reads from there.
+
+- **No-arg default merges LaunchAgent agents only:** seed `poller.jsonl`,
+  `alerts.jsonl`, `cli.jsonl`; invoke `cat-watcher logs --json`; assert output
+  contains records from `poller` and `alerts` and EXCLUDES `cli`.
+- **Positional agent filter:** seed multiple files;
+  `cat-watcher logs
+  poller --json` returns only `poller` records.
+- **Positional `cli` opts in:** `cat-watcher logs cli --json` returns only
+  `cli.jsonl` records.
+- **`--since DURATION`:** seed records with timestamps spanning the last 90
+  minutes; `--since 1h` returns only records within the last hour.
+- **`--since ISO8601`:** seed records spanning a fixed timestamp;
+  `--since 2026-05-05T12:00:00+00:00` returns only records at or after that ts.
+- **`--since` naive ISO is OS-local:** pin the host TZ via `os.environ` and
+  `time.tzset()` (the same idiom as
+  `tests/unit/test_poller.py::test_parse_iso_datetime_naive_treated_as_os_local`)
+  and assert naive `--since` is converted to UTC consistently.
+- **`--level WARNING`:** mixed-level records; only WARNING+ pass.
+- **`--camera office`:** records with `extras.camera_name == "office"` pass;
+  others (including those without `camera_name` at all) drop.
+- **`--grep` is case-insensitive:** `--grep "ingested"` matches both
+  `Ingested clip` and `successfully ingested`.
+- **Pretty format with no TTY contains no ANSI escapes:** under `capsys` (which
+  is not a TTY), `out` must not contain `\x1b[`.
+- **`--json` round-trip is byte-identical:** input fixture lines == output
+  lines, ordered by `ts`.
+- **Chronological merge ordering:** records from two files interleave by `ts` in
+  the output.
+- **Exception records render with `[+traceback]` marker:** seed a record with
+  `exc_type` / `traceback`; pretty output ends with the marker.
+- **Help text non-empty for every flag:** `cat-watcher logs --help` output
+  contains a description for each documented flag.
+
+`--follow` is exercised via an integration test in
+`tests/integration/test_cli_logs_follow.py`: write to a JSONL file in a
+background thread, run the viewer in `--follow` mode in another thread, assert
+the new lines appear in the viewer's stdout within one polling interval. SIGINT
+exits cleanly.
+
+#### Decisions deferred to implementation
+
+- The `--since` shorthand parser (`30m`/`1h`/`7d`). Strawman is "both" shorthand
+  and ISO 8601; if shorthand parsing becomes a maintenance burden, drop it and
+  require ISO 8601.
+- Pretty-formatter timestamp tz when `extras.camera_name` is present. Strawman
+  is "always host-local"; per-camera timezone rendering waits for a concrete
+  ergonomic complaint.
+- Whether `setup_logging` returns the configured root logger handle (for tests)
+  or returns `None`. Strawman is `None`; tests can introspect
+  `logging.getLogger()` directly.
+
+#### Out of scope (per spec)
+
+- Remote log shipping (Loki/ELK/Datadog), syslog handler, per-camera log files,
+  log compaction, request-IDs, log-based alerting. The JSONL format keeps the
+  door open for a future shipper without committing to one.
 
 ---
 
