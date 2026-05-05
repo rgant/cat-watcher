@@ -1,5 +1,6 @@
 """Shared pytest fixtures for the cat-watcher test suite."""
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,10 +23,11 @@ from cat_watcher.config import (
     WebAuth,
     WebConfig,
 )
-from cat_watcher.db import Base, create_engine
+from cat_watcher.db import Base, Camera, Clip, PollStatus, create_engine, get_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from datetime import datetime
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
@@ -92,3 +94,70 @@ def make_config() -> Callable[..., Config]:
         )
 
     return _build
+
+
+@pytest.fixture
+def seed_camera() -> Callable[..., int]:
+    """Factory: insert a ``Camera`` row with sensible defaults; kwargs override individual fields.
+
+    Returned callable signature: ``(engine: Engine, **overrides: object) -> int``. Defaults match
+    the ``pantry`` camera in :data:`_DEFAULT_CAMERAS` (``host="cam.example.com"``,
+    ``poll_status=OK``) so the row is consistent with the rest of the test infrastructure. Tests
+    that need different state (a stale ``last_polled_at``, a non-OK ``poll_status``, etc.) pass
+    those as kwargs.
+    """
+
+    def _seed(engine: Engine, **overrides: object) -> int:
+        defaults: dict[str, object] = {
+            "name": "pantry",
+            "display_name": "Pantry",
+            "host": "cam.example.com",
+            "poll_status": PollStatus.OK,
+        }
+        defaults.update(overrides)
+        cam = Camera(**defaults)
+        with get_session(engine) as session:
+            session.add(cam)
+            session.flush()
+            return cam.id
+
+    return _seed
+
+
+@pytest.fixture
+def seed_clip() -> Callable[..., None]:
+    """Factory: insert a ``Clip`` row with deterministic paths derived from ``start_ts``.
+
+    Callable signature: ``(engine, *, camera_id, start_ts, has_cat, manual_has_cat=None) -> None``.
+    File paths use the ``HHMMSS`` of ``start_ts`` so callers seeding multiple clips just vary
+    ``start_ts`` to keep ``(camera_id, source_filename)`` unique.
+    """
+
+    def _seed(
+        engine: Engine,
+        *,
+        camera_id: int,
+        start_ts: datetime,
+        has_cat: bool,
+        manual_has_cat: bool | None = None,
+    ) -> None:
+        fname = f"{start_ts.strftime('%H%M%S')}.mp4"
+        date_dir = start_ts.strftime("%Y-%m-%d")
+        clip = Clip(
+            camera_id=camera_id,
+            source_filename=fname,
+            start_ts=start_ts,
+            end_ts=start_ts + timedelta(seconds=2),
+            duration_seconds=2.0,
+            file_path=f"clips/pantry/{date_dir}/{fname}",
+            thumb_path=f"thumbs/pantry/{date_dir}/{fname}.jpg",
+            file_size_bytes=10,
+            has_cat=has_cat,
+            manual_has_cat=manual_has_cat,
+            detector_version="test@deadbeef",
+            ingested_at=start_ts,
+        )
+        with get_session(engine) as session:
+            session.add(clip)
+
+    return _seed

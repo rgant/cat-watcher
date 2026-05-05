@@ -14,7 +14,8 @@ schedules a tick every ``[poller].cadence_seconds``. A tick:
    :func:`update_camera_state_success`).
 6. Calls :func:`cat_watcher.retention.sweep` at end of tick.
 7. Upserts the ``poller`` heartbeat.
-8. (Task 18) checks the ``alerts`` heartbeat and dispatches ``ALERTS_STUCK`` if stale.
+8. Checks the ``alerts`` heartbeat and dispatches ``ALERTS_STUCK`` if stale (cool-down honored
+   via :func:`cat_watcher.alerts.dispatch_alert`).
 
 CLI flags ``--config / --camera / --since / --until / --limit / --no-detect / --list-only`` per
 spec §4.10.
@@ -37,9 +38,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from cat_watcher import retention
+from cat_watcher.alerts import dispatch_candidate, evaluate_heartbeat_watchdog
 from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuthError, CameraUnreachableError
 from cat_watcher.config import Config, load_config
-from cat_watcher.db import AgentStart, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
+from cat_watcher.db import AgentStart, AlertType, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import Detector, DetectorError
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 
@@ -673,10 +675,30 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
         _print_retention_summary(report)
         with get_session(engine) as session:
             upsert_heartbeat(session, agent_name=_AGENT_NAME, now=now)
-        # The ALERTS_STUCK watchdog (read the ``alerts`` heartbeat, dispatch via
-        # ``cat_watcher.alerts.dispatch_alert`` if older than
-        # ``config.alerts.alerts_stuck_minutes``) is wired up in Task 18, when the alerts module
-        # exists. The poller intentionally does not own cool-down state.
+        _check_alerts_stuck(config=config, engine=engine, now=now)
+
+
+def _check_alerts_stuck(*, config: Config, engine: Engine, now: datetime) -> None:
+    """Fire ``ALERTS_STUCK`` if the ``alerts`` heartbeat is older than ``alerts_stuck_minutes``.
+
+    Per Task 17 carve-out: the poller watches the alerts agent (since the alerts agent can't watch
+    itself). The poller does *not* own cool-down state; routing flows through
+    :func:`cat_watcher.alerts.dispatch_alert`, which honors the same cool-down + suppression rules
+    as the alerts agent's own dispatches.
+    """
+    with get_session(engine) as session:
+        cand = evaluate_heartbeat_watchdog(
+            session,
+            alert_type=AlertType.ALERTS_STUCK,
+            agent_name="alerts",
+            stale_minutes=config.alerts.alerts_stuck_minutes,
+            public_url=config.web.public_url,
+            tz_name=config.web.display_timezone,
+            now=now,
+        )
+    if cand is None:
+        return
+    dispatch_candidate(cand, config=config, engine=engine, now=now)
 
 
 def _emit(line: str) -> None:

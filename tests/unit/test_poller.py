@@ -14,12 +14,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from cat_watcher.db import Camera, Clip, Heartbeat, PollStatus, get_session
+from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
+from cat_watcher.db import AlertSent, AlertType, Camera, Clip, Heartbeat, PollStatus, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError
 from cat_watcher.poller import (
     PollerArgs,
     PollerError,
     PollerLockedError,
+    _check_alerts_stuck,
     _limited,
     _parse_args,
     _parse_iso_datetime,
@@ -45,47 +47,12 @@ if TYPE_CHECKING:
 _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
-def _seed_camera(engine: Engine, **overrides: object) -> int:
-    """Insert a Camera row with sensible defaults; overrides override fields."""
-    defaults: dict[str, object] = {
-        "name": "pantry",
-        "display_name": "Pantry",
-        "host": "pantry.local",
-        "poll_status": PollStatus.OK,
-    }
-    defaults.update(overrides)
-    cam = Camera(**defaults)
-    with get_session(engine) as session:
-        session.add(cam)
-        session.flush()
-        return cam.id
-
-
-def _seed_clip(engine: Engine, *, camera_id: int, start_ts: datetime, has_cat: bool, manual_has_cat: bool | None = None) -> None:
-    clip = Clip(
-        camera_id=camera_id,
-        source_filename=f"{start_ts.strftime('%H%M%S')}.mp4",
-        start_ts=start_ts,
-        end_ts=start_ts + timedelta(seconds=2),
-        duration_seconds=2.0,
-        file_path=f"clips/pantry/{start_ts.strftime('%Y-%m-%d')}/{start_ts.strftime('%H%M%S')}.mp4",
-        thumb_path=f"thumbs/pantry/{start_ts.strftime('%Y-%m-%d')}/{start_ts.strftime('%H%M%S')}.jpg",
-        file_size_bytes=10,
-        has_cat=has_cat,
-        manual_has_cat=manual_has_cat,
-        detector_version="test@deadbeef",
-        ingested_at=start_ts,
-    )
-    with get_session(engine) as session:
-        session.add(clip)
-
-
 # --- update_camera_state_success ------------------------------------------------------------------
 
 
-def test_update_state_success_advances_last_polled_when_no_clips(db_engine: Engine) -> None:
+def test_update_state_success_advances_last_polled_when_no_clips(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """A successful tick with no new clips advances ``last_polled_at`` only."""
-    cam_id = _seed_camera(db_engine, last_clip_at=_NOW - timedelta(days=2), last_cat_seen_at=_NOW - timedelta(days=3))
+    cam_id = seed_camera(db_engine, last_clip_at=_NOW - timedelta(days=2), last_cat_seen_at=_NOW - timedelta(days=3))
     previous_clip_at = _NOW - timedelta(days=2)
     previous_cat_at = _NOW - timedelta(days=3)
 
@@ -104,13 +71,17 @@ def test_update_state_success_advances_last_polled_when_no_clips(db_engine: Engi
         assert cam.poll_error is None
 
 
-def test_update_state_success_advances_last_clip_at_when_clips_ingested(db_engine: Engine) -> None:
+def test_update_state_success_advances_last_clip_at_when_clips_ingested(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., None],
+) -> None:
     """``last_clip_at`` becomes ``max(start_ts of new clips)`` when clips were ingested."""
-    cam_id = _seed_camera(db_engine)
+    cam_id = seed_camera(db_engine)
     clip1_ts = _NOW - timedelta(minutes=30)
     clip2_ts = _NOW - timedelta(minutes=10)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=clip1_ts, has_cat=False)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=clip2_ts, has_cat=False)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=clip1_ts, has_cat=False)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=clip2_ts, has_cat=False)
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).order_by(Clip.start_ts).all()
@@ -122,15 +93,19 @@ def test_update_state_success_advances_last_clip_at_when_clips_ingested(db_engin
         assert cam.last_clip_at == clip2_ts  # the later one wins
 
 
-def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(db_engine: Engine) -> None:
+def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., None],
+) -> None:
     """``last_cat_seen_at`` advances to the latest cat-positive clip's start_ts."""
-    cam_id = _seed_camera(db_engine)
+    cam_id = seed_camera(db_engine)
     no_cat_ts = _NOW - timedelta(minutes=30)
     cat_ts = _NOW - timedelta(minutes=20)
     later_no_cat_ts = _NOW - timedelta(minutes=10)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=no_cat_ts, has_cat=False)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=cat_ts, has_cat=True)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=later_no_cat_ts, has_cat=False)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=no_cat_ts, has_cat=False)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=cat_ts, has_cat=True)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=later_no_cat_ts, has_cat=False)
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).order_by(Clip.start_ts).all()
@@ -143,12 +118,16 @@ def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(db_e
         assert cam.last_clip_at == later_no_cat_ts  # last_clip_at sees all clips
 
 
-def test_update_state_success_preserves_last_cat_seen_when_no_cat_positive(db_engine: Engine) -> None:
+def test_update_state_success_preserves_last_cat_seen_when_no_cat_positive(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., None],
+) -> None:
     """If new clips are ingested but none are cat-positive, ``last_cat_seen_at`` is preserved."""
     previous_cat_at = _NOW - timedelta(days=3)
-    cam_id = _seed_camera(db_engine, last_cat_seen_at=previous_cat_at)
+    cam_id = seed_camera(db_engine, last_cat_seen_at=previous_cat_at)
     new_ts = _NOW - timedelta(minutes=10)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=new_ts, has_cat=False)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=new_ts, has_cat=False)
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).all()
@@ -161,11 +140,15 @@ def test_update_state_success_preserves_last_cat_seen_when_no_cat_positive(db_en
         assert cam.last_clip_at == new_ts
 
 
-def test_update_state_success_respects_manual_has_cat_override(db_engine: Engine) -> None:
+def test_update_state_success_respects_manual_has_cat_override(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., None],
+) -> None:
     """``COALESCE(manual_has_cat, has_cat)`` semantics: a model-false clip with ``manual_has_cat=True`` counts as cat-positive."""
-    cam_id = _seed_camera(db_engine)
+    cam_id = seed_camera(db_engine)
     ts = _NOW - timedelta(minutes=5)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=ts, has_cat=False, manual_has_cat=True)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=ts, has_cat=False, manual_has_cat=True)
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).all()
@@ -177,9 +160,9 @@ def test_update_state_success_respects_manual_has_cat_override(db_engine: Engine
         assert cam.last_cat_seen_at == ts
 
 
-def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: Engine) -> None:
+def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """A successful tick after a non-OK status clears ``poll_status_since`` (transition back to OK)."""
-    cam_id = _seed_camera(
+    cam_id = seed_camera(
         db_engine,
         poll_status=PollStatus.UNREACHABLE,
         poll_status_since=_NOW - timedelta(hours=1),
@@ -200,9 +183,9 @@ def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: En
 # --- update_camera_state_failure ------------------------------------------------------------------
 
 
-def test_update_state_failure_sets_poll_status_since_on_first_failure(db_engine: Engine) -> None:
+def test_update_state_failure_sets_poll_status_since_on_first_failure(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """OK -> non-OK transition sets ``poll_status_since`` to ``now`` and records the error."""
-    cam_id = _seed_camera(db_engine)  # starts OK
+    cam_id = seed_camera(db_engine)  # starts OK
 
     with get_session(db_engine) as session:
         update_camera_state_failure(
@@ -222,10 +205,10 @@ def test_update_state_failure_sets_poll_status_since_on_first_failure(db_engine:
         assert cam.last_polled_at == _NOW  # still advanced
 
 
-def test_update_state_failure_preserves_poll_status_since_on_repeat(db_engine: Engine) -> None:
+def test_update_state_failure_preserves_poll_status_since_on_repeat(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """A second consecutive non-OK tick leaves ``poll_status_since`` unchanged (still failing)."""
     earlier = _NOW - timedelta(hours=1)
-    cam_id = _seed_camera(
+    cam_id = seed_camera(
         db_engine,
         poll_status=PollStatus.UNREACHABLE,
         poll_status_since=earlier,
@@ -249,7 +232,11 @@ def test_update_state_failure_preserves_poll_status_since_on_repeat(db_engine: E
         assert cam.poll_error == "still unreachable"  # error message updates each tick
 
 
-def test_update_state_success_preserves_last_polled_at_when_cursor_locked(db_engine: Engine) -> None:
+def test_update_state_success_preserves_last_polled_at_when_cursor_locked(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., None],
+) -> None:
     """``advance_cursor=False`` preserves ``last_polled_at`` while still updating observation fields.
 
     A scoped tick (``--since`` / ``--until`` / ``--limit``) cannot prove it covered the full
@@ -258,7 +245,7 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(db_eng
     normally.
     """
     earlier = _NOW - timedelta(hours=1)
-    cam_id = _seed_camera(
+    cam_id = seed_camera(
         db_engine,
         last_polled_at=earlier,
         poll_status=PollStatus.ERROR,
@@ -266,7 +253,7 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(db_eng
         poll_error="prior failure",
     )
     clip_ts = _NOW - timedelta(minutes=30)
-    _seed_clip(db_engine, camera_id=cam_id, start_ts=clip_ts, has_cat=True)
+    seed_clip(db_engine, camera_id=cam_id, start_ts=clip_ts, has_cat=True)
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).all()
@@ -289,10 +276,10 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(db_eng
         assert cam.poll_error is None
 
 
-def test_update_state_failure_preserves_last_polled_at_when_cursor_locked(db_engine: Engine) -> None:
+def test_update_state_failure_preserves_last_polled_at_when_cursor_locked(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """``advance_cursor=False`` on the failure path: cursor stays put, status fields update."""
     earlier = _NOW - timedelta(hours=1)
-    cam_id = _seed_camera(db_engine, last_polled_at=earlier)
+    cam_id = seed_camera(db_engine, last_polled_at=earlier)
 
     with get_session(db_engine) as session:
         update_camera_state_failure(
@@ -430,9 +417,9 @@ def test_relative_paths_for_uses_camera_local_date_and_time() -> None:
 # --- _resolve_window ------------------------------------------------------------------------------
 
 
-def test_resolve_window_uses_args_since_when_provided(db_engine: Engine) -> None:
+def test_resolve_window_uses_args_since_when_provided(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """``--since`` overrides every other source."""
-    cam_id = _seed_camera(db_engine, last_polled_at=_NOW - timedelta(hours=1))
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(hours=1))
     args = PollerArgs(since=_NOW - timedelta(days=2))
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -442,10 +429,10 @@ def test_resolve_window_uses_args_since_when_provided(db_engine: Engine) -> None
     assert until == _NOW
 
 
-def test_resolve_window_uses_last_polled_at_when_no_since(db_engine: Engine) -> None:
+def test_resolve_window_uses_last_polled_at_when_no_since(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """Steady-state: ``camera.last_polled_at`` is the start of the window."""
     last_poll = _NOW - timedelta(minutes=10)
-    cam_id = _seed_camera(db_engine, last_polled_at=last_poll)
+    cam_id = seed_camera(db_engine, last_polled_at=last_poll)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
@@ -453,9 +440,9 @@ def test_resolve_window_uses_last_polled_at_when_no_since(db_engine: Engine) -> 
     assert since == last_poll
 
 
-def test_resolve_window_first_run_uses_retention_days_backfill(db_engine: Engine) -> None:
+def test_resolve_window_first_run_uses_retention_days_backfill(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """Fresh-install: no ``last_polled_at`` and no ``--since`` -> fall back to ``now - retention``."""
-    cam_id = _seed_camera(db_engine, last_polled_at=None)
+    cam_id = seed_camera(db_engine, last_polled_at=None)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
@@ -463,9 +450,9 @@ def test_resolve_window_first_run_uses_retention_days_backfill(db_engine: Engine
     assert since == _NOW - timedelta(days=30)
 
 
-def test_resolve_window_args_until_overrides_now(db_engine: Engine) -> None:
+def test_resolve_window_args_until_overrides_now(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """``--until`` caps the upper bound; default is ``now``."""
-    cam_id = _seed_camera(db_engine)
+    cam_id = seed_camera(db_engine)
     explicit_until = _NOW - timedelta(hours=1)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -677,3 +664,71 @@ def test_run_tick_raises_when_camera_filter_does_not_match_config(
 
     with pytest.raises(PollerError, match="not-a-real-camera"):
         run_tick(config=config, args=args, engine=db_engine, detector=None, now=_NOW)
+
+
+# --- _check_alerts_stuck ------------------------------------------------------------------------
+
+
+def _disabled_alerts_config(make_config: Callable[..., Config], internal_root: Path, storage_root: Path) -> Config:
+    """Build a Config with both alert channels disabled — Task 18 wiring tests don't need real I/O."""
+    base = make_config(internal_root, storage_root)
+    return base.model_copy(
+        update={
+            "alerts": base.alerts.model_copy(
+                update={
+                    "email": EmailRulesConfig(enabled=False),
+                    "macos": MacOsRulesConfig(enabled=False),
+                },
+            ),
+        },
+    )
+
+
+def test_check_alerts_stuck_dispatches_when_alerts_heartbeat_stale(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+) -> None:
+    """A stale ``alerts`` heartbeat fires ``ALERTS_STUCK`` via :func:`dispatch_alert` (one row written)."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    with get_session(db_engine) as session:
+        session.add(Heartbeat(agent_name="alerts", last_seen_at=_NOW - timedelta(minutes=45)))
+
+    _check_alerts_stuck(config=config, engine=db_engine, now=_NOW)
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.ALERTS_STUCK).all()
+    assert len(rows) == 1
+    assert rows[0].camera_id is None
+
+
+def test_check_alerts_stuck_silent_when_heartbeat_recent(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+) -> None:
+    """Recent ``alerts`` heartbeat → no fire (no ``alerts_sent`` row written)."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    with get_session(db_engine) as session:
+        session.add(Heartbeat(agent_name="alerts", last_seen_at=_NOW - timedelta(minutes=5)))
+
+    _check_alerts_stuck(config=config, engine=db_engine, now=_NOW)
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).all()
+    assert rows == []
+
+
+def test_check_alerts_stuck_silent_when_heartbeat_missing(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+) -> None:
+    """No ``alerts`` heartbeat row at all → no fire (matches the watchdog evaluator's contract)."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+
+    _check_alerts_stuck(config=config, engine=db_engine, now=_NOW)
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).all()
+    assert rows == []
