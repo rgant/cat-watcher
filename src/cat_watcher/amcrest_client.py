@@ -18,8 +18,8 @@ Datetime contract: every :class:`Recording` field is tz-aware UTC. The Amcrest A
 camera has its own NTP/locale clock config that callers can read via
 ``configManager.cgi?action=getConfig&name=NTP``. This module treats the strings as wall-clock times
 in whatever zone the caller declares via ``camera_tz`` and converts to UTC before returning.
-Resolving the right ``ZoneInfo`` (per-camera config vs. a display-timezone fallback) is the caller's
-job — the client itself knows nothing about project-wide config.
+Resolving the right ``ZoneInfo`` (per-camera config vs. a display-timezone fallback) is the
+caller's job — the client itself knows nothing about project-wide config.
 """
 
 import logging
@@ -30,6 +30,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Self
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -74,7 +75,20 @@ class CameraAuthError(CameraError):
 
 
 class CameraAPIError(CameraError):
-    """Camera returned another 4xx, or its response was malformed."""
+    """Camera returned another 4xx, or its response was malformed.
+
+    ``status`` carries the HTTP status code when the error originated from a non-2xx response; it is
+    ``None`` for errors raised from response-body parsing (e.g. ``factory.create`` returning a body
+    without a ``result=`` line). Callers that need to distinguish specific status codes — most
+    notably ``findFile``'s overloaded use of HTTP 400 to mean "no recordings in window" — read this
+    attribute instead of parsing the message text.
+    """
+
+    status: int | None
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -90,6 +104,25 @@ class Recording:
 
 _ITEM_PATTERN = re.compile(r"^items\[(\d+)\]\.([A-Za-z]+)=(.+?)\s*$")
 _RESULT_PATTERN = re.compile(r"^result=(\d+)\s*$", re.MULTILINE)
+
+
+def _amcrest_query(params: dict[str, str]) -> str:
+    """Build a query string Amcrest's CGI parser will accept.
+
+    The parser has two non-standard requirements that ``httpx``'s default ``params=`` dict
+    violates:
+
+    1. ``[`` / ``]`` must be **literal**, not percent-encoded (``%5B`` / ``%5D`` → 400).
+    2. Spaces must be encoded as ``%20``, not ``+`` (the form-encoded ``+`` → 400).
+
+    Every example in ``docs/resources/Amcrest-HTTP_API_V3.26.pdf`` follows both rules
+    (e.g. ``condition.Types[0]=dav&condition.StartTime=2014-1-1%2012:00:00``). ``urllib``'s default
+    ``quote_via=quote_plus`` produces ``+`` for spaces, so we force ``quote_via=quote``. Call sites
+    with bracket-bearing parameters or whitespace-bearing values must build their query string
+    through this helper and append it to the path so ``httpx`` forwards the URL unchanged. Full
+    diagnosis in ``docs/resources/amcrest-bracket-quirk.md``.
+    """
+    return urlencode(params, safe="[]", quote_via=quote)
 
 
 def _parse_find_page(body: str) -> list[dict[str, str]]:
@@ -151,7 +184,7 @@ class AmcrestClient:
             raise CameraAuthError(msg)
         if _HTTP_BAD_REQUEST <= status_code < _HTTP_INTERNAL_ERROR:
             msg = f"camera {self._camera.name!r} client error (HTTP {status_code})"
-            raise CameraAPIError(msg)
+            raise CameraAPIError(msg, status=status_code)
 
     def _request_with_retries(
         self,
@@ -233,20 +266,38 @@ class AmcrestClient:
 
     def _iter_pages(self, find_handle: str, *, local_since: str, local_until: str) -> Iterator[Recording]:
         """Inner loop: drain the camera's pagination once the search handle is open."""
-        _ = self._request_with_retries(
-            "GET",
-            _FIND_ENDPOINT,
-            params={
+        # ``condition.Types[0]`` carries literal brackets the Amcrest CGI parser refuses to decode
+        # from ``%5B`` / ``%5D``; build the query string via ``_amcrest_query`` and pass it as part
+        # of the path so ``httpx`` forwards it unchanged. ``condition.Channel`` is 1-indexed per
+        # the API spec ("starting from 1") — our single-channel litter-box cameras are always 1.
+        find_query = _amcrest_query(
+            {
                 "action": "findFile",
                 "object": find_handle,
-                # Per the Amcrest API spec, ``condition.Channel`` is 1-indexed (PDF: "starting from
-                # 1"). Our cameras are single-channel litter-box units, so this is always 1.
                 "condition.Channel": "1",
                 "condition.StartTime": local_since,
                 "condition.EndTime": local_until,
                 "condition.Types[0]": "dav",
             },
         )
+        # Amcrest firmware overloads HTTP 400 on findFile to mean "no recordings in window" (the API
+        # spec buckets it under "request inherently impossible to be satisfied"). Empty windows
+        # happen on every quiet poll tick, so swallow that specific status and yield zero results;
+        # other 4xx classes (auth, malformed query, endpoint typos) keep failing loudly. The
+        # URL-encoding regression test ensures a real syntax break can't sneak through this branch.
+        # See ``docs/resources/amcrest-bracket-quirk.md`` for the firmware behavior.
+        try:
+            _ = self._request_with_retries("GET", f"{_FIND_ENDPOINT}?{find_query}")
+        except CameraAPIError as exc:
+            if exc.status != _HTTP_BAD_REQUEST:
+                raise
+            logger.info(
+                "camera %s: findFile returned 400 — treating as empty window (%s..%s)",
+                self._camera.name,
+                local_since,
+                local_until,
+            )
+            return
         while True:
             page = self._request_with_retries(
                 "GET",

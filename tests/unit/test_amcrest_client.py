@@ -176,6 +176,88 @@ def test_iter_recordings_sends_channel_one_in_findfile_request() -> None:
     assert find_file.called, "findFile must be called with condition.Channel=1"
 
 
+@respx.mock
+def test_iter_recordings_findfile_url_uses_amcrest_quirky_encoding() -> None:
+    """The findFile URL must reach the camera with literal brackets and ``%20`` for spaces.
+
+    Amcrest's CGI parser rejects percent-encoded brackets (``%5B`` / ``%5D``) and the form-encoded
+    ``+`` space character with HTTP 400; every API-spec example uses literal brackets and ``%20``.
+    See ``docs/resources/amcrest-bracket-quirk.md`` for the diagnosis.
+
+    The respx-captured URL is asserted directly because the rule lives at the wire level —
+    response-layer mocks alone cannot tell encoded brackets apart from literal ones.
+    """
+    _ = _factory_create()
+    find_file = _find_file_route()
+    _ = _find_next_file_route().mock(return_value=httpx.Response(200, text=_PAGE_EMPTY))
+    _ = _close_route()
+    _ = _destroy_route()
+
+    client = _make_client()
+    _ = list(client.iter_recordings(since=datetime(2026, 4, 30, tzinfo=UTC)))
+
+    assert find_file.called
+    sent_url = str(find_file.calls.last.request.url)
+    # Brackets literal, not %5B / %5D.
+    assert "condition.Types[0]=dav" in sent_url, f"brackets must be literal in: {sent_url}"
+    assert "%5B" not in sent_url, f"'[' must not be percent-encoded: {sent_url}"
+    assert "%5D" not in sent_url, f"']' must not be percent-encoded: {sent_url}"
+    # Spaces in StartTime/EndTime as %20, not +.
+    assert "condition.StartTime=2026-04-30%2000" in sent_url, f"space in StartTime must be %20, got: {sent_url}"
+    assert "condition.StartTime=2026-04-30+" not in sent_url, f"space must not be encoded as '+', got: {sent_url}"
+
+
+@respx.mock
+def test_iter_recordings_treats_findfile_400_as_empty_window() -> None:
+    """Amcrest firmware returns HTTP 400 from findFile when the time window has zero recordings.
+
+    The body is the same generic ``"Error\\r\\nBad Request!\\r\\n"`` the camera returns for any 400,
+    and there is no other discriminator — see ``docs/resources/amcrest-bracket-quirk.md`` for the
+    firmware behavior. We rely on the URL-encoding regression test
+    (``test_iter_recordings_findfile_url_uses_amcrest_quirky_encoding``) to ensure 400 here really
+    does mean "empty window" rather than a malformed query.
+
+    Behavior under test: findFile 400 yields zero ``Recording``s without raising, and findNextFile
+    is NOT called (no handle to drain).
+    """
+    factory = _factory_create()
+    find_file = respx.get(
+        _FIND_URL,
+        params__contains={"action": "findFile", "object": _FIND_HANDLE},
+    ).mock(return_value=httpx.Response(400, text="Error\r\nBad Request!\r\n"))
+    next_file = _find_next_file_route().mock(return_value=httpx.Response(200, text=_PAGE_EMPTY))
+    _ = _close_route()
+    _ = _destroy_route()
+
+    client = _make_client()
+    items = list(client.iter_recordings(since=datetime(2026, 4, 30, tzinfo=UTC)))
+
+    assert factory.called
+    assert find_file.called
+    assert not next_file.called, "findNextFile must be skipped when findFile returned 400"
+    assert not items
+
+
+@respx.mock
+def test_iter_recordings_findfile_404_still_raises() -> None:
+    """Only HTTP 400 from findFile is treated as empty-window; other 4xx still propagate.
+
+    Guard against a future regression that broadens the 4xx-swallow behavior to all client errors,
+    which would mask real bugs (e.g. a typo'd endpoint path returning 404).
+    """
+    _ = _factory_create()
+    _ = respx.get(
+        _FIND_URL,
+        params__contains={"action": "findFile", "object": _FIND_HANDLE},
+    ).mock(return_value=httpx.Response(404, text="Error\r\nNot Found!\r\n"))
+    _ = _close_route()
+    _ = _destroy_route()
+
+    client = _make_client()
+    with pytest.raises(CameraAPIError):
+        _ = list(client.iter_recordings(since=datetime(2026, 4, 30, tzinfo=UTC)))
+
+
 def test_iter_recordings_naive_since_raises_value_error() -> None:
     """``since`` must be tz-aware. A naive datetime is rejected up-front (no HTTP traffic).
 

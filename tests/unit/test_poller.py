@@ -22,6 +22,7 @@ from cat_watcher.poller import (
     PollerLockedError,
     _limited,
     _parse_args,
+    _parse_iso_datetime,
     _resolve_window,
     detection_fields_for,
     extract_thumbnail,
@@ -248,6 +249,106 @@ def test_update_state_failure_preserves_poll_status_since_on_repeat(db_engine: E
         assert cam.poll_error == "still unreachable"  # error message updates each tick
 
 
+def test_update_state_success_preserves_last_polled_at_when_cursor_locked(db_engine: Engine) -> None:
+    """``advance_cursor=False`` preserves ``last_polled_at`` while still updating observation fields.
+
+    A scoped tick (``--since`` / ``--until`` / ``--limit``) cannot prove it covered the full
+    ``[last_polled_at, now]`` window, so the resume cursor must stay where it is. The other fields
+    (``last_clip_at``, ``last_cat_seen_at``, ``poll_status``) are real observations and advance
+    normally.
+    """
+    earlier = _NOW - timedelta(hours=1)
+    cam_id = _seed_camera(
+        db_engine,
+        last_polled_at=earlier,
+        poll_status=PollStatus.ERROR,
+        poll_status_since=earlier,
+        poll_error="prior failure",
+    )
+    clip_ts = _NOW - timedelta(minutes=30)
+    _seed_clip(db_engine, camera_id=cam_id, start_ts=clip_ts, has_cat=True)
+
+    with get_session(db_engine) as session:
+        clips = session.query(Clip).all()
+        update_camera_state_success(
+            session,
+            camera_id=cam_id,
+            ingested_clips=clips,
+            now=_NOW,
+            advance_cursor=False,
+        )
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == earlier  # NOT advanced — scoped query
+        assert cam.last_clip_at == clip_ts  # observation: ingested clip
+        assert cam.last_cat_seen_at == clip_ts  # observation: cat-positive clip
+        assert cam.poll_status == PollStatus.OK  # observation: camera reachable
+        assert cam.poll_status_since is None
+        assert cam.poll_error is None
+
+
+def test_update_state_failure_preserves_last_polled_at_when_cursor_locked(db_engine: Engine) -> None:
+    """``advance_cursor=False`` on the failure path: cursor stays put, status fields update."""
+    earlier = _NOW - timedelta(hours=1)
+    cam_id = _seed_camera(db_engine, last_polled_at=earlier)
+
+    with get_session(db_engine) as session:
+        update_camera_state_failure(
+            session,
+            camera_id=cam_id,
+            status=PollStatus.UNREACHABLE,
+            error="connection refused",
+            now=_NOW,
+            advance_cursor=False,
+        )
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == earlier  # NOT advanced
+        assert cam.poll_status == PollStatus.UNREACHABLE
+        assert cam.poll_status_since == _NOW  # observation: first transition into non-OK
+        assert cam.poll_error == "connection refused"
+
+
+# --- PollerArgs.truncates_default_window ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (PollerArgs(), False),
+        (PollerArgs(since=_NOW), True),
+        (PollerArgs(until=_NOW), True),
+        (PollerArgs(limit=50), True),
+        (PollerArgs(since=_NOW, until=_NOW, limit=50), True),
+        # list_only handled separately at the run_tick level, not via this property
+        (PollerArgs(list_only=True), False),
+        # camera / no_detect / verbose do not truncate the search window
+        (PollerArgs(camera="pantry"), False),
+        (PollerArgs(no_detect=True), False),
+        (PollerArgs(verbose=True), False),
+    ],
+    ids=[
+        "default",
+        "since_only",
+        "until_only",
+        "limit_only",
+        "all_three",
+        "list_only_excluded",
+        "camera_excluded",
+        "no_detect_excluded",
+        "verbose_excluded",
+    ],
+)
+def test_poller_args_truncates_default_window(case: tuple[PollerArgs, bool]) -> None:
+    """``--since`` / ``--until`` / ``--limit`` mark the run as scoped; other flags do not."""
+    args, expected = case
+    assert args.truncates_default_window is expected
+
+
 # --- upsert_heartbeat -----------------------------------------------------------------------------
 
 
@@ -467,7 +568,12 @@ def test_extract_thumbnail_raises_on_ffmpeg_failure(tmp_path: Path) -> None:
 
 
 def test_parse_args_supports_full_flag_surface(tmp_path: Path) -> None:
-    """All seven CLI flags from spec §4.10 round-trip into a populated PollerArgs."""
+    """All CLI flags round-trip into a populated PollerArgs.
+
+    ``--since`` / ``--until`` use explicit ``+00:00`` offsets so the test is independent of the OS
+    timezone the test runner happens to be in (naive values are now interpreted as OS-local by
+    ``_parse_iso_datetime``).
+    """
     cfg_path = tmp_path / "cfg.toml"
     args = _parse_args(
         [
@@ -476,13 +582,14 @@ def test_parse_args_supports_full_flag_surface(tmp_path: Path) -> None:
             "--camera",
             "pantry",
             "--since",
-            "2026-04-30T00:00:00",
+            "2026-04-30T00:00:00+00:00",
             "--until",
-            "2026-05-01T00:00:00",
+            "2026-05-01T00:00:00+00:00",
             "--limit",
             "3",
             "--no-detect",
             "--list-only",
+            "--verbose",
         ],
     )
 
@@ -493,6 +600,7 @@ def test_parse_args_supports_full_flag_surface(tmp_path: Path) -> None:
     assert args.limit == 3
     assert args.no_detect is True
     assert args.list_only is True
+    assert args.verbose is True
 
 
 def test_parse_args_defaults_are_empty() -> None:
@@ -503,6 +611,39 @@ def test_parse_args_defaults_are_empty() -> None:
     assert args.camera is None
     assert args.since is None
     assert args.no_detect is False
+    assert args.verbose is False
+
+
+def test_parse_iso_datetime_naive_treated_as_os_local() -> None:
+    """Naive ISO 8601 input is interpreted as OS-local time and converted to UTC.
+
+    This is what ``_parse_iso_datetime`` documents — it relies on ``datetime.astimezone()`` treating
+    naive values as system-local. The test pins the system timezone via the ``TZ`` env var +
+    ``time.tzset()`` so the round-trip is deterministic regardless of the host's actual zone (the
+    alternative — OS-dependent expected values — would be flaky).
+    """
+    import os
+    import time
+
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"  # EDT in May = UTC-04:00
+    time.tzset()
+    try:
+        # Naive: "May 4 midnight in New York" → "May 4 04:00 UTC"
+        naive_result = _parse_iso_datetime("2026-05-04T00:00:00")
+        assert naive_result == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)
+        # Explicit UTC offset: honored as-is.
+        explicit_result = _parse_iso_datetime("2026-05-04T00:00:00+00:00")
+        assert explicit_result == datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC)
+        # Explicit non-UTC offset: converted.
+        offset_result = _parse_iso_datetime("2026-05-04T00:00:00-04:00")
+        assert offset_result == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)
+    finally:
+        if original_tz is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
 
 # --- _limited ------------------------------------------------------------------------------------

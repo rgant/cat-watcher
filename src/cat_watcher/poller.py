@@ -105,10 +105,14 @@ def update_camera_state_success(
     camera_id: int,
     ingested_clips: Sequence[Clip],
     now: datetime,
+    advance_cursor: bool = True,
 ) -> None:
     """Apply per-field preservation semantics for a successful tick (per spec §4.4 step 5).
 
-    - ``last_polled_at`` advances to ``now`` every time.
+    - ``last_polled_at`` advances to ``now`` only when ``advance_cursor`` is true. Scoped queries
+      (``--since`` / ``--until`` / ``--limit``) cannot prove they covered the full
+      ``[last_polled_at, now]`` window and so must leave the resume cursor untouched —
+      otherwise the next default tick would skip whatever the scoped run did not cover.
     - ``last_clip_at`` advances to ``max(start_ts of new clips)`` only if any clips were ingested.
     - ``last_cat_seen_at`` advances to the latest ``COALESCE(manual_has_cat, has_cat) = true`` clip
       only if at least one new clip is cat-positive (model or operator override).
@@ -119,7 +123,8 @@ def update_camera_state_success(
     if cam is None:
         msg = f"camera {camera_id!r} not found"
         raise ValueError(msg)
-    cam.last_polled_at = now
+    if advance_cursor:
+        cam.last_polled_at = now
     if ingested_clips:
         cam.last_clip_at = max(clip.start_ts for clip in ingested_clips)
     cat_positive_starts = [
@@ -132,17 +137,19 @@ def update_camera_state_success(
     cam.poll_error = None
 
 
-def update_camera_state_failure(
+def update_camera_state_failure(  # noqa: PLR0913  # state-update sibling of update_camera_state_success; all 6 args are independent inputs to a single coherent responsibility (apply per-field failure semantics)
     session: Session,
     *,
     camera_id: int,
     status: PollStatus,
     error: str,
     now: datetime,
+    advance_cursor: bool = True,
 ) -> None:
     """Apply per-field semantics for a failed tick.
 
-    - ``last_polled_at`` advances to ``now`` (the tick still happened, even if it errored).
+    - ``last_polled_at`` advances to ``now`` only when ``advance_cursor`` is true (same window-
+      coverage rule as :func:`update_camera_state_success`). Scoped queries leave it in place.
     - ``poll_status`` -> the supplied non-OK status.
     - ``poll_status_since`` is set to ``now`` only on the transition from OK to non-OK; if the
       camera is already non-OK, the original transition timestamp is preserved.
@@ -152,7 +159,8 @@ def update_camera_state_failure(
     if cam is None:
         msg = f"camera {camera_id!r} not found"
         raise ValueError(msg)
-    cam.last_polled_at = now
+    if advance_cursor:
+        cam.last_polled_at = now
     if cam.poll_status == PollStatus.OK:
         cam.poll_status_since = now
     cam.poll_status = status
@@ -337,7 +345,7 @@ def _ingest_recording(rec: Recording, *, client: AmcrestClient, ctx: IngestConte
 
 
 @dataclass
-class PollerArgs:
+class PollerArgs:  # pylint: disable=too-many-instance-attributes  # flat CLI-arg bag; the rule targets behavior-rich classes, not data containers
     """Resolved CLI arguments. Empty strings / None mean "use defaults"."""
 
     config_path: Path | None = None
@@ -347,6 +355,18 @@ class PollerArgs:
     limit: int | None = None
     no_detect: bool = False
     list_only: bool = False
+    verbose: bool = False
+
+    @property
+    def truncates_default_window(self) -> bool:
+        """True when ``--since`` / ``--until`` / ``--limit`` narrow the search below the full
+        ``[last_polled_at, now]`` default. ``run_tick`` reads this to decide whether to advance
+        ``cameras.last_polled_at`` after a successful (or failed) tick: a scoped query cannot
+        prove it covered the full window, so the resume cursor must stay where it is — otherwise
+        the next default tick would skip whatever the scoped run missed. ``--list-only`` is
+        handled separately (entire DB-write block is gated upstream).
+        """
+        return self.since is not None or self.until is not None or self.limit is not None
 
 
 def _resolve_window(*, db_camera: Camera, args: PollerArgs, retention_days: int, now: datetime) -> tuple[datetime, datetime]:
@@ -361,11 +381,27 @@ def _resolve_window(*, db_camera: Camera, args: PollerArgs, retention_days: int,
     return since, until
 
 
+@dataclass(frozen=True)
+class _PollWindow:
+    """Camera-local time window the tick searched, for human-facing display only.
+
+    ``local_since`` / ``local_until`` are formatted in the camera's tz (per-camera ``timezone`` if
+    set, else ``web.display_timezone``) so the operator reads them in the same clock as the cat.
+    ``tz_name`` is the IANA zone for the suffix in the print summary. The DB stores datetimes as
+    UTC; these are derived strings for display only.
+    """
+
+    local_since: str
+    local_until: str
+    tz_name: str
+
+
 @dataclass
 class _CameraTickResult:
     """Outcome of one camera's tick — what state to apply afterwards."""
 
     success: bool
+    window: _PollWindow
     status_on_failure: PollStatus = PollStatus.OK  # only consulted when success=False
     error_msg: str = ""
     ingested: list[Clip] = field(default_factory=list)
@@ -386,8 +422,14 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
     Catches typed Amcrest errors and maps them to the appropriate ``PollStatus``; any clip-level
     failure (detector error etc.) is recorded inside the clip row and does NOT fail the tick.
     """
-    camera_tz = ZoneInfo(cam_cfg.timezone or config.web.display_timezone)
+    tz_name = cam_cfg.timezone or config.web.display_timezone
+    camera_tz = ZoneInfo(tz_name)
     since, until = _resolve_window(db_camera=db_camera, args=args, retention_days=config.retention.clip_days, now=now)
+    window = _PollWindow(
+        local_since=since.astimezone(camera_tz).strftime("%Y-%m-%d %H:%M:%S"),
+        local_until=until.astimezone(camera_tz).strftime("%Y-%m-%d %H:%M:%S"),
+        tz_name=tz_name,
+    )
     ctx = IngestContext(
         engine=engine,
         storage_root=config.storage_root,
@@ -411,11 +453,23 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
                     ingested.append(clip)
     except CameraUnreachableError as exc:
         logger.warning("camera %s unreachable: %s", cam_cfg.name, exc)
-        return _CameraTickResult(success=False, status_on_failure=PollStatus.UNREACHABLE, error_msg=str(exc), ingested=ingested)
+        return _CameraTickResult(
+            success=False,
+            window=window,
+            status_on_failure=PollStatus.UNREACHABLE,
+            error_msg=str(exc),
+            ingested=ingested,
+        )
     except (CameraAuthError, CameraAPIError) as exc:
         logger.warning("camera %s API error: %s", cam_cfg.name, exc)
-        return _CameraTickResult(success=False, status_on_failure=PollStatus.ERROR, error_msg=str(exc), ingested=ingested)
-    return _CameraTickResult(success=True, ingested=ingested)
+        return _CameraTickResult(
+            success=False,
+            window=window,
+            status_on_failure=PollStatus.ERROR,
+            error_msg=str(exc),
+            ingested=ingested,
+        )
+    return _CameraTickResult(success=True, window=window, ingested=ingested)
 
 
 def _limited[ItemT](items: Iterable[ItemT], limit: int | None) -> Iterator[ItemT]:
@@ -443,19 +497,76 @@ class _ParsedArgs(argparse.Namespace):
     no_detect: bool = False
     list_only: bool = False
     once: bool = False
+    verbose: bool = False
 
 
 def _parse_args(argv: Sequence[str] | None) -> PollerArgs:
     """Parse the ``cat-watcher-poller`` CLI surface (per spec §4.10 + Task 17)."""
-    parser = argparse.ArgumentParser(prog="cat-watcher-poller")
-    _ = parser.add_argument("--once", action="store_true", help="kept for LaunchAgent compat; the poller is always one-shot")
-    _ = parser.add_argument("--config", type=Path, default=None)
-    _ = parser.add_argument("--camera", type=str, default=None)
-    _ = parser.add_argument("--since", type=_parse_iso_datetime, default=None)
-    _ = parser.add_argument("--until", type=_parse_iso_datetime, default=None)
-    _ = parser.add_argument("--limit", type=int, default=None)
-    _ = parser.add_argument("--no-detect", action="store_true")
-    _ = parser.add_argument("--list-only", action="store_true")
+    parser = argparse.ArgumentParser(
+        prog="cat-watcher-poller",
+        description="Poll configured Amcrest cameras for new motion clips and ingest them.",
+    )
+    _ = parser.add_argument(
+        "--once",
+        action="store_true",
+        help="kept for LaunchAgent compat; the poller is always one-shot",
+    )
+    _ = parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="path to config.toml; default precedence is --config > $CAT_WATCHER_CONFIG > ./config.toml",
+    )
+    _ = parser.add_argument(
+        "--camera",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="poll only this camera (must match a name in [[cameras]]); default polls all cameras",
+    )
+    _ = parser.add_argument(
+        "--since",
+        type=_parse_iso_datetime,
+        default=None,
+        metavar="ISO8601",
+        help=(
+            "start of the recording window; ISO 8601 (e.g. 2026-05-04T00:00:00 or 2026-05-04T00:00:00-04:00). "
+            "Naive values are interpreted as OS-local time and converted to UTC. "
+            "Default: cameras.last_polled_at, falling back to now - retention.clip_days days"
+        ),
+    )
+    _ = parser.add_argument(
+        "--until",
+        type=_parse_iso_datetime,
+        default=None,
+        metavar="ISO8601",
+        help="end of the recording window; same parsing rules as --since. Default: now (UTC)",
+    )
+    _ = parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="cap the number of recordings processed per camera per tick (default: no cap)",
+    )
+    _ = parser.add_argument(
+        "--no-detect",
+        action="store_true",
+        help="skip the YOLO detector; clips ingest with analysis_error='skipped: --no-detect'",
+    )
+    _ = parser.add_argument(
+        "--list-only",
+        action="store_true",
+        help="strict dry-run: list matching recordings without downloading, persisting, or mutating any state",
+    )
+    _ = parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="show diagnostic logs at INFO level (httpx requests, empty-window notes, retention details). "
+        "Default suppresses these; the per-tick summary always prints to stdout.",
+    )
     ns = parser.parse_args(argv, namespace=_ParsedArgs())
     return PollerArgs(
         config_path=ns.config,
@@ -465,15 +576,19 @@ def _parse_args(argv: Sequence[str] | None) -> PollerArgs:
         limit=ns.limit,
         no_detect=ns.no_detect,
         list_only=ns.list_only,
+        verbose=ns.verbose,
     )
 
 
 def _parse_iso_datetime(raw: str) -> datetime:
-    """Parse ``YYYY-MM-DDTHH:MM:SS`` (treated as UTC if no offset)."""
-    parsed = datetime.fromisoformat(raw)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    """Parse ISO 8601 datetime; naive values are interpreted as OS-local time, then converted to UTC.
+
+    Explicit offsets (``...+00:00``, ``...Z``, etc.) are honored as-is and converted to UTC. Naive
+    interpretation as OS-local relies on Python's ``datetime.astimezone()`` documented behavior: a
+    naive ``self`` is presumed to be in the system timezone. Operators type input in their own
+    clock; the DB stores UTC. Display in the camera's tz happens at print time.
+    """
+    return datetime.fromisoformat(raw).astimezone(UTC)
 
 
 def ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
@@ -491,9 +606,15 @@ def ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
 
 
 def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Detector | None, now: datetime) -> None:
-    """Execute one full poller tick. Caller is responsible for the PID lock + storage wait."""
-    with get_session(engine) as session:
-        session.add(AgentStart(agent_name=_AGENT_NAME, started_at=now))
+    """Execute one full poller tick. Caller is responsible for the PID lock + storage wait.
+
+    ``args.list_only`` is a strict dry-run: no ``Clip`` rows, no camera-state updates, no
+    ``AgentStart`` row, no retention sweep, no heartbeat. ``ensure_db_camera`` still runs because
+    its create-if-missing is benign init (the row is read for ``last_polled_at`` regardless).
+    """
+    if not args.list_only:
+        with get_session(engine) as session:
+            session.add(AgentStart(agent_name=_AGENT_NAME, started_at=now))
 
     cameras_to_poll: list[CameraConfig] = [c for c in config.cameras if c.name == args.camera] if args.camera else list(config.cameras)
     if args.camera and not cameras_to_poll:
@@ -514,41 +635,105 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
             )
         except Exception:
             logger.exception("unexpected failure polling camera %s", cam_cfg.name)
-            with get_session(engine) as session:
-                update_camera_state_failure(
-                    session,
-                    camera_id=db_camera.id,
-                    status=PollStatus.ERROR,
-                    error="unexpected exception",
-                    now=now,
-                )
+            _emit(f"{cam_cfg.name}: tick failed (error) — unexpected exception (re-run with --verbose for traceback)")
+            if not args.list_only:
+                with get_session(engine) as session:
+                    update_camera_state_failure(
+                        session,
+                        camera_id=db_camera.id,
+                        status=PollStatus.ERROR,
+                        error="unexpected exception",
+                        now=now,
+                        advance_cursor=not args.truncates_default_window,
+                    )
             continue
-        with get_session(engine) as session:
-            if outcome.success:
-                update_camera_state_success(session, camera_id=db_camera.id, ingested_clips=outcome.ingested, now=now)
-            else:
-                update_camera_state_failure(
-                    session,
-                    camera_id=db_camera.id,
-                    status=outcome.status_on_failure,
-                    error=outcome.error_msg,
-                    now=now,
-                )
+        _print_camera_summary(cam_cfg=cam_cfg, outcome=outcome, list_only=args.list_only)
+        if not args.list_only:
+            with get_session(engine) as session:
+                if outcome.success:
+                    update_camera_state_success(
+                        session,
+                        camera_id=db_camera.id,
+                        ingested_clips=outcome.ingested,
+                        now=now,
+                        advance_cursor=not args.truncates_default_window,
+                    )
+                else:
+                    update_camera_state_failure(
+                        session,
+                        camera_id=db_camera.id,
+                        status=outcome.status_on_failure,
+                        error=outcome.error_msg,
+                        now=now,
+                        advance_cursor=not args.truncates_default_window,
+                    )
 
     if not args.list_only:
         report = retention.sweep(engine=engine, storage_root=config.storage_root, retention=config.retention, now=now)
-        logger.info("retention sweep: %s", report)
+        _print_retention_summary(report)
         with get_session(engine) as session:
             upsert_heartbeat(session, agent_name=_AGENT_NAME, now=now)
         # The ALERTS_STUCK watchdog (read the ``alerts`` heartbeat, dispatch via
-        # ``cat_watcher.alerts.dispatch_alert`` if older than ``config.alerts.alerts_stuck_minutes``)
-        # is wired up in Task 18, when the alerts module exists. The poller intentionally does not
-        # own cool-down state.
+        # ``cat_watcher.alerts.dispatch_alert`` if older than
+        # ``config.alerts.alerts_stuck_minutes``) is wired up in Task 18, when the alerts module
+        # exists. The poller intentionally does not own cool-down state.
+
+
+def _emit(line: str) -> None:
+    """Write one line of human-facing summary output to stdout.
+
+    Wraps ``sys.stdout.write`` so the print/no-print rule (ruff T201 forbids ``print``) lives in one
+    place. Logging goes to stderr via the configured handler; this stream is the primary user-facing
+    output of an interactive ``cat-watcher-poller`` invocation.
+    """
+    _ = sys.stdout.write(line + "\n")
+
+
+def _print_camera_summary(*, cam_cfg: CameraConfig, outcome: _CameraTickResult, list_only: bool) -> None:
+    """One line per camera per tick to stdout. Always shown regardless of ``--verbose``."""
+    window = f" (window {outcome.window.local_since} .. {outcome.window.local_until} {outcome.window.tz_name})"
+    if not outcome.success:
+        _emit(f"{cam_cfg.name}: tick failed ({outcome.status_on_failure.value}) — {outcome.error_msg}{window}")
+        return
+    if list_only:
+        _emit(f"{cam_cfg.name}: list-only complete{window}")
+    elif outcome.ingested:
+        _emit(f"{cam_cfg.name}: ingested {len(outcome.ingested)} clip(s){window}")
+    else:
+        _emit(f"{cam_cfg.name}: no new recordings{window}")
+
+
+def _print_retention_summary(report: retention.RetentionReport) -> None:
+    """One line for the retention sweep result. Always shown unless ``--list-only`` skipped it."""
+    total = (
+        report.clips_removed_pass1
+        + report.orphans_removed_pass2
+        + report.dirs_removed
+        + report.agent_starts_pruned
+        + report.alerts_sent_pruned
+    )
+    if total == 0:
+        _emit("retention: nothing to clean up")
+        return
+    _emit(
+        f"retention: clips={report.clips_removed_pass1} orphans={report.orphans_removed_pass2} "
+        f"dirs={report.dirs_removed} agent_starts={report.agent_starts_pruned} "
+        f"alerts_sent={report.alerts_sent_pruned}",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry point. Returns a process exit code."""
+    """CLI entry point. Returns a process exit code.
+
+    Default log level is ``WARNING`` so a healthy interactive run only emits the per-camera
+    summary + retention line via stdout; problems surface on stderr through the warning/error
+    loggers. ``--verbose`` raises the level to ``INFO`` to expose httpx requests, the empty-window
+    note from ``amcrest_client``, and other diagnostic detail. The full structured-logging design
+    (Task 26b in the plan) replaces this when it lands.
+    """
     args = _parse_args(argv)
+    log_level = logging.INFO if args.verbose else logging.WARNING
+    logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
     config = load_config(args.config_path)
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
 

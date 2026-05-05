@@ -673,6 +673,23 @@ checking `status_code >= 500` in `_stream_to_part` and raising
 `cat_watcher.amcrest_client`'s logger before asserting on caplog so it passes
 regardless of test ordering.
 
+**Two Amcrest CGI parser quirks** — full diagnosis with evidence tables in
+`docs/resources/amcrest-bracket-quirk.md`:
+
+- `findFile` requires literal `[` / `]` brackets and `%20`-encoded spaces in the
+  query string; `%5B` / `%5D` and `+` for space both return HTTP 400. The
+  `_amcrest_query` helper builds the query string via
+  `urlencode(safe="[]", quote_via=quote)` so `findFile` reaches the camera
+  correctly; other (bracket-free) calls keep using `httpx`'s ordinary `params=`
+  machinery.
+- `findFile` returns HTTP 400 (body `Error\r\nBad Request!\r\n`) when the time
+  window contains zero recordings — the API spec's "request inherently
+  impossible to be satisfied" branch. `_iter_pages` treats `status==400` from
+  `findFile` as an empty result and yields nothing; other 4xx (auth, endpoint
+  typos) propagate. `CameraAPIError.status: int | None` exposes the HTTP status
+  code so callers discriminate structurally rather than parsing the message
+  text.
+
 **Files:**
 
 - `src/cat_watcher/amcrest_client.py`
@@ -977,10 +994,34 @@ watchdog from Task 18.
 - `update_camera_state_success` / `update_camera_state_failure` carry the spec
   §4.4 step 5 preservation semantics (each of `last_clip_at` /
   `last_cat_seen_at` / `poll_status_since` follows its own rule). Manual
-  `COALESCE(manual_has_cat, has_cat)` projection is honored.
+  `COALESCE(manual_has_cat, has_cat)` projection is honored. Both functions take
+  `advance_cursor: bool = True`; `last_polled_at` advances only when set.
+- **Resume-cursor lock for scoped queries.**
+  `PollerArgs.truncates_default_window` is true when any of `--since` /
+  `--until` / `--limit` is set; `run_tick` passes
+  `advance_cursor=not args.truncates_default_window` to the state-update
+  functions. Scoped queries cannot prove they covered the full
+  `[last_polled_at, now]` window, so the resume cursor stays in place;
+  observation fields (`last_clip_at`, `last_cat_seen_at`, `poll_status`) still
+  update because they reflect what the tick actually saw. `--list-only` is
+  handled separately (entire DB-write block is gated upstream).
 - CLI flags from spec §4.10 all wired: `--config` / `--camera` / `--since` /
-  `--until` / `--limit` / `--no-detect` / `--list-only` (the last two skip
-  detector loading and DB writes respectively).
+  `--until` / `--limit` / `--no-detect` / `--list-only` / `--verbose`. Every
+  flag carries `argparse` help text. `--list-only` is a strict dry-run: no
+  `Clip` rows, no camera-state updates, no `AgentStart` row, no retention sweep,
+  no heartbeat (only `ensure_db_camera`'s benign create-if-missing runs, since
+  it is needed to read `last_polled_at`). `--no-detect` skips the YOLO detector
+  and records `analysis_error="skipped: --no-detect"` on each ingested clip.
+  `--since` / `--until` accept ISO 8601; naive values are interpreted as
+  OS-local time and converted to UTC, explicit offsets are honored as-is.
+- **Interactive output.** `main()` configures logging at WARNING by default (so
+  problems hit stderr, httpx chatter is silent) and at INFO under `--verbose` /
+  `-v`. Per-tick output is a compact summary printed to stdout via `_emit`
+  (`sys.stdout.write`): one line per camera with the search window in the
+  camera's IANA timezone plus an outcome ("ingested N", "no new recordings",
+  "list-only complete", "tick failed"), and one line for the retention sweep.
+  The full structured-logging design (Task 26b, deferred) replaces this baseline
+  when it lands.
 
 **Files:**
 
@@ -1003,13 +1044,9 @@ watchdog from Task 18.
   - Connect to Amcrest cameras via the client.
   - Iterate through available recordings since the last successful poll
     (`last = camera.last_polled_at or now - retention.clip_days days`). The
-    "first-run backfill" matches the retention window so a fresh install sees
-    the same horizon the steady-state system maintains.
-  - **First-run scoping (per spec §11.1):** to avoid pulling the full backfill
-    on a fresh install, the operator can run
-    `pixi run poll-once --since <recent-iso8601>` (optionally `--no-detect`)
-    BEFORE `pixi run install-agents`. That seeds `cameras.last_polled_at`, so
-    the LaunchAgent's first scheduled tick picks up from there.
+    "first-run backfill" matches the retention window so a fresh install ingests
+    every recording the camera still holds, giving the operator a
+    fully-functional system on day one.
   - **Processing Steps:** Download video → Generate thumbnail via FFmpeg → Run
     AI detection (if enabled) → `fsync` both files (download already fsyncs per
     Task 14; thumbnail must do the same) → **only then** insert the `clips` row.

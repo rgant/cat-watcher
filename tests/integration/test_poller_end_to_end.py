@@ -18,7 +18,7 @@ from sqlalchemy.engine import Engine  # noqa: TC002  # runtime: Engine-annotated
 from sqlalchemy.orm import Session
 
 from cat_watcher.config import CameraConfig, Config
-from cat_watcher.db import Base, Camera, Clip, PollStatus, create_engine, get_session
+from cat_watcher.db import AgentStart, Base, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError
 from cat_watcher.poller import PollerArgs, run_tick
 
@@ -119,7 +119,10 @@ def test_full_tick_ingests_clip_to_canonical_layout(
 
             cam = session.query(Camera).filter_by(name="pantry").one()
             assert cam.poll_status == PollStatus.OK
-            assert cam.last_polled_at == _NOW
+            # ``--since`` makes this a scoped query that cannot prove it covered the full default
+            # window; ``last_polled_at`` therefore stays unset (the resume cursor only advances on
+            # a default-window tick). Observation fields below still update.
+            assert cam.last_polled_at is None
             assert cam.last_clip_at == datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
             assert cam.last_cat_seen_at == datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
     finally:
@@ -162,8 +165,24 @@ def test_full_tick_with_no_detect_skips_inference_and_marks_clip(
 
 
 @respx.mock
-def test_full_tick_list_only_writes_nothing(tmp_path: Path, synthetic_clip_path: Path, make_config: Callable[[Path, Path], Config]) -> None:
-    """``--list-only`` writes no DB rows, no files, and skips the retention sweep."""
+def test_full_tick_list_only_is_strict_dry_run(
+    tmp_path: Path,
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """``--list-only`` writes nothing persisted.
+
+    Contract under test:
+
+    - No ``Clip`` rows or clip / thumb files on disk.
+    - ``cameras.last_polled_at`` / ``last_clip_at`` / ``poll_status`` are not mutated.
+    - No ``agent_starts`` row inserted.
+    - No ``heartbeats`` row written, no retention sweep run.
+
+    ``ensure_db_camera`` is the one allowed write: creating the row on first run is benign init that
+    ``_resolve_window`` needs to read ``last_polled_at`` from. The flag's reason for existing is
+    repeatable testing — any state mutation would invalidate the next run's ``since`` window.
+    """
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     internal_root.mkdir()
@@ -186,6 +205,96 @@ def test_full_tick_list_only_writes_nothing(tmp_path: Path, synthetic_clip_path:
     try:
         with get_session(engine) as session:
             assert session.query(Clip).count() == 0
+            # Camera row created by ensure_db_camera, but its state is untouched.
+            cameras = session.query(Camera).all()
+            assert len(cameras) == 1
+            assert cameras[0].last_polled_at is None, "list-only must not advance last_polled_at"
+            assert cameras[0].last_clip_at is None
+            assert cameras[0].poll_status == PollStatus.OK
+            # No agent_starts row: list-only is not "the poller ran".
+            assert session.query(AgentStart).count() == 0
+            # No heartbeat: list-only doesn't liveness-signal.
+            assert session.query(Heartbeat).count() == 0
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_full_tick_default_window_advances_last_polled_at(
+    tmp_path: Path,
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """A default-window tick (no ``--since`` / ``--until`` / ``--limit``) advances the cursor.
+
+    Complement to ``test_full_tick_ingests_clip_to_canonical_layout`` which uses ``--since``.
+    Together they pin the contract: ``last_polled_at`` advances only when the run can prove it
+    covered the full ``[last_polled_at, now]`` window.
+    """
+    internal_root = tmp_path / "internal"
+    storage_root = tmp_path / "storage"
+    internal_root.mkdir()
+    storage_root.mkdir()
+    config = make_config(internal_root, storage_root)
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+    detector = _make_detector(has_cat=False)
+
+    # PollerArgs() with no since/until/limit — runs against the default retention-derived window.
+    args = PollerArgs()
+    try:
+        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+    finally:
+        engine.dispose()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            cam = session.query(Camera).filter_by(name="pantry").one()
+            assert cam.last_polled_at == _NOW  # cursor advanced — default-window tick
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_full_tick_with_limit_does_not_advance_cursor(
+    tmp_path: Path,
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """``--limit`` truncates the result set, so the cursor must stay where it was.
+
+    Without this guard, a manual ``--limit 1`` run that ingests the first clip and stops would
+    advance ``last_polled_at`` past the unprocessed clips, silently dropping them on the next
+    default tick. Observation fields (``last_clip_at``, ``poll_status``) still update.
+    """
+    internal_root = tmp_path / "internal"
+    storage_root = tmp_path / "storage"
+    internal_root.mkdir()
+    storage_root.mkdir()
+    config = make_config(internal_root, storage_root)
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+
+    args = PollerArgs(limit=1, no_detect=True)
+    try:
+        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+    finally:
+        engine.dispose()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            cam = session.query(Camera).filter_by(name="pantry").one()
+            assert cam.last_polled_at is None  # NOT advanced — scoped (--limit) tick
+            assert cam.last_clip_at == datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
+            assert cam.poll_status == PollStatus.OK  # observation: camera reachable
     finally:
         engine.dispose()
 
