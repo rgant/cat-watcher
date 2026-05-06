@@ -93,3 +93,6 @@ models/
 
 # Test-generated fixtures
 tests/fixtures/generated/
+
+# Node tooling (stylelint). package.json + package-lock.json ARE committed.
+node_modules/

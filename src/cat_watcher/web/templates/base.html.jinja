@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description"
+          content="Cat Watcher: motion-clip ingestion, cat detection, and inactivity alerts for indoor litter-box cameras.">
+    <title>
+      {% block title %}
+        Cat Watcher
+      {% endblock title %}
+    </title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    {# htmx 2.x powers the timeline range presets (Task 23) and the manual-label DELETE.
+       Loaded once in <head> so progressive-enhancement attributes (`hx-*`) on any
+       template — current or forthcoming — Just Work. #}
+    <script src="https://unpkg.com/htmx.org@2.0.4"
+            integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
+            crossorigin="anonymous"
+            defer></script>
+    {{ dev_hot_reload_script | safe }}
+  </head>
+  <body>
+    {# Active-link highlight: per-link aria-current="page" rather than a JS-driven class
+       so screen readers announce the current page even before any script runs. #}
+    {% set current_path = request.url.path %}
+    <nav class="primary" aria-label="Primary">
+      {# djlint:off J018 #}
+      {# /, /cameras, /stats, /alerts land in Tasks 23-24; switch to url_for(...) when their
+         routes exist. #}
+      <a href="/"
+         {% if current_path == "/" or current_path.startswith("/timeline") %}aria-current="page"{% endif %}>Timeline</a>
+      {# djlint:on #}
+      <a href="{{ url_for('list_clips') }}"
+         {% if current_path.startswith("/clips") %}aria-current="page"{% endif %}>Clips</a>
+      {# djlint:off J018 #}
+      <a href="/cameras"
+         {% if current_path.startswith("/cameras") %}aria-current="page"{% endif %}>Cameras</a>
+      <a href="/stats"
+         {% if current_path.startswith("/stats") %}aria-current="page"{% endif %}>Stats</a>
+      <a href="/alerts"
+         {% if current_path.startswith("/alerts") %}aria-current="page"{% endif %}>Alerts</a>
+      {# djlint:on #}
+    </nav>
+    <main>
+      {% block content %}
+      {% endblock content %}
+    </main>
+  </body>
+</html>

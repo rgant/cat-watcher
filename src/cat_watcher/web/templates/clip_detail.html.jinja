@@ -1,0 +1,105 @@
+{% extends "base.html.jinja" %}
+{% block title %}
+  Clip {{ clip.id }} · Cat Watcher
+{% endblock title %}
+{% block content %}
+  <p>
+    <a href="{{ url_for('list_clips') }}">← Back to clips</a>
+  </p>
+  <header>
+    <h1>
+      {{ camera.display_name if camera else "(unknown camera)" }}
+      ·
+      <time datetime="{{ clip.start_ts.isoformat() }}">{{ clip.start_ts.isoformat() }}</time>
+    </h1>
+  </header>
+  <video controls preload="metadata" aria-label="Clip {{ clip.id }} video">
+    <source src="{{ url_for('media_clip', clip_id=clip.id) }}" type="video/mp4">
+    Your browser does not support HTML5 video.
+  </video>
+  <section aria-labelledby="detection-heading">
+    <h2 id="detection-heading">Detection</h2>
+    <dl class="detail-meta">
+      <dt>has_cat</dt>
+      <dd>
+        {{ clip.has_cat }}
+      </dd>
+      <dt>max_score</dt>
+      <dd>
+        {{ "%.3f"|format(clip.max_score) }}
+      </dd>
+      <dt>frames</dt>
+      <dd>
+        {{ clip.frames_with_cat }} / {{ clip.frames_sampled }}
+      </dd>
+      <dt>detector_version</dt>
+      <dd>
+        <code>{{ clip.detector_version }}</code>
+      </dd>
+      <dt>analysis_error</dt>
+      <dd>
+        {% if clip.analysis_error %}
+          <span class="badge-error">{{ clip.analysis_error }}</span>
+        {% else %}
+          —
+        {% endif %}
+      </dd>
+      <dt>manual_has_cat</dt>
+      <dd>
+        {% if clip.manual_has_cat is none %}
+          —
+        {% else %}
+          {{ clip.manual_has_cat }}
+        {% endif %}
+      </dd>
+      <dt>manual_label_at</dt>
+      <dd>
+        {% if clip.manual_label_at %}
+          <time datetime="{{ clip.manual_label_at.isoformat() }}">{{ clip.manual_label_at.isoformat() }}</time>
+        {% else %}
+          —
+        {% endif %}
+      </dd>
+      <dt>manual_label_notes</dt>
+      <dd>
+        {{ clip.manual_label_notes or "—" }}
+      </dd>
+    </dl>
+  </section>
+  <section aria-labelledby="label-heading">
+    <h2 id="label-heading">Manual label</h2>
+    {# djlint:off J018 #}
+    {# Task 22 will name the set_label / clear_label routes; switch to url_for(...) when
+       those endpoints land. #}
+    <form class="label-form" method="post" action="/clips/{{ clip.id }}/label">
+      <label>
+        Override
+        <select name="has_cat">
+          <option value="true"
+                  {% if clip.manual_has_cat is sameas true %}selected{% endif %}>Cat</option>
+          <option value="false"
+                  {% if clip.manual_has_cat is sameas false %}selected{% endif %}>Not cat</option>
+        </select>
+      </label>
+      <label>
+        Notes
+        <input type="text"
+               name="notes"
+               value="{{ clip.manual_label_notes or '' }}"
+               maxlength="500"
+               placeholder="optional">
+      </label>
+      <button type="submit">Save manual label</button>
+    </form>
+    {% if clip.manual_has_cat is not none %}
+      <form method="post"
+            action="/clips/{{ clip.id }}/label"
+            hx-delete="/clips/{{ clip.id }}/label"
+            hx-confirm="Clear the manual label for this clip?"
+            hx-on::after-request="window.location.reload()">
+        <button type="submit" aria-label="Clear manual label for clip {{ clip.id }}">Clear manual label</button>
+      </form>
+    {% endif %}
+    {# djlint:on #}
+  </section>
+{% endblock content %}

@@ -29,16 +29,20 @@ from typing import TYPE_CHECKING
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
+from starlette.routing import WebSocketRoute
 
 from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
 from cat_watcher.web.auth import BasicAuthMiddleware
-from cat_watcher.web.routes import health_router
+from cat_watcher.web.routes import clips_router, health_router, media_router
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
 
+    import arel
     from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
@@ -49,18 +53,23 @@ logger = logging.getLogger(__name__)
 
 _AGENT_NAME = "web"
 _DB_FILENAME = "cat_watcher.sqlite"
+_HOT_RELOAD_URL = "/hot-reload"
 
 
-def build_app(config: Config) -> FastAPI:
+def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     """Assemble the FastAPI application bound to ``config``.
 
     The returned app owns its own SQLAlchemy engine (disposed by the lifespan on shutdown). Auth
-    middleware sits in front of every route except ``/health``.
+    middleware sits in front of every route except ``/health``. ``dev_hot_reload`` is plumbed
+    through to :func:`_build_hotreload`.
     """
     engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
+    hotreload = _build_hotreload() if dev_hot_reload else None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+        if hotreload is not None:
+            await hotreload.startup()
         with get_session(engine) as session:
             session.add(AgentStart(agent_name=_AGENT_NAME, started_at=datetime.now(UTC)))
 
@@ -74,17 +83,55 @@ def build_app(config: Config) -> FastAPI:
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
             engine.dispose()
+            if hotreload is not None:
+                await hotreload.shutdown()
 
     app = FastAPI(lifespan=lifespan)
     app.state.config = config
     app.state.engine = engine
+    templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+    # Empty string in non-dev builds so the template's ``{{ ... | safe }}`` renders nothing.
+    templates.env.globals["dev_hot_reload_script"] = hotreload.script(_HOT_RELOAD_URL) if hotreload is not None else ""  # pyright: ignore[reportUnknownMemberType]  # Jinja2Templates doesn't type env propery
+    app.state.templates = templates
     app.add_middleware(
         BasicAuthMiddleware,
         username=config.web_auth.username,
         password=config.web_auth.password,
     )
+    # ``/static/*`` serves the bundled CSS / JS / placeholder assets shipped under
+    # ``cat_watcher/web/static``. Mounted before the routers so a route named ``/static``
+    # would never accidentally shadow it; the auth middleware sits in front either way.
+    app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.include_router(health_router)
+    app.include_router(clips_router)
+    app.include_router(media_router)
+    if hotreload is not None:
+        # ``WebSocketRoute(endpoint=...)`` accepts ``Callable[..., Any]`` (arel's raw ASGI form);
+        # ``app.add_websocket_route`` types it narrowly and rejects ``HotReload`` at static-check.
+        app.router.routes.append(WebSocketRoute(_HOT_RELOAD_URL, endpoint=hotreload))
     return app
+
+
+def _build_hotreload() -> arel.HotReload:
+    """Construct the dev-mode :class:`arel.HotReload` for browser auto-reload.
+
+    Watches ``web/static`` and ``web/templates``; pushes a reload message over the WebSocket
+    mounted at :data:`_HOT_RELOAD_URL` whenever a file changes. The ``arel`` import is lazy
+    because it is a dev-only PyPI dep and a top-level import would crash production. The
+    WebSocket sits behind the loopback only — ``BaseHTTPMiddleware``-derived auth is HTTP-only
+    so the route is unauthenticated, which is fine because production never registers it.
+    Lifespan startup/shutdown call :meth:`arel.HotReload.startup` / :meth:`shutdown` to bracket
+    the watcher; the rendered script is plumbed into templates as ``dev_hot_reload_script``.
+    """
+    import arel  # noqa: PLC0415  # lazy: dev-only dep, kept out of the production import path
+
+    web_dir = Path(__file__).parent
+    return arel.HotReload(
+        paths=[
+            arel.Path(str(web_dir / "static")),
+            arel.Path(str(web_dir / "templates")),
+        ],
+    )
 
 
 async def _heartbeat_loop(*, engine: Engine, interval_seconds: int) -> None:
@@ -111,11 +158,9 @@ def _upsert_web_heartbeat(session: Session, *, now: datetime) -> None:
 def reload_app() -> FastAPI:
     """Uvicorn ``--reload`` entry point: re-loads config + builds a fresh app on each reload tick.
 
-    The watcher imports this module and calls :func:`reload_app` whenever a watched file changes,
-    so any ``config.toml`` or source edit is picked up without a manual restart. Production calls
-    :func:`main` and bypasses this helper.
+    Production calls :func:`main` and bypasses this helper.
     """
-    return build_app(load_config())
+    return build_app(load_config(), dev_hot_reload=True)
 
 
 class _ParsedArgs(argparse.Namespace):

@@ -28,20 +28,22 @@ cat-watcher-backup = "cat_watcher.backup:main"
 
 [dependency-groups]
 dev = [
-  "aiosmtpd",
-  "basedpyright",
-  "mypy",
-  "pylint",
-  "pylint-per-file-ignores",
+  "aiosmtpd>=1.4.6,<2",
+  "arel>=0.4.0,<0.5",
+  "basedpyright>=1.39.3,<2",
+  "djlint>=1.36.4,<2",
+  "mypy>=1.20.2,<2",
+  "pylint>=4.0.5,<5",
+  "pylint-per-file-ignores>=3.2.1,<4",
   "pylint-pytest>=2.0.0a1",
-  "pylint-venv",
-  "pyproject-fmt",
-  "pytest",
-  "pytest-cov",
-  "pytest-mock",
-  "pytest-randomly",
-  "respx",
-  "ruff",
+  "pylint-venv>=3.0.4,<4",
+  "pyproject-fmt>=2.21.2,<3",
+  "pytest>=9.0.3,<10",
+  "pytest-cov>=7.1.0,<8",
+  "pytest-mock>=3.15.1,<4",
+  "pytest-randomly>=4.1.0,<5",
+  "respx>=0.23.1,<0.24",
+  "ruff>=0.15.12,<0.16",
 ]
 
 [tool.pixi.dependencies]
@@ -121,6 +123,8 @@ cmd = """\
   pyproject-fmt --no-print-diff pyproject.toml || e=$?
   shfmt --write scripts/ tests/fixtures/ || e=$?
   markdownlint --fix . || e=$?
+  djlint src/cat_watcher/web/templates/ --reformat || e=$?
+  npx --no-install stylelint --fix "src/cat_watcher/web/static/**/*.css" || e=$?
   ruff check --fix --silent "$@" || e=$?
   ruff format "$@" || e=$?
   exit $e' _ {{ paths }}\
@@ -140,6 +144,8 @@ cmd = """\
   basedpyright "$@" || e=$?
   mypy "$@" || e=$?
   pylint "$@" || e=$?
+  djlint src/cat_watcher/web/templates/ --check || e=$?
+  npx --no-install stylelint "src/cat_watcher/web/static/**/*.css" || e=$?
   find scripts tests/fixtures -name "*.sh" -type f -exec shellcheck "{}" + || e=$?
   # Uncomment when we have GitHub Actions
   # actionlint || e=$?
@@ -175,7 +181,6 @@ description = "Remove cat-watcher launchd agents (this Mac)"
 channels = [ "conda-forge" ]
 platforms = [ "linux-64", "osx-64", "osx-arm64" ]
 
-# Tool Configuration
 [tool.ruff]
 target-version = "py314"
 line-length = 140
@@ -189,7 +194,7 @@ namespace-packages = [
   "tests",
 ]
 src = [ "src" ]
-extend-exclude = [ "*.mako", "*.md" ]
+extend-exclude = [ "*.mako", "*.md", "node_modules" ]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -242,7 +247,7 @@ except ImportError: pass
 else: pylint_venv.inithook()
 """
 recursive = true
-ignore = [ ".pixi" ]
+ignore = [ ".pixi", "node_modules" ]
 [tool.pylint.messages_control]
 disable = [
   # https://github.com/astral-sh/ruff/issues/970
@@ -566,6 +571,21 @@ branch = true
 source = [ "src" ]
 omit = [ "**/test_*.py", "**/tests/*" ]
 
+# Tool Configuration
+[tool.djlint]
+# ``jinja`` profile enables the T### template-syntax rules; the ``html`` profile would skip them.
+# Disabled rules: H031 (meta keywords — actively deprecated, Google ignores it); H025
+# (orphan-tag heuristic that misfires on multi-line tags with boolean attributes — djlint's
+# own formatter produces such tags, so the rule fires on its own output).
+profile = "jinja"
+extension = "html.jinja"
+indent = 2
+max_line_length = 140
+ignore = "H025,H031"
+format_css = true
+format_js = true
+format_attribute_template_tags = true
+
 [tool.basedpyright]
 # Pixi-managed virtualenv; required so basedpyright can resolve installed dependencies.
 venvPath = ".pixi/envs/"
@@ -579,6 +599,7 @@ extraPaths = [ "tests/fixtures" ]
 exclude = [
   "**/.*",
   "**/__pycache__",
+  "node_modules",
 ]
 # Tests may access ``_underscored`` private members of the modules they exercise; this is the
 # basedpyright analog of ruff's ``SLF001`` per-file-ignore for tests.

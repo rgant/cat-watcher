@@ -1,22 +1,23 @@
 """Integration tests for the cat-watcher web app skeleton (Task 20).
 
-Exercises the FastAPI factory + auth middleware + ``/health`` route end-to-end via
-:class:`fastapi.testclient.TestClient`. The ``with TestClient(app) as client:`` form runs the
-app's lifespan, so the heartbeat background task starts and stops cleanly around each test.
+Exercises the FastAPI factory + auth middleware + ``/health`` route end-to-end via the shared
+``web_test_client`` fixture (which materializes the SQLite schema and runs the app lifespan).
 """
 
 import base64
-from collections.abc import Callable  # noqa: TC003  # runtime: pytest evaluates fixture annotations during collection
-from pathlib import Path  # noqa: TC003  # runtime: pytest evaluates fixture annotations during collection
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from fastapi.testclient import TestClient
 
-from cat_watcher.db import AgentStart, Base, Heartbeat, create_engine, get_session
-from cat_watcher.web.app import build_app
+from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from contextlib import AbstractContextManager
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
     from cat_watcher.config import Config
 
 # Shape of every JSON response in this file: a top-level object with string keys. Casting to this
@@ -31,23 +32,15 @@ def _basic_auth_header(username: str, password: str) -> str:
     return f"Basic {base64.b64encode(raw).decode()}"
 
 
-def _materialize_db(internal_root: Path) -> None:
-    """Create ``cat_watcher.sqlite`` with the canonical schema under ``internal_root``."""
-    engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
-    Base.metadata.create_all(engine)
-    engine.dispose()
-
-
 def test_health_returns_200_without_credentials(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """``/health`` is auth-bypassed so external uptime checks can poll without sharing the password."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         response = client.get("/health")
     assert response.status_code == 200
     body = cast("_JsonObj", response.json())
@@ -61,6 +54,7 @@ def test_health_returns_200_without_credentials(
 def test_health_response_includes_heartbeat_after_background_task_runs(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """The lifespan's heartbeat loop writes the row immediately on startup, before the first sleep.
 
@@ -70,9 +64,7 @@ def test_health_response_includes_heartbeat_after_background_task_runs(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         # The lifespan started the heartbeat loop and ran the first iteration before yielding,
         # so by the time TestClient.__enter__ returns, the heartbeats('web') row exists.
         response = client.get("/health")
@@ -84,13 +76,12 @@ def test_health_response_includes_heartbeat_after_background_task_runs(
 def test_protected_route_returns_401_with_www_authenticate_header_when_missing_credentials(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """A request to any non-``/health`` path without credentials gets ``401 Basic`` (browser prompt)."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         response = client.get("/clips")
     assert response.status_code == 401
     assert "WWW-Authenticate" in response.headers
@@ -100,30 +91,30 @@ def test_protected_route_returns_401_with_www_authenticate_header_when_missing_c
 def test_protected_route_with_valid_credentials_passes_auth(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Valid credentials let the request through to routing. ``/clips`` is unrouted in Task 20, so
-    a successful auth + miss surfaces as ``404`` (not ``401``)."""
+    """Valid credentials let the request reach the routed handler — anything but ``401`` proves
+    the middleware passed the request through. The exact downstream status (``200``, ``404``,
+    ``500``) is the route's contract, not the middleware's, so this test only pins ``!= 401``.
+    """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
     headers = {"Authorization": _basic_auth_header("admin", "pw")}
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         response = client.get("/clips", headers=headers)
-    assert response.status_code == 404
+    assert response.status_code != 401
 
 
 def test_protected_route_with_invalid_credentials_returns_401(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """Wrong password yields ``401`` (not ``403``); browser re-prompts the operator."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
     headers = {"Authorization": _basic_auth_header("admin", "wrong-password")}
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         response = client.get("/clips", headers=headers)
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"].startswith("Basic ")
@@ -132,6 +123,7 @@ def test_protected_route_with_invalid_credentials_returns_401(
 def test_protected_route_with_wrong_username_returns_401(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """Wrong username (correct password) is also 401 — pairs with the wrong-password test.
 
@@ -142,10 +134,8 @@ def test_protected_route_with_wrong_username_returns_401(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
     headers = {"Authorization": _basic_auth_header("not-admin", "pw")}
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         response = client.get("/clips", headers=headers)
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"].startswith("Basic ")
@@ -164,19 +154,18 @@ def test_protected_route_with_wrong_username_returns_401(
 def test_protected_route_rejects_malformed_authorization_header(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     auth_header: str,
 ) -> None:
     """Each early-return branch of ``_is_authenticated`` produces ``401`` rather than crashing.
 
     Without these cases, a regression that — for example — dropped ``validate=True`` from
-    ``b64decode`` (so non-base64 input silently produces garbage bytes that then fail to decode
-    as UTF-8 in unexpected ways) could change the failure mode from a clean 401 to a 500.
+    ``b64decode`` (so non-base64 input silently produces garbage bytes that then fail to decode as
+    UTF-8 in unexpected ways) could change the failure mode from a clean 401 to a 500.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
-    with TestClient(app) as client:
+    with web_test_client(config) as client:
         response = client.get("/clips", headers={"Authorization": auth_header})
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"].startswith("Basic ")
@@ -185,6 +174,7 @@ def test_protected_route_rejects_malformed_authorization_header(
 def test_lifespan_writes_agent_starts_row_on_startup(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """Each app start records an ``agent_starts(agent_name='web', ...)`` row.
 
@@ -193,9 +183,7 @@ def test_lifespan_writes_agent_starts_row_on_startup(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
-    with TestClient(app):
+    with web_test_client(config):
         pass  # entering + exiting the context fires the lifespan startup + shutdown.
 
     engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
@@ -210,16 +198,15 @@ def test_lifespan_writes_agent_starts_row_on_startup(
 def test_lifespan_heartbeat_task_is_cancelled_on_shutdown(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """The ``with TestClient(app)`` context exits cleanly — proving the heartbeat task didn't hang
-    on the ``asyncio.sleep`` window after cancellation. A regression that swallowed
+    """Exiting the ``with web_test_client(config)`` context cleanly proves the heartbeat task
+    didn't hang on the ``asyncio.sleep`` window after cancellation. A regression that swallowed
     ``CancelledError`` somewhere in the loop would deadlock shutdown until pytest's timeout fired.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _materialize_db(internal_root)
-    app = build_app(config)
-    with TestClient(app):
+    with web_test_client(config):
         pass
 
     # If we reached this line, shutdown completed; also verify a heartbeat row was written.

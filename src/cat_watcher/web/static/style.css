@@ -1,0 +1,483 @@
+/* Mobile-first stylesheet for the cat-watcher web UI.
+ *
+ * Cascade: base rules target the smallest viewport (~360px). ``@media (min-width: ...)``
+ * blocks layer in tablet and desktop enhancements. Only ``min-width`` queries are used —
+ * never ``max-width`` — so adding a new breakpoint is purely additive (no existing rule
+ * has to be unwound). Breakpoints are derived from where the layout begins to feel
+ * cramped, not from device classes:
+ *
+ * * **480px** — phone-landscape; filter form gains a horizontal axis.
+ * * **768px** — tablet; clip-list table reverts from card-stack to a real ``<table>``.
+ * * **1024px** — desktop; ``<dl>`` becomes two-column, ``<main>`` widens.
+ *
+ * Touch targets are sized for the larger of the WCAG (44×44) / Material (48×48) minima.
+ * Typography uses ``clamp()`` so headings scale smoothly without stepped breakpoints.
+ */
+
+:root {
+  --color-text: oklch(25.2% 0 0deg);
+  --color-muted: oklch(51% 0 0deg);
+  --color-border: oklch(89.8% 0 0deg);
+  --color-bg-stripe: oklch(98.5% 0 0deg);
+  --color-bg-card: oklch(100% 0 0deg);
+  --color-link: oklch(43.6% .133 257.9deg);
+  --color-link-hover: oklch(35.4% .109 257deg);
+  --color-cat: oklch(51.3% .139 143.2deg);
+  --color-no-cat: oklch(62.7% 0 0deg);
+  --color-manual: oklch(52.7% .172 259deg);
+  --color-error: oklch(49.7% .18 26.8deg);
+  --space-xs: .25rem;
+  --space-sm: .5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --tap-target: 2.75rem; /* 44px @ 16px root — matches WCAG SC 2.5.5 minimum */
+  --content-max: 80rem;
+  --hairline: .0625rem; /* 1px @ 16px root — for visually-hidden helpers and 1px borders */
+}
+
+/* stylelint-disable selector-max-universal -- Reset requires universal selectors */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+/* stylelint-enable selector-max-universal */
+
+/* ---------- base typography (mobile) ---------- */
+
+body {
+  margin: var(--space-sm);
+
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+h1 {
+  margin-block-start: 0;
+
+  /* Scales smoothly between 1.4rem (~22px) on a small phone and 1.875rem (~30px) on
+   * a 1280px viewport. Uses ``vi`` so the breakpoints do not have to be retuned. */
+  font-size: clamp(1.4rem, 1.1rem + 1.5vi, 1.875rem);
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: clamp(1.15rem, .95rem + 1vi, 1.4rem);
+  line-height: 1.25;
+}
+
+a {
+  color: var(--color-link);
+}
+
+/* ``@media (hover: hover)`` gates the hover state to pointing devices that can
+ * actually hover; touch devices receive the focus-visible state on tap instead,
+ * avoiding the sticky-:hover problem on mobile Safari / Chrome. */
+@media (hover: hover) {
+  a:hover {
+    color: var(--color-link-hover);
+  }
+}
+
+a:focus-visible {
+  color: var(--color-link-hover);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-link);
+  outline-offset: 2px;
+}
+
+/* WCAG-recommended visually-hidden helper. Used on ``<caption>`` so the table's
+ * purpose is announced to screen readers without consuming visual real estate. */
+.sr-only {
+  position: absolute;
+
+  overflow: hidden;
+
+  inline-size: var(--hairline);
+  block-size: var(--hairline);
+  margin: calc(var(--hairline) * -1);
+  padding: 0;
+  border: 0;
+
+  white-space: nowrap;
+
+  clip-path: inset(50%);
+}
+
+/* ---------- nav (mobile) ---------- */
+
+.primary {
+  scrollbar-gutter: stable;
+
+  overflow-inline: auto;
+  overscroll-behavior-inline: contain;
+
+  /* Horizontal scroll on the rare phone too narrow to fit five short links —
+   * wrapping at 360px would push primary nav onto two rows, eating vertical space
+   * above the fold. ``overflow-inline: auto`` keeps it compact and reachable.
+   * ``overscroll-behavior-inline: contain`` stops the scroll from chaining to the
+   * page; ``scrollbar-gutter: stable`` reserves space so layout doesn't shift when
+   * the scrollbar appears. */
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-xs);
+
+  margin-block-end: var(--space-md);
+  padding-block-end: var(--space-xs);
+  border-block-end: var(--hairline) solid var(--color-border);
+
+  -webkit-overflow-scrolling: touch;
+
+  & a {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+
+    /* 44×44 minimum tap target (WCAG SC 2.5.5). The padding is what gets touched —
+     * tightening this for a "denser" desktop look would break thumb-tap reliability. */
+    min-block-size: var(--tap-target);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: .25rem;
+
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  & a[aria-current='page'] {
+    font-weight: 600;
+    background: var(--color-bg-stripe);
+  }
+}
+
+main {
+  /* No max-width yet; the ``@media (min-width: 1024px)`` block adds the cap so prose
+   * doesn't sprawl across a 4K display. */
+  inline-size: 100%;
+}
+
+/* ---------- forms (mobile: full-width stack) ---------- */
+
+button {
+  cursor: pointer;
+  min-block-size: var(--tap-target);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 1rem;
+}
+
+.filter-form,
+.label-form {
+  display: flex;
+  flex-flow: column wrap;
+  gap: var(--space-sm);
+  margin-block-end: var(--space-md);
+}
+
+.filter-form label,
+.label-form label {
+  display: flex;
+  flex-flow: column wrap;
+  gap: var(--space-xs);
+
+  font-size: .875rem;
+  color: var(--color-muted);
+}
+
+.filter-form select,
+.filter-form input,
+.label-form select,
+.label-form input {
+  inline-size: 100%;
+  min-block-size: var(--tap-target);
+  padding: var(--space-xs) var(--space-sm);
+
+  /* 16px font-size on form inputs prevents iOS Safari from auto-zooming the page when
+   * the field gains focus — Safari only zooms when font-size is < 16px. */
+  font-size: 1rem;
+}
+
+.filter-form button,
+.label-form button {
+  align-self: flex-start;
+}
+
+/* ---------- clip-list table (mobile: card-stack via pseudo-labels) ---------- */
+
+/* The plan article calls for "data tables convert to card stacks on mobile, labeling
+ * each value." Approach: at mobile width, ``<table>``/``<tr>``/``<td>`` switch to
+ * ``display: block``; ``<thead>`` is visually hidden (still reachable by SR for users
+ * who navigate via the table-row-by-row keystroke); each ``<td>`` renders its column
+ * label via ``::before`` and ``data-label``. Above 768px (``@media`` further down)
+ * the rules invert and a real table re-emerges. */
+
+.clip-list {
+  display: block;
+  border-collapse: collapse;
+  inline-size: 100%;
+
+  & thead {
+    /* Visually hidden, equivalent to .sr-only. */
+    position: absolute;
+
+    overflow: hidden;
+
+    inline-size: var(--hairline);
+    block-size: var(--hairline);
+    margin: calc(var(--hairline) * -1);
+    padding: 0;
+    border: 0;
+
+    white-space: nowrap;
+
+    clip-path: inset(50%);
+  }
+
+  & tbody {
+    display: block;
+  }
+
+  & tr {
+    display: block;
+
+    margin-block-end: var(--space-sm);
+    padding: var(--space-sm);
+    border: var(--hairline) solid var(--color-border);
+    border-radius: .375rem;
+
+    background: var(--color-bg-card);
+  }
+
+  & td {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    align-items: baseline;
+
+    padding: var(--space-xs) 0;
+    border: none;
+
+    text-align: start;
+  }
+}
+
+.clip-list td::before {
+  content: attr(data-label);
+
+  flex: 0 0 7rem;
+
+  font-size: .875rem;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.clip-list .thumb-cell {
+  /* Thumbnail row: drop the label, center the image, give it room. */
+  display: block;
+  margin-block-end: var(--space-sm);
+}
+
+.clip-list .thumb-cell::before {
+  content: none;
+}
+
+.clip-list img {
+  display: block;
+
+  inline-size: 100%;
+  max-inline-size: 20rem;
+  block-size: auto;
+  border-radius: .25rem;
+}
+
+/* ---------- video (mobile) ---------- */
+
+video {
+  inline-size: 100%;
+  max-inline-size: 100%;
+  block-size: auto;
+  margin-block-end: var(--space-md);
+}
+
+/* ---------- detail metadata (mobile: single column) ---------- */
+
+.detail-meta {
+  display: grid;
+  grid-template-columns: [meta-start] 1fr [meta-end];
+  gap: var(--space-xs);
+  margin-block-end: var(--space-lg);
+
+  & dt {
+    margin-block-start: var(--space-sm);
+    font-weight: 600;
+    color: var(--color-muted);
+  }
+
+  & dt:first-child {
+    margin-block-start: 0;
+  }
+
+  & dd {
+    margin: 0;
+  }
+}
+
+/* ---------- status badges ---------- */
+
+.badge-cat {
+  font-weight: 600;
+  color: var(--color-cat);
+}
+
+.badge-no-cat {
+  color: var(--color-no-cat);
+}
+
+.badge-manual {
+  border-block-end: 2px solid var(--color-manual);
+}
+
+.badge-error {
+  font-weight: 600;
+  color: var(--color-error);
+}
+
+.empty-state {
+  font-style: italic;
+  color: var(--color-muted);
+}
+
+/* =====================================================================
+ * Tablet: 768px+
+ *
+ * Re-establish the real ``<table>`` for the clip list, switch forms back
+ * to a horizontal flex axis, and widen the body margin.
+ * ===================================================================== */
+
+@media (width >= 48rem) {
+  body {
+    margin: var(--space-md);
+  }
+
+  .primary {
+    overflow-inline: visible;
+    flex-wrap: wrap;
+  }
+
+  /* Filter and label forms: horizontal flex with wrapping when items don't fit. */
+  .filter-form,
+  .label-form {
+    flex-flow: row wrap;
+    gap: var(--space-md);
+    align-items: end;
+  }
+
+  .filter-form select,
+  .filter-form input,
+  .label-form select,
+  .label-form input {
+    inline-size: auto;
+  }
+
+  .filter-form button,
+  .label-form button {
+    align-self: end;
+  }
+
+  /* Restore real table layout — pseudo-labels disappear via ``content: none``. */
+  .clip-list {
+    display: table;
+
+    & thead {
+      /* Reverse the sr-only visually-hidden block to re-show the column headings.
+       * Only ``display`` and the dimensional/visibility properties matter here;
+       * margin/padding/border are honored on the cells, not the header group. */
+      position: static;
+
+      overflow: visible;
+      display: table-header-group;
+
+      inline-size: auto;
+      block-size: auto;
+
+      white-space: normal;
+
+      clip-path: none;
+    }
+
+    & tbody {
+      display: table-row-group;
+    }
+
+    & tr {
+      /* ``display: table-row`` ignores margin, padding, and border-radius; styling
+       * for stripes / borders applies to the cells (& th, & td) below. */
+      display: table-row;
+      background: transparent;
+    }
+
+    & tr:nth-child(even) {
+      background: var(--color-bg-stripe);
+    }
+
+    & th,
+    & td {
+      display: table-cell;
+
+      padding: var(--space-xs) var(--space-sm);
+      border: var(--hairline) solid var(--color-border);
+
+      text-align: start;
+      vertical-align: top;
+    }
+
+    & th {
+      font-weight: 600;
+      background: var(--color-bg-stripe);
+    }
+
+    & .thumb-cell {
+      display: table-cell;
+    }
+  }
+
+  .clip-list td::before,
+  .clip-list .thumb-cell::before {
+    content: none;
+  }
+
+  .clip-list img {
+    inline-size: auto;
+    max-inline-size: 10rem;
+  }
+
+  /* Constrain video back to a sensible width once the viewport is wide enough that
+   * stretching it edge-to-edge wastes screen space. */
+  video {
+    max-inline-size: 40rem;
+  }
+}
+
+/* =====================================================================
+ * Desktop: 1024px+
+ *
+ * Cap content width for readability and switch detail metadata to two
+ * columns where the value column has room to breathe.
+ * ===================================================================== */
+
+@media (width >= 64rem) {
+  main {
+    max-inline-size: var(--content-max);
+  }
+
+  .detail-meta {
+    grid-template-columns: [meta-start] max-content [meta-divider] 1fr [meta-end];
+    gap: var(--space-xs) var(--space-md);
+
+    & dt {
+      margin-block-start: 0;
+    }
+  }
+}

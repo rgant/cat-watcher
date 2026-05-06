@@ -1,3 +1,4 @@
 .venv/
 docs/resources/
+node_modules/
 tests/fixtures/generated/

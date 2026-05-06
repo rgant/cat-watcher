@@ -1,9 +1,11 @@
 """Shared pytest fixtures for the cat-watcher test suite."""
 
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from fastapi.testclient import TestClient
 from make_clip import make_clip
 from pydantic import SecretStr
 
@@ -24,9 +26,11 @@ from cat_watcher.config import (
     WebConfig,
 )
 from cat_watcher.db import Base, Camera, Clip, PollStatus, create_engine, get_session
+from cat_watcher.web.app import build_app
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterator
+    from contextlib import AbstractContextManager
     from datetime import datetime
     from pathlib import Path
 
@@ -177,3 +181,37 @@ def seed_clip() -> Callable[..., None]:
             session.add(clip)
 
     return _seed
+
+
+@pytest.fixture
+def web_test_client() -> Callable[[Config], AbstractContextManager[TestClient]]:
+    """Factory: materialize the SQLite schema under ``config.internal_root`` and yield a ``TestClient``.
+
+    Calling ``web_test_client(config)`` runs ``Base.metadata.create_all`` **eagerly** so the test
+    can seed rows / files between the call and the ``with``-statement entry. The returned context
+    manager only runs the FastAPI lifespan (which spawns the heartbeat task) — that's what needs
+    the start-and-stop bracket. SQLite WAL mode lets the test process keep read-writing the same
+    file concurrently with the app's session.
+
+    Usage::
+
+        config = make_config(internal_root, storage_root)
+        # ... seed the DB / disk via fresh engines pointed at config.internal_root ...
+        with web_test_client(config) as client:
+            response = client.get(...)
+    """
+
+    def _factory(config: Config) -> AbstractContextManager[TestClient]:
+        engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+        Base.metadata.create_all(engine)
+        engine.dispose()
+        app = build_app(config)
+
+        @contextmanager
+        def _enter_lifespan() -> Generator[TestClient]:
+            with TestClient(app) as client:
+                yield client
+
+        return _enter_lifespan()
+
+    return _factory

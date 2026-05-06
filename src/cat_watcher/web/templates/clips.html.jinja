@@ -1,0 +1,90 @@
+{% extends "base.html.jinja" %}
+{% block title %}
+  Clips · Cat Watcher
+{% endblock title %}
+{% block content %}
+  <h1>Clips</h1>
+  <form class="filter-form"
+        method="get"
+        action="{{ url_for('list_clips') }}"
+        aria-label="Filter clips">
+    <label>
+      Camera
+      <select name="camera">
+        <option value="">All cameras</option>
+        {% for cam in cameras %}
+          <option value="{{ cam.name }}"
+                  {% if filters.camera == cam.name %}selected{% endif %}>{{ cam.display_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Has cat
+      <select name="has_cat">
+        <option value="">Any</option>
+        <option value="true"
+                {% if filters.has_cat is sameas true %}selected{% endif %}>Yes</option>
+        <option value="false"
+                {% if filters.has_cat is sameas false %}selected{% endif %}>No</option>
+      </select>
+    </label>
+    <label>
+      Date (UTC)
+      <input type="date" name="date_str" value="{{ filters.date or '' }}">
+    </label>
+    <button type="submit">Filter</button>
+  </form>
+  {% if clip_rows %}
+    {# ``data-label`` on every body ``<td>`` powers the mobile card-stack pattern in
+     style.css: at narrow widths the table rows render as labelled stacks via
+     ``td::before { content: attr(data-label); }``; at ≥768px the labels are hidden
+     via ``content: none`` and the real table layout returns. The thumbnail cell is
+     opted out of the label pattern via the ``thumb-cell`` class because the image
+     itself is the row's visual anchor. #}
+    <table class="clip-list">
+      <caption class="sr-only">Clips, ordered newest first, capped at 200 rows.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Thumbnail</th>
+          <th scope="col">Camera</th>
+          <th scope="col">Start (UTC)</th>
+          <th scope="col">Duration</th>
+          <th scope="col">Cat?</th>
+          <th scope="col">Score</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in clip_rows %}
+          {% set effective_cat = row.manual_has_cat if row.manual_has_cat is not none else row.has_cat %}
+          <tr>
+            <td class="thumb-cell">
+              <a href="{{ url_for('clip_detail', clip_id=row.id) }}">
+                <img src="{{ url_for('media_thumb', clip_id=row.id) }}"
+                     alt="Thumbnail of {{ row.source_filename }}"
+                     loading="lazy"
+                     width="160"
+                     height="90">
+              </a>
+            </td>
+            <td data-label="Camera">{{ row.camera_display_name }}</td>
+            <td data-label="Start (UTC)">
+              <a href="{{ url_for('clip_detail', clip_id=row.id) }}">
+                <time datetime="{{ row.start_ts.isoformat() }}">{{ row.start_ts.isoformat() }}</time>
+              </a>
+            </td>
+            <td data-label="Duration">{{ "%.1f"|format(row.duration_seconds) }}s</td>
+            <td data-label="Cat?">
+              <span class="{{ 'badge-cat' if effective_cat else 'badge-no-cat' }} {{ 'badge-manual' if row.manual_has_cat is not none else '' }}">
+                {{ 'cat' if effective_cat else 'no cat' }}
+                {% if row.manual_has_cat is not none %}(manual){% endif %}
+              </span>
+            </td>
+            <td data-label="Score">{{ "%.2f"|format(row.max_score) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No clips match the current filters.</p>
+  {% endif %}
+{% endblock content %}

@@ -5,9 +5,16 @@ browse via web UI, and alert on inactivity / unusual frequency / agent failures.
 
 ## Quick start (development)
 
+Prerequisites: [Homebrew](https://brew.sh/), [pixi](https://pixi.sh/), and
+[nvm](https://github.com/nvm-sh/nvm) for Node version management. The Node
+version is pinned via `.nvmrc` (currently 24).
+
 ```bash
-brew bundle
-pixi install
+brew bundle           # system tools: pixi, dprint, markdownlint, shellcheck, ffmpeg, ...
+pixi install          # Python + conda env (FastAPI, SQLAlchemy, ultralytics, ...)
+nvm install           # install the Node version pinned in .nvmrc (one-time)
+nvm use               # switch this shell to that Node version
+npm ci                # stylelint + stylelint-config-standard, exact versions from package-lock.json
 cp config.example.toml config.toml
 cp .env.example .env  # fill in real secrets
 mkdir data
@@ -15,9 +22,15 @@ pixi run db-upgrade
 pixi run dev
 ```
 
-`brew bundle` installs system tools (including pixi itself); `pixi install` then
-provisions the Python/conda environment. Both are required and must run in that
-order.
+`brew bundle` installs system tools (including pixi itself); `pixi install`
+provisions the Python/conda environment; `npm ci` provisions the JS-based
+linters (stylelint). The three are independent and must run in that order
+because subsequent commands depend on each.
+
+`npm ci` (clean install) is preferred over `npm install` for reproducibility: it
+installs the exact versions in `package-lock.json` and refuses to run if the
+lockfile is out of sync. Use `npm update <pkg>` only when intentionally
+upgrading a JS dep.
 
 ## Useful commands
 
@@ -32,6 +45,53 @@ pixi run cat-watcher-backup              # back up the database
 pixi run markdownlint --fix .            # lint / auto-fix Markdown
 pixi tree                                # dependency tree
 ```
+
+## Running the web app locally
+
+`pixi run dev` boots the FastAPI app under uvicorn with hot-reload, binding to
+`[web].host:[web].port` from `config.toml` (defaults: `0.0.0.0:8000`). After it
+prints `Application startup complete.`, open:
+
+- <http://localhost:8000/> — landing page (timeline view; renders an empty SVG
+  until Task 23 lands the real timeline UI).
+- <http://localhost:8000/clips> — clip list with camera / has-cat / date
+  filters.
+- <http://localhost:8000/health> — JSON liveness probe; **no auth required**,
+  useful for `curl` loops and uptime checks.
+
+Every route except `/health` is protected by HTTP Basic Auth. Use the
+credentials from `.env`:
+
+```bash
+CAT_WATCHER_WEB_USERNAME=...   # e.g. "admin"
+CAT_WATCHER_WEB_PASSWORD=...   # operator password
+```
+
+Hot-reload covers the whole iteration loop:
+
+| Edit                               | What happens                                                                |
+| ---------------------------------- | --------------------------------------------------------------------------- |
+| `src/cat_watcher/**/*.py`          | uvicorn restarts the process; the next request hits the new code.           |
+| `src/cat_watcher/web/templates/**` | `arel` watcher pushes a reload over WebSocket; open browser tabs refresh.   |
+| `src/cat_watcher/web/static/**`    | `arel` watcher pushes a reload; CSS/JS edits appear without a manual Cmd-R. |
+| `config.toml`                      | uvicorn re-imports `reload_app` on next request; new config is in effect.   |
+
+The browser-side auto-reload is wired through
+[`arel`](https://github.com/florimondmanca/arel) — a dev-only PyPI dep
+(production installs do not pull it in). It mounts a WebSocket at `/hot-reload`
+and injects a small listener script into every rendered page. Disconnects retry
+every second so editor saves that briefly drop the connection heal
+automatically.
+
+To bind a different port without editing `config.toml`, point at an alternate
+config:
+
+```bash
+pixi run cat-watcher-web --reload --config /path/to/dev-config.toml
+```
+
+`pixi run dev` is the standard interactive command; the production LaunchAgent
+runs `cat-watcher-web` (without `--reload`).
 
 ## Running the poller manually
 

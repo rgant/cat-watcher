@@ -1448,6 +1448,41 @@ Range requests), manual labeling, activity statistics, and alert history. The
 phase concludes when the application is accessible at `localhost:8000` via
 `pixi run dev` and passes end-to-end integration tests.
 
+### Phase 4 conventions (established in Task 21; honor in 22-24)
+
+- **Template files:** `src/cat_watcher/web/templates/*.html.jinja`. The
+  `.html.jinja` extension lets editor plugins recognize templates and lets
+  `djlint` filter via `extension = "html.jinja"`. Use
+  `templates.TemplateResponse(request, "name.html.jinja", ...)`.
+- **Internal links use `{{ url_for("name", **kwargs) }}`,** never hard-coded
+  paths. FastAPI auto-names routes after their function names (e.g.
+  `url_for("list_clips")`, `url_for("media_clip", clip_id=...)`); Starlette's
+  StaticFiles is mounted as `name="static"` so
+  `url_for("static", path="style.css")` resolves CSS / JS assets.
+- **`{# djlint:off J018 #}` / `{# djlint:on #}` pragmas** wrap hard-coded hrefs
+  that point at routes which do not yet exist (e.g. `base.html.jinja`'s nav
+  links to `/`, `/cameras`, `/stats`, `/alerts`). When the task that adds one of
+  those routes lands, replace the hardcoded path with `{{ url_for("...") }}` and
+  remove the surrounding pragma.
+- **HTTP Range support** comes from `starlette.responses.FileResponse` — no
+  custom Range parsing. `FileResponse` returns 206/Content-Range for valid
+  ranges, 400 for malformed syntax, 416 for ranges past EOF, 200 + full file
+  when no Range header is sent.
+- **htmx 2.x** is loaded in `base.html.jinja` with SRI integrity. Pages opt into
+  reactivity via `hx-*` attributes; no JS build step.
+- **Browser auto-reload:** `cat-watcher-web --reload` (i.e. `pixi run dev`)
+  passes `dev_hot_reload=True` to `build_app`, which mounts an `arel` WebSocket
+  at `/hot-reload` watching `static/` and `templates/`. Production never imports
+  `arel`.
+- **CSS conventions** in `src/cat_watcher/web/static/style.css`: mobile-first
+  cascade with `min-width` media queries only; OKLCH color tokens via CSS custom
+  properties; named grid lines on every CSS Grid; 44×44 minimum touch targets
+  via `--tap-target`. `stylelint` enforces.
+- **Lint chain extensions:** `pixi run lint` runs `djlint --check` over
+  templates and `npx stylelint` over `static/*.css`; `pixi run format` runs the
+  corresponding `--reformat` / `--fix`. Node 24+ via nvm; `npm ci` populates
+  `node_modules/`.
+
 ---
 
 ### Task 20: Web App Skeleton — DONE
@@ -1493,7 +1528,7 @@ Scope: FastAPI app, auth middleware, lifespan, heartbeat task, and `/health`.
 
 ---
 
-### Task 21: Web Routes — Clip Management
+### Task 21: Web Routes — Clip Management — DONE
 
 Scope: clip listing, detail views, and media streaming with HTTP Range support.
 
@@ -1511,37 +1546,49 @@ Scope: clip listing, detail views, and media streaming with HTTP Range support.
 - **Media Streaming**:
   - Surface: `GET /media/clip/{clip_id}.mp4` and
     `GET /media/thumb/{clip_id}.jpg`.
-  - **HTTP Range Support**: The MP4 endpoint must support `bytes` range requests
-    to allow seeking in the browser video player. Parse the `Range` header,
-    calculate content length, and return `206 Partial
-    Content` with
-    appropriate `Content-Range` headers.
-  - **Storage-offline degradation (per spec §4.13):** when the underlying file
-    is not accessible (external drive offline, file missing), return
-    `503 Service Unavailable` with a short JSON body explaining the cause. The
-    UI handles the 503 via the timeline placeholder + banner pattern in Task 23.
-- **Templates**:
-  - `base.html`: Define the core layout (head, body blocks).
-  - `clips.html`: Render the filter form and a list of clip thumbnails with
-    summary metadata.
-  - `clip_detail.html`: Render the video player (using `<video>` with
-    `preload="metadata"`), detailed detection stats, **and the manual label
-    form** (POST target `/clips/{id}/label`, plus a "clear label" button that
-    issues the DELETE via htmx). The endpoints themselves are Task 22; the form
-    HTML and its placement live here so the user can edit a clip from the same
-    page they're viewing it on.
+  - **HTTP Range Support:** delegated to `starlette.responses.FileResponse`
+    (returns 206 with correct `Content-Range` for valid ranges, 400 for
+    malformed Range syntax, 416 for ranges that fall past EOF). No custom range
+    parsing in our code.
+  - **Storage-availability response codes** distinguish three failure modes:
+    - `404 Not Found` — no clip row with that id.
+    - `503 Service Unavailable` — `storage_root` is not currently accessible
+      (drive unmounted / locked, per spec §4.13). The UI handles 503 via the
+      timeline placeholder + banner pattern in Task 23.
+    - `410 Gone` — clip row exists, drive is mounted, but the file is gone
+      (data-integrity drift; e.g. retention sweep removed the file before the
+      row). Distinct from 503 so operators can separate the two conditions in
+      logs.
+- **Templates** (`src/cat_watcher/web/templates/`):
+  - `base.html.jinja`: core layout (head/body blocks), primary nav, htmx + arel
+    script tags, `{{ dev_hot_reload_script | safe }}` placeholder.
+  - `clips.html.jinja`: filter form + clip-list table. Uses `data-label`
+    attributes on `<td>` cells so the mobile card-stack pattern in `style.css`
+    can render labelled rows below the 768px breakpoint.
+  - `clip_detail.html.jinja`: video player (`<video preload="metadata">`),
+    detection metadata, **and the manual label form** (POST target
+    `/clips/{id}/label`, plus a "clear label" button that issues the DELETE via
+    htmx). The endpoints themselves are Task 22; the form HTML and its placement
+    live here so the user can edit a clip from the same page they're viewing it
+    on. The hardcoded `/clips/{id}/label` action sits inside a
+    `{# djlint:off J018 #}` block — Task 22 swaps it for `url_for(...)` and
+    removes the pragma.
 
 #### Testing Requirements (`tests/integration/test_web_clips.py`)
 
-- **Shared Fixture**: Create a helper to materialize a test client, temporary
-  data directory, and database migration.
-- **Data Rendering**: Verify that the clip list and detail pages render expected
-  database content (e.g., camera names).
-- **Streaming Integrity**: Verify that media endpoints return the full file on
-  standard requests.
-- **Range Validation**: Verify that requesting a specific byte range (e.g.,
-  `bytes=0-15`) returns only that segment of the file and the correct
-  `Content-Range` header.
+- **Shared `web_test_client` fixture** in `tests/conftest.py` materializes the
+  schema and yields a `TestClient` running the FastAPI lifespan.
+- **Data rendering:** clip list and detail pages render expected DB content
+  (camera display names, max_score, detector_version, manual-label form action
+  targeting `/clips/{id}/label`).
+- **Filter contract:** each of `?camera=`, `?has_cat=`, `?date_str=` works in
+  isolation; combining all three narrows to the AND-intersection.
+- **Ordering:** `/clips` renders rows in `start_ts DESC` order regardless of
+  insert order.
+- **Media routing:** full file (200), valid Range (206), open-ended Range
+  (`bytes=N-`), malformed/inverted/past-EOF Ranges (400/400/416),
+  storage-unmounted (503), file-missing-but-storage-mounted (410), unknown clip
+  id (404).
 
 ---
 
@@ -1561,6 +1608,11 @@ Scope: manual annotation of clips (POST and DELETE).
 - **Label Removal**:
   - Surface: `DELETE /clips/{clip_id}/label`.
   - Instructions: Nullify all manual label fields for the specified clip.
+- **Template cleanup:** in `clip_detail.html.jinja`, replace the hardcoded
+  `/clips/{{ clip.id }}/label` action on both the save and clear-label forms
+  with `{{ url_for("set_label", clip_id=clip.id) }}` (or whatever the auto-
+  generated route name resolves to per the function name) and remove the
+  surrounding `{# djlint:off J018 #}` / `{# djlint:on #}` pragma block.
 
 #### Testing Requirements (`tests/integration/test_web_label.py`)
 
@@ -1617,6 +1669,10 @@ presets.
     `storage_root`. When the probe fails, the template renders a thin banner at
     the top of the page: "External storage offline — clip playback and
     thumbnails unavailable". When the probe succeeds, no banner.
+- **Template cleanup:** in `base.html.jinja` nav, replace the hardcoded
+  `<a href="/">Timeline</a>` with `<a href="{{ url_for('root') }}">` (or the
+  matching auto-generated name) and remove the surrounding
+  `{# djlint:off J018 #}` block scoped to that link.
 
 #### Testing Requirements (`tests/integration/test_web_timeline.py`)
 
@@ -1664,6 +1720,10 @@ Scope: per-camera health, aggregated activity, and alert history.
   - Render a log table showing the alert type, camera (or "—" for non-camera
     alerts), dispatch status (`email_ok` / `macos_ok`), and subject line, sorted
     newest first.
+- **Template cleanup:** in `base.html.jinja` nav, replace the hardcoded
+  `<a href="/cameras">`, `<a href="/stats">`, `<a href="/alerts">` with their
+  `url_for(...)` equivalents (auto-generated route names from the function
+  names) and remove the surrounding `{# djlint:off J018 #}` block.
 
 #### Testing Requirements (`tests/integration/test_web_stats_alerts.py`)
 
