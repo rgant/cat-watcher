@@ -63,6 +63,22 @@ _DEFAULT_CAMERAS: tuple[CameraConfig, ...] = (
 
 
 @pytest.fixture
+def storage_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """Materialize ``(internal_root, storage_root)`` under ``tmp_path`` and return both paths.
+
+    Mirrors the directory layout every agent expects in production: separate roots for the local
+    SSD-backed DB / logs (``internal_root``) and the bulk-storage drive (``storage_root``). Tests
+    that exercise ``run_alerts_tick`` / ``run_tick`` / ``build_app`` / etc. need both pre-created
+    so :class:`cat_watcher.config.Config` validation and ``ensure_storage_layout`` succeed.
+    """
+    internal_root = tmp_path / "internal"
+    storage_root = tmp_path / "storage"
+    internal_root.mkdir()
+    storage_root.mkdir()
+    return internal_root, storage_root
+
+
+@pytest.fixture
 def make_config() -> Callable[..., Config]:
     """Factory for a minimal valid :class:`Config` populated with one ``pantry`` camera.
 

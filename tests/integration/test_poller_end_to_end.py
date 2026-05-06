@@ -70,7 +70,7 @@ def _make_detector(*, has_cat: bool) -> MagicMock:
 
 @respx.mock
 def test_full_tick_ingests_clip_to_canonical_layout(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
@@ -80,10 +80,7 @@ def test_full_tick_ingests_clip_to_canonical_layout(
     matching paths. The downloaded "video bytes" are the synthetic test clip, so ffmpeg's thumbnail
     step succeeds against real H.264.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -131,15 +128,12 @@ def test_full_tick_ingests_clip_to_canonical_layout(
 
 @respx.mock
 def test_full_tick_with_no_detect_skips_inference_and_marks_clip(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
     """``--no-detect`` (passed as ``detector=None``): clip is ingested with the skip marker."""
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -166,7 +160,7 @@ def test_full_tick_with_no_detect_skips_inference_and_marks_clip(
 
 @respx.mock
 def test_full_tick_list_only_is_strict_dry_run(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
@@ -183,10 +177,7 @@ def test_full_tick_list_only_is_strict_dry_run(
     ``_resolve_window`` needs to read ``last_polled_at`` from. The flag's reason for existing is
     repeatable testing — any state mutation would invalidate the next run's ``since`` window.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -221,7 +212,7 @@ def test_full_tick_list_only_is_strict_dry_run(
 
 @respx.mock
 def test_full_tick_default_window_advances_last_polled_at(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
@@ -231,10 +222,7 @@ def test_full_tick_default_window_advances_last_polled_at(
     Together they pin the contract: ``last_polled_at`` advances only when the run can prove it
     covered the full ``[last_polled_at, now]`` window.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -261,7 +249,7 @@ def test_full_tick_default_window_advances_last_polled_at(
 
 @respx.mock
 def test_full_tick_with_limit_does_not_advance_cursor(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
@@ -271,10 +259,7 @@ def test_full_tick_with_limit_does_not_advance_cursor(
     advance ``last_polled_at`` past the unprocessed clips, silently dropping them on the next
     default tick. Observation fields (``last_clip_at``, ``poll_status``) still update.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -301,15 +286,12 @@ def test_full_tick_with_limit_does_not_advance_cursor(
 
 @respx.mock
 def test_full_tick_idempotent_on_second_invocation(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
     """Running the same tick twice ingests the recording exactly once (UNIQUE constraint guard)."""
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -335,15 +317,12 @@ def test_full_tick_idempotent_on_second_invocation(
 
 @respx.mock
 def test_full_tick_camera_unreachable_records_status(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
     """A connection failure surfaces as ``PollStatus.UNREACHABLE`` on the Camera row."""
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -377,16 +356,13 @@ def test_full_tick_camera_unreachable_records_status(
 
 @respx.mock
 def test_full_tick_isolates_per_camera_failures(  # pylint: disable=too-many-locals  # multi-camera setup needs them
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., Config],
 ) -> None:
     """Two cameras: A is unreachable, B succeeds. As state -> UNREACHABLE, Bs clip lands."""
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     cameras = [
         CameraConfig(name="cam_a", display_name="A", host="cam-a.example.com", port=80, timezone="UTC"),
         CameraConfig(name="cam_b", display_name="B", host="cam.example.com", port=80, timezone="UTC"),
@@ -434,15 +410,12 @@ def test_full_tick_isolates_per_camera_failures(  # pylint: disable=too-many-loc
 
 @respx.mock
 def test_full_tick_records_analysis_error_when_detector_fails(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[..., Config],
 ) -> None:
     """A DetectorError during detect() is captured into clips.analysis_error; the clip still inserts."""
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -473,15 +446,12 @@ def test_full_tick_records_analysis_error_when_detector_fails(
 
 @respx.mock
 def test_full_tick_respects_limit_cap(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[..., Config],
 ) -> None:
     """``--limit 1`` ingests at most one recording even when the camera reports several."""
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -531,7 +501,7 @@ def test_full_tick_respects_limit_cap(
 
 @respx.mock
 def test_full_tick_file_before_row_ordering_leaves_only_orphan_file_on_db_failure(  # pylint: disable=too-many-locals  # crash-simulation test needs the setup
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., Config],
@@ -542,10 +512,7 @@ def test_full_tick_file_before_row_ordering_leaves_only_orphan_file_on_db_failur
     must leave the .mp4 + .jpg on disk (so retention pass 2 can sweep them later) and NOT leave a
     Clip row pointing at a partial file.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -590,7 +557,7 @@ def test_full_tick_file_before_row_ordering_leaves_only_orphan_file_on_db_failur
 
 @respx.mock
 def test_full_tick_writes_heartbeat_and_agent_starts_row(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
@@ -601,10 +568,7 @@ def test_full_tick_writes_heartbeat_and_agent_starts_row(
     either insertion would silently break those checks; ``test_full_tick_list_only_is_strict_dry_run``
     pins the absent-on-list-only contract — this is the present-on-real-tick complement.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
@@ -668,7 +632,7 @@ def _seed_aged_camera_and_clip(engine: Engine, storage_root: Path) -> tuple[Path
 
 @respx.mock
 def test_full_tick_invokes_retention_sweep_to_prune_aged_clips(
-    tmp_path: Path,
+    storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
@@ -679,10 +643,7 @@ def test_full_tick_invokes_retention_sweep_to_prune_aged_clips(
     call site at the integration level — the unit ``test_retention.py`` proves the sweep itself
     works, but only this test catches a regression that drops the call entirely.
     """
-    internal_root = tmp_path / "internal"
-    storage_root = tmp_path / "storage"
-    internal_root.mkdir()
-    storage_root.mkdir()
+    internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")

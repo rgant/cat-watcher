@@ -1450,7 +1450,7 @@ phase concludes when the application is accessible at `localhost:8000` via
 
 ---
 
-### Task 20: Web App Skeleton
+### Task 20: Web App Skeleton — DONE
 
 Scope: FastAPI app, auth middleware, lifespan, heartbeat task, and `/health`.
 
