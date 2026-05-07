@@ -25,15 +25,12 @@
        so screen readers announce the current page even before any script runs. #}
     {% set current_path = request.url.path %}
     <nav class="primary" aria-label="Primary">
-      {# djlint:off J018 #}
-      {# /, /cameras, /stats, /alerts land in Tasks 23-24; switch to url_for(...) when their
-         routes exist. #}
-      <a href="/"
+      <a href="{{ url_for('root') }}"
          {% if current_path == "/" or current_path.startswith("/timeline") %}aria-current="page"{% endif %}>Timeline</a>
-      {# djlint:on #}
       <a href="{{ url_for('list_clips') }}"
          {% if current_path.startswith("/clips") %}aria-current="page"{% endif %}>Clips</a>
       {# djlint:off J018 #}
+      {# /cameras, /stats, /alerts land in Task 24; switch to url_for(...) when their routes exist. #}
       <a href="/cameras"
          {% if current_path.startswith("/cameras") %}aria-current="page"{% endif %}>Cameras</a>
       <a href="/stats"

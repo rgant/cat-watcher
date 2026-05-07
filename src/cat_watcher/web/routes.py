@@ -8,6 +8,8 @@ The full route surface lands across Tasks 20-24; this module today owns:
 * ``/media/thumb/{id}.jpg`` (Task 21) — thumbnail JPEG.
 * ``POST /clips/{id}/label`` and ``DELETE /clips/{id}/label`` (Task 22) — manual label
   set/clear; the POST redirects 303 back to the detail page so the form survives a refresh.
+* ``/`` and ``/timeline`` (Task 23) — per-camera SVG activity timeline; switches between per-clip
+  markers and per-hour heatmap buckets at the 24h threshold (spec §4.7.1).
 
 Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state`` — they
 do **not** instantiate their own engine or templates loader.
@@ -23,6 +25,7 @@ modes for missing files:
   the operator-visible signal in logs separable from the bulk-offline case.
 """
 
+from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
@@ -30,7 +33,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import desc, select
 
-from cat_watcher.db import Camera, Clip, Heartbeat, get_session
+from cat_watcher.db import AlertSent, Camera, Clip, Heartbeat, get_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -71,6 +74,20 @@ health_router = APIRouter()
 clips_router = APIRouter()
 label_router = APIRouter()
 media_router = APIRouter()
+timeline_router = APIRouter()
+
+
+_TIMELINE_RANGES: dict[str, timedelta] = {
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+_TIMELINE_DEFAULT_RANGE = "24h"
+# Spec §4.7.1: bucketing kicks in for windows wider than 24h to keep marker count below the
+# pixel-per-clip resolution. Hardcoded — operators don't choose, the rendering does.
+_TIMELINE_BUCKET_THRESHOLD = timedelta(hours=24)
+_BUCKET_SECONDS = 3600  # one bin per hour
 
 
 @health_router.get("/health")
@@ -291,3 +308,146 @@ def _storage_root_available(storage_root: Path) -> bool:
     probe would conflict with read-only mounts that operators sometimes use during data recovery.
     """
     return storage_root.is_dir()
+
+
+@timeline_router.get("/")
+async def root(request: Request, range: str = _TIMELINE_DEFAULT_RANGE) -> object:  # noqa: A002  # ``range`` is the public query-param name
+    """Render the activity timeline at the default 24h window (or whatever ``?range=`` overrides to).
+
+    Same handler as :func:`timeline`; the distinct route name is what the nav's ``url_for('root')``
+    resolves to so the "Timeline" link in the header has a stable name.
+    """
+    return _render_timeline(request, range_key=range)
+
+
+@timeline_router.get("/timeline")
+async def timeline(request: Request, range: str = _TIMELINE_DEFAULT_RANGE) -> object:  # noqa: A002
+    """Render the activity timeline scoped to ``?range=`` (one of 6h / 24h / 7d / 30d).
+
+    Lives at a separate path so HTMX can ``hx-get`` the partial without rewriting the page URL.
+    """
+    return _render_timeline(request, range_key=range)
+
+
+def _render_timeline(request: Request, *, range_key: str) -> object:
+    """Build the timeline view-model and dispatch to ``timeline.html.jinja``.
+
+    Density bucketing kicks in when the requested window is wider than
+    :data:`_TIMELINE_BUCKET_THRESHOLD` (spec §4.7.1). Below the threshold we hand the template a
+    flat list of per-clip markers; above it we collapse to per-hour bins keyed by lane.
+    """
+    state = _state(request)
+    delta = _TIMELINE_RANGES.get(range_key, _TIMELINE_RANGES[_TIMELINE_DEFAULT_RANGE])
+    if range_key not in _TIMELINE_RANGES:
+        # Snap to the default rather than 400-ing — operators following an old bookmark should
+        # still get a usable page, just at the standard window.
+        range_key = _TIMELINE_DEFAULT_RANGE
+    start_window = datetime.now(UTC) - delta
+
+    with get_session(state.engine) as session:
+        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
+        clips = list(session.scalars(select(Clip).where(Clip.start_ts >= start_window).order_by(Clip.start_ts)))
+        alerts = list(session.scalars(select(AlertSent).where(AlertSent.sent_at >= start_window).order_by(AlertSent.sent_at)))
+        camera_rows = [_camera_lane(cam) for cam in cameras]
+        clip_markers_by_camera: dict[int, list[dict[str, object]]] = defaultdict(list)
+        for clip in clips:
+            clip_markers_by_camera[clip.camera_id].append(
+                _clip_marker(clip, start_window=start_window, total_seconds=delta.total_seconds()),
+            )
+        alert_markers = [_alert_marker(alert, start_window=start_window, total_seconds=delta.total_seconds()) for alert in alerts]
+
+    use_buckets = delta > _TIMELINE_BUCKET_THRESHOLD
+    if use_buckets:
+        lanes: dict[int, list[dict[str, object]]] = {
+            cam.id: _bucket_markers(clip_markers_by_camera.get(cam.id, []), total_seconds=delta.total_seconds()) for cam in cameras
+        }
+    else:
+        lanes = {cam.id: clip_markers_by_camera.get(cam.id, []) for cam in cameras}
+
+    return state.templates.TemplateResponse(
+        request,
+        "timeline.html.jinja",
+        {
+            "cameras": camera_rows,
+            "lanes": lanes,
+            "alerts": alert_markers,
+            "range_key": range_key,
+            "ranges": list(_TIMELINE_RANGES),
+            "use_buckets": use_buckets,
+            "storage_online": _storage_root_available(state.config.storage_root),
+            "tz": state.config.web.display_timezone,
+        },
+    )
+
+
+def _camera_lane(cam: Camera) -> dict[str, object]:
+    """Project a Camera row into a flat dict the template can render without lazy loads."""
+    return {"id": cam.id, "name": cam.name, "display_name": cam.display_name}
+
+
+def _clip_marker(clip: Clip, *, start_window: datetime, total_seconds: float) -> dict[str, object]:
+    """Project a Clip into a flat dict + relative position fraction the SVG template can lay out.
+
+    ``css_classes`` is precomputed here (rather than templated as multi-line ``{% if %}`` blocks) so
+    djlint's HTML reformatter can't insert newlines into the class attribute — that would break
+    integration tests that match on the rendered ``class="clip ..."`` substring.
+    """
+    offset_seconds = (clip.start_ts - start_window).total_seconds()
+    effective = clip.has_cat if clip.manual_has_cat is None else clip.manual_has_cat
+    classes = ["clip", "clip-cat" if effective else "clip-no-cat"]
+    if clip.manual_has_cat is not None:
+        classes.append("clip-manual")
+    if clip.analysis_error:
+        classes.append("clip-error")
+    return {
+        "id": clip.id,
+        "start_ts": clip.start_ts,
+        "duration_seconds": clip.duration_seconds,
+        "max_score": clip.max_score,
+        "has_cat": effective,
+        "manual_label": clip.manual_has_cat is not None,
+        "analysis_error": bool(clip.analysis_error),
+        "css_classes": " ".join(classes),
+        # Fractional positions in [0, 1]; the template multiplies by the lane's pixel width.
+        "x_frac": max(0.0, min(1.0, offset_seconds / total_seconds)),
+        "w_frac": max(0.0, min(1.0, clip.duration_seconds / total_seconds)),
+    }
+
+
+def _alert_marker(alert: AlertSent, *, start_window: datetime, total_seconds: float) -> dict[str, object]:
+    """Project an AlertSent into the template view-model: position fraction + label + type."""
+    offset_seconds = (alert.sent_at - start_window).total_seconds()
+    return {
+        "sent_at": alert.sent_at,
+        "alert_type": alert.alert_type.value,
+        "x_frac": max(0.0, min(1.0, offset_seconds / total_seconds)),
+    }
+
+
+def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -> list[dict[str, object]]:
+    """Collapse per-clip markers into per-hour bins so heatmap cells replace dense overlap.
+
+    Each output dict carries the bin's ``x_frac`` (left edge, fractional), ``w_frac`` (constant
+    bucket width, fractional), ``count`` (number of clips in the bin), and ``cat_count`` (subset
+    that resolved cat-positive after applying the manual override). The template uses ``count``
+    for the cell's ``<title>`` text and the color intensity scaling.
+    """
+    buckets: dict[int, dict[str, int]] = defaultdict(lambda: {"count": 0, "cat_count": 0})
+    bucket_w_frac = _BUCKET_SECONDS / total_seconds
+    for marker in markers:
+        x_frac = cast("float", marker["x_frac"])
+        bin_index = int(x_frac * total_seconds // _BUCKET_SECONDS)
+        bucket = buckets[bin_index]
+        bucket["count"] += 1
+        if marker["has_cat"]:
+            bucket["cat_count"] += 1
+    return [
+        {
+            "bin_index": bin_index,
+            "x_frac": (bin_index * _BUCKET_SECONDS) / total_seconds,
+            "w_frac": bucket_w_frac,
+            "count": stats["count"],
+            "cat_count": stats["cat_count"],
+        }
+        for bin_index, stats in sorted(buckets.items())
+    ]

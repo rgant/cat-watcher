@@ -18,13 +18,14 @@ from typing import TYPE_CHECKING
 import pytest
 from sqlalchemy import select
 
-from cat_watcher.db import Base, Camera, Clip, create_engine, get_session
+from cat_watcher.db import Camera, Clip
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from fastapi.testclient import TestClient
+    from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
 
@@ -34,6 +35,7 @@ _DEFAULT_START_TS = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
 
 
 def _seed_camera_and_clip(  # noqa: PLR0913  # test-fixture builder; bundling args at the call-site is noisier
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
     *,
     internal_root: Path,
     storage_root: Path,
@@ -54,19 +56,14 @@ def _seed_camera_and_clip(  # noqa: PLR0913  # test-fixture builder; bundling ar
     if write_files:
         _materialize_clip_files(storage_root, rel_clip, clip_bytes, rel_thumb, thumb_bytes)
 
-    engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
-    try:
-        Base.metadata.create_all(engine)  # idempotent; lets seeding precede web_test_client(config)
-        with get_session(engine) as session:
-            cam = Camera(name=camera_name, display_name=camera_display_name, host="cam.example.com")
-            session.add(cam)
-            session.flush()
-            clip = _build_clip(cam.id, rel_clip, rel_thumb, start_ts, len(clip_bytes), has_cat=has_cat)
-            session.add(clip)
-            session.flush()
-            return cam.id, clip.id
-    finally:
-        engine.dispose()
+    with db_session_factory(internal_root) as session:
+        cam = Camera(name=camera_name, display_name=camera_display_name, host="cam.example.com")
+        session.add(cam)
+        session.flush()
+        clip = _build_clip(cam.id, rel_clip, rel_thumb, start_ts, len(clip_bytes), has_cat=has_cat)
+        session.add(clip)
+        session.flush()
+        return cam.id, clip.id
 
 
 def _relative_paths_for(camera_name: str, start_ts: datetime) -> tuple[str, str]:
@@ -115,42 +112,46 @@ def _build_clip(  # noqa: PLR0913  # constructor wrapper; flat kwargs map 1:1 to
     )
 
 
-def _seed_extra_clip(internal_root: Path, *, source_filename: str, start_ts: datetime, has_cat: bool) -> None:
+def _seed_extra_clip(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    internal_root: Path,
+    *,
+    source_filename: str,
+    start_ts: datetime,
+    has_cat: bool,
+) -> None:
     """Add a second clip on the same (already-seeded) camera so filter tests can compare results."""
-    engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
-    try:
-        with get_session(engine) as session:
-            cam = session.scalar(select(Camera))
-            assert cam is not None
-            date_dir = start_ts.strftime("%Y-%m-%d")
-            session.add(
-                Clip(
-                    camera_id=cam.id,
-                    source_filename=source_filename,
-                    start_ts=start_ts,
-                    end_ts=start_ts + timedelta(seconds=30),
-                    duration_seconds=30.0,
-                    file_path=f"clips/{cam.name}/{date_dir}/{source_filename}",
-                    thumb_path=f"thumbs/{cam.name}/{date_dir}/{source_filename}.jpg",
-                    file_size_bytes=512,
-                    has_cat=has_cat,
-                    detector_version="yolov11n@deadbeef",
-                    ingested_at=datetime.now(UTC),
-                ),
-            )
-    finally:
-        engine.dispose()
+    with db_session_factory(internal_root) as session:
+        cam = session.scalar(select(Camera))
+        assert cam is not None
+        date_dir = start_ts.strftime("%Y-%m-%d")
+        session.add(
+            Clip(
+                camera_id=cam.id,
+                source_filename=source_filename,
+                start_ts=start_ts,
+                end_ts=start_ts + timedelta(seconds=30),
+                duration_seconds=30.0,
+                file_path=f"clips/{cam.name}/{date_dir}/{source_filename}",
+                thumb_path=f"thumbs/{cam.name}/{date_dir}/{source_filename}.jpg",
+                file_size_bytes=512,
+                has_cat=has_cat,
+                detector_version="yolov11n@deadbeef",
+                ingested_at=datetime.now(UTC),
+            ),
+        )
 
 
 def test_clips_list_returns_200_and_renders_camera_display_name(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /clips`` renders the camera's display name for each row."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _ = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root)
+    _ = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
 
     with web_test_client(config) as client:
         response = client.get("/clips", headers=_AUTH_HEADER)
@@ -163,17 +164,20 @@ def test_clips_list_filter_by_camera_name(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``?camera=<name>`` restricts the rendered list to clips for that camera."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, pantry_clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         camera_name="pantry",
         camera_display_name="Pantry",
     )
     _, garage_clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         camera_name="garage",
@@ -195,12 +199,14 @@ def test_clips_list_filter_by_has_cat_true(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``?has_cat=true`` returns only cat-positive clips."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _ = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root, has_cat=True)
+    _ = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, has_cat=True)
     _seed_extra_clip(
+        db_session_factory,
         internal_root,
         source_filename="070000.mp4",
         start_ts=datetime(2026, 5, 1, 7, 0, 0, tzinfo=UTC),
@@ -219,16 +225,19 @@ def test_clips_list_filter_by_date_str(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``?date_str=YYYY-MM-DD`` restricts to clips whose ``start_ts`` falls on that UTC day."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _ = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         start_ts=datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC),
     )
     _seed_extra_clip(
+        db_session_factory,
         internal_root,
         source_filename="100000.mp4",
         start_ts=datetime(2026, 5, 2, 10, 0, 0, tzinfo=UTC),
@@ -262,11 +271,12 @@ def test_clip_detail_renders_video_player_targeting_media_route(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /clips/{id}`` renders a ``<video>`` element pointing at the media route."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
 
     with web_test_client(config) as client:
         response = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER)
@@ -281,11 +291,12 @@ def test_clip_detail_renders_manual_label_form(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /clips/{id}`` renders a label form posting to the ``set_label`` endpoint."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
 
     with web_test_client(config) as client:
         response = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER)
@@ -318,12 +329,13 @@ def test_media_clip_returns_full_file_when_no_range_header(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """A request without ``Range`` returns the entire MP4 with ``200 OK``."""
     payload = b"\x00\x01\x02\x03" * 256  # 1024 bytes, distinct
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
 
     with web_test_client(config) as client:
         response = client.get(f"/media/clip/{clip_id}.mp4", headers=_AUTH_HEADER)
@@ -337,12 +349,13 @@ def test_media_clip_honors_range_header_returns_206(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``Range: bytes=0-15`` returns ``206`` with the requested 16-byte segment + ``Content-Range``."""
     payload = bytes(range(256)) * 4  # 1024 distinct bytes
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
 
     headers = dict(_AUTH_HEADER)
     headers["Range"] = "bytes=0-15"
@@ -360,12 +373,13 @@ def test_media_clip_honors_open_ended_range_header(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``Range: bytes=N-`` (no end) returns from N to EOF."""
     payload = bytes(range(256)) * 4  # 1024 distinct bytes
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
 
     headers = dict(_AUTH_HEADER)
     headers["Range"] = "bytes=512-"
@@ -382,6 +396,7 @@ def test_media_clip_returns_503_when_storage_root_unmounted(
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     tmp_path: Path,
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Spec §4.13: when ``storage_root`` is not accessible, ``/media/clip`` returns ``503``.
 
@@ -394,6 +409,7 @@ def test_media_clip_returns_503_when_storage_root_unmounted(
     missing_storage = tmp_path / "drive-not-mounted"
     config = make_config(internal_root, missing_storage)
     _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=missing_storage,
         write_files=False,
@@ -409,6 +425,7 @@ def test_media_clip_returns_410_when_file_missing_but_storage_mounted(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """DB row exists, ``storage_root`` is mounted, but the specific file is gone — ``410 Gone``.
 
@@ -419,6 +436,7 @@ def test_media_clip_returns_410_when_file_missing_but_storage_mounted(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         write_files=False,
@@ -449,12 +467,14 @@ def test_media_thumb_returns_jpeg_bytes(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``/media/thumb/{id}.jpg`` returns the on-disk thumbnail with a JPEG content type."""
     payload = b"\xff\xd8\xff\xe0" + b"thumb-bytes"
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         thumb_bytes=payload,
@@ -473,12 +493,14 @@ def test_media_thumb_returns_503_when_storage_unmounted(
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     tmp_path: Path,
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Same 503 contract as ``/media/clip`` — drive offline → 503."""
     internal_root, _ = storage_dirs
     missing_storage = tmp_path / "drive-not-mounted"
     config = make_config(internal_root, missing_storage)
     _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=missing_storage,
         write_files=False,
@@ -494,11 +516,13 @@ def test_media_thumb_returns_410_when_thumb_missing(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Same 410 contract as ``/media/clip`` — drive mounted but thumb file gone."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         write_files=False,
@@ -520,12 +544,13 @@ def test_media_thumb_returns_410_when_thumb_missing(
     ],
     ids=["malformed", "missing-prefix", "inverted", "start-past-eof"],
 )
-def test_media_clip_returns_rfc_correct_status_for_bad_range_headers(
+def test_media_clip_returns_rfc_correct_status_for_bad_range_headers(  # noqa: PLR0913  # pylint: disable=too-many-positional-arguments  # parametrized: 4 fixtures + 2 parametrize values
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     range_header: str,
     expected_status: int,
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Bad Range headers get RFC 7233 status codes (400 / 416), not 200 or 500.
 
@@ -538,7 +563,7 @@ def test_media_clip_returns_rfc_correct_status_for_bad_range_headers(
     payload = bytes(range(256)) * 4  # 1024 distinct bytes
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, clip_bytes=payload)
 
     headers = dict(_AUTH_HEADER)
     headers["Range"] = range_header
@@ -552,6 +577,7 @@ def test_clips_list_renders_in_start_ts_descending_order(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /clips`` orders rows by ``start_ts`` descending — newest clips render first.
 
@@ -566,11 +592,13 @@ def test_clips_list_renders_in_start_ts_descending_order(
     # Insert oldest, newest, middle — different order than the expected render order so the
     # test can't accidentally pass on insertion order alone.
     _, oldest_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         start_ts=datetime(2026, 5, 1, 6, 0, 0, tzinfo=UTC),
     )
     _, newest_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         start_ts=datetime(2026, 5, 3, 6, 0, 0, tzinfo=UTC),
@@ -578,6 +606,7 @@ def test_clips_list_renders_in_start_ts_descending_order(
         camera_display_name="Garage",
     )
     _, middle_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         start_ts=datetime(2026, 5, 2, 6, 0, 0, tzinfo=UTC),
@@ -590,19 +619,16 @@ def test_clips_list_renders_in_start_ts_descending_order(
 
     assert response.status_code == 200
     body = response.text
-    pos_newest = body.find(f"/clips/{newest_id}")
-    pos_middle = body.find(f"/clips/{middle_id}")
-    pos_oldest = body.find(f"/clips/{oldest_id}")
-    assert pos_newest > 0, "newest clip's detail link must appear in body"
-    assert pos_middle > 0, "middle clip's detail link must appear in body"
-    assert pos_oldest > 0, "oldest clip's detail link must appear in body"
-    assert pos_newest < pos_middle < pos_oldest, "rows must render newest-first (start_ts DESC)"
+    positions = [body.find(f"/clips/{cid}") for cid in (newest_id, middle_id, oldest_id)]
+    assert all(p > 0 for p in positions), "every clip's detail link must appear in body"
+    assert positions == sorted(positions), "rows must render newest-first (start_ts DESC)"
 
 
 def test_clips_list_filters_compose_with_and_semantics(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """All three filters combined narrow to the intersection — pins AND semantics.
 
@@ -617,6 +643,7 @@ def test_clips_list_filters_compose_with_and_semantics(
     target_ts = datetime(2026, 5, 2, 12, 0, 0, tzinfo=UTC)
     # The clip that should pass all three filters.
     _, target_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         camera_name="pantry",
@@ -626,6 +653,7 @@ def test_clips_list_filters_compose_with_and_semantics(
     )
     # Right camera + day, wrong has_cat.
     _seed_extra_clip(
+        db_session_factory,
         internal_root,
         source_filename="120100.mp4",
         start_ts=target_ts + timedelta(minutes=1),
@@ -633,6 +661,7 @@ def test_clips_list_filters_compose_with_and_semantics(
     )
     # Wrong camera, right has_cat + day.
     _, garage_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         camera_name="garage",
@@ -642,6 +671,7 @@ def test_clips_list_filters_compose_with_and_semantics(
     )
     # Right camera + has_cat, wrong day.
     _, wrong_day_id = _seed_camera_and_clip(
+        db_session_factory,
         internal_root=internal_root,
         storage_root=storage_root,
         camera_name="bedroom",  # extra camera so the seed stays unique

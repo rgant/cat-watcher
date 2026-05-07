@@ -37,7 +37,7 @@ from starlette.routing import WebSocketRoute
 from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
 from cat_watcher.web.auth import BasicAuthMiddleware
-from cat_watcher.web.routes import clips_router, health_router, label_router, media_router
+from cat_watcher.web.routes import clips_router, health_router, label_router, media_router, timeline_router
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
@@ -103,6 +103,7 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     # would never accidentally shadow it; the auth middleware sits in front either way.
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.include_router(health_router)
+    app.include_router(timeline_router)
     app.include_router(clips_router)
     app.include_router(label_router)
     app.include_router(media_router)

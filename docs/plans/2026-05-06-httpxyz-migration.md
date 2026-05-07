@@ -245,7 +245,10 @@ Expected: command succeeds; `[project] dependencies` now lists
 - [ ] **Step 3: Verify the unused standard extras are gone**
 
 Run:
-`pixi list | grep -E '^(fastapi-cli|python-multipart|email-validator)\b' || echo "none of the unused [standard] extras are installed"`
+
+```bash
+pixi list | grep -E '^(fastapi-cli|python-multipart|email-validator)\b' || echo "none of the unused [standard] extras are installed"
+```
 
 Expected: the `echo` message prints — i.e. none of those three packages remain.
 (Spec verification criterion 3.)
@@ -256,7 +259,10 @@ them. Investigate before continuing.
 - [ ] **Step 4: Run the integration tests that exercise TestClient**
 
 Run:
-`pixi run pytest tests/integration/test_web_health.py tests/integration/test_web_clips.py tests/integration/test_web_dev_reload.py -v`
+
+```bash
+pixi run pytest tests/integration/test_web_health.py tests/integration/test_web_clips.py tests/integration/test_web_dev_reload.py -v
+```
 
 Expected: all tests pass. These are the most likely regression site for the
 fastapi-extras change because they `from fastapi.testclient import TestClient`,
@@ -357,7 +363,10 @@ behavior under the same shim.
 - [ ] **Step 6: Print the dependency state for the record**
 
 Run:
-`pixi list | grep -E '^(httpx|httpxyz|httpcorexyz|httpcore|fastapi|fastapi-cli|python-multipart|email-validator|respx)\b' | sort`
+
+```bash
+pixi list | grep -E '^(httpx|httpxyz|httpcorexyz|httpcore|fastapi|fastapi-cli|python-multipart|email-validator|respx)\b' | sort
+```
 
 Expected (approximately):
 

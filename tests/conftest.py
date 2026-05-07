@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
+    from sqlalchemy.orm import Session
 
 
 @pytest.fixture(scope="session")
@@ -217,3 +218,35 @@ def web_test_client() -> Callable[[Config], AbstractContextManager[TestClient]]:
         return _enter_lifespan()
 
     return _factory
+
+
+@pytest.fixture
+def db_session_factory() -> Callable[[Path], AbstractContextManager[Session]]:
+    """Factory: open a Session over the test DB at ``internal_root``, materialize schema, dispose on exit.
+
+    Use when an integration test needs to seed rows BEFORE entering ``web_test_client``'s lifespan
+    — the lifespan opens its own engine on the same SQLite file, so seeding through a separate,
+    short-lived engine and disposing it before the app boots avoids cross-engine connection
+    interference. SQLite WAL mode (set on the engine by :mod:`cat_watcher.db`) keeps subsequent
+    reader/writer engines compatible.
+
+    Usage::
+
+        with db_session_factory(internal_root) as session:
+            cam = Camera(name="pantry", display_name="Pantry", host="cam.example.com")
+            session.add(cam)
+            session.flush()
+            cam_id = cam.id
+    """
+
+    @contextmanager
+    def _open(internal_root: Path) -> Generator[Session]:
+        engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
+        try:
+            Base.metadata.create_all(engine)
+            with get_session(engine) as session:
+                yield session
+        finally:
+            engine.dispose()
+
+    return _open

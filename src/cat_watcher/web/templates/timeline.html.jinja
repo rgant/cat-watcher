@@ -1,0 +1,85 @@
+{% extends "base.html.jinja" %}
+{% block title %}
+  Timeline · Cat Watcher
+{% endblock title %}
+{% block content %}
+  {% set lane_height = 56 %}
+  {% set label_width = 120 %}
+  {% set viewport_width = 1000 %}
+  {% set track_width = viewport_width - label_width %}
+  {% set svg_height = (cameras|length * lane_height) + 40 %}
+  {% if not storage_online %}
+    <p class="banner banner-offline" role="status">External storage offline — clip playback and thumbnails unavailable.</p>
+  {% endif %}
+  <header class="timeline-header">
+    <h1>Timeline</h1>
+    <nav class="range-presets" aria-label="Timeline range">
+      {% for r in ranges %}
+        <a href="{{ url_for("timeline") }}?range={{ r }}"
+           hx-get="{{ url_for("timeline") }}?range={{ r }}"
+           hx-target="#timeline-region"
+           hx-select="#timeline-region"
+           hx-swap="outerHTML"
+           {% if r == range_key %}aria-current="page"{% endif %}>{{ r }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+  <section id="timeline-region" aria-label="Activity timeline">
+    <svg viewBox="0 0 {{ viewport_width }} {{ svg_height }}"
+         preserveAspectRatio="xMidYMid meet"
+         class="timeline-svg"
+         role="img"
+         aria-label="Activity over the last {{ range_key }}">
+      {% for cam in cameras %}
+        {% set lane_y = loop.index0 * lane_height %}
+        <g class="lane" data-camera-id="{{ cam.id }}">
+        <text x="0" y="{{ lane_y + lane_height / 2 }}" dominant-baseline="middle" class="lane-label">{{ cam.display_name }}</text>
+        <line x1="{{ label_width }}" x2="{{ viewport_width }}" y1="{{ lane_y + lane_height / 2 }}" y2="{{ lane_y + lane_height / 2 }}" class="lane-axis"></line>
+        {% if use_buckets %}
+          {% for bucket in lanes.get(cam.id, []) %}
+            {% set cell_x = label_width + bucket.x_frac * track_width %}
+            {% set cell_w = [bucket.w_frac * track_width, 2]|max %}
+            <rect class="bucket" x="{{ cell_x }}" y="{{ lane_y + 8 }}" width="{{ cell_w }}" height="{{ lane_height - 16 }}" data-count="{{ bucket.count }}" data-cat-count="{{ bucket.cat_count }}">
+            <title>{{ bucket.count }} clip{{ "" if bucket.count == 1 else "s" }} ({{ bucket.cat_count }} cat)</title>
+            </rect>
+          {% endfor %}
+        {% else %}
+          {% for clip in lanes.get(cam.id, []) %}
+            {% set rect_x = label_width + clip.x_frac * track_width %}
+            {% set rect_w = [clip.w_frac * track_width, 2]|max %}
+            <a href="{{ url_for('clip_detail', clip_id=clip.id) }}">
+              <rect class="{{ clip.css_classes }}" x="{{ rect_x }}" y="{{ lane_y + 12 }}" width="{{ rect_w }}" height="{{ lane_height - 24 }}" data-clip-id="{{ clip.id }}" data-start="{{ clip.start_ts.isoformat() }}" data-score="{{ '%.3f'|format(clip.max_score) }}">
+              <title>{{ clip.start_ts.isoformat() }} · score {{ '%.2f'|format(clip.max_score) }}</title>
+              </rect>
+            </a>
+          {% endfor %}
+        {% endif %}
+        </g>
+      {% endfor %}
+      {% for alert in alerts %}
+        {% set ax = label_width + alert.x_frac * track_width %}
+        <g class="alert-marker" data-alert-type="{{ alert.alert_type }}">
+        <line x1="{{ ax }}" x2="{{ ax }}" y1="0" y2="{{ cameras|length * lane_height }}" class="alert-line" stroke-dasharray="4 4"></line>
+        <text x="{{ ax + 4 }}" y="14" class="alert-label">{{ alert.alert_type }}</text>
+        </g>
+      {% endfor %}
+    </svg>
+    {% if not use_buckets %}
+      <ul class="thumb-strip" aria-label="Recent clip thumbnails">
+        {% for cam in cameras %}
+          {% for clip in lanes.get(cam.id, []) %}
+            <li>
+              <a href="{{ url_for('clip_detail', clip_id=clip.id) }}">
+                <img src="{{ url_for('media_thumb', clip_id=clip.id) }}"
+                     alt="Clip from {{ cam.display_name }} at {{ clip.start_ts.isoformat() }}"
+                     loading="lazy"
+                     onerror="this.src='{{ url_for("static", path="clip-placeholder.svg") }}'; this.onerror = null;">
+              </a>
+            </li>
+          {% endfor %}
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+  <script src="{{ url_for('static', path='timeline.js') }}" defer></script>
+{% endblock content %}

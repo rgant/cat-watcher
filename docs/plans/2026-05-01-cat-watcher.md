@@ -1623,7 +1623,7 @@ Scope: manual annotation of clips (POST and DELETE).
 
 ---
 
-### Task 23: Web Routes — Timeline
+### Task 23: Web Routes — Timeline — DONE
 
 Scope: visual activity overview rendered as inline SVG with HTMX-driven range
 presets.
