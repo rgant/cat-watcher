@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the cat-watcher test suite."""
 
-import httpxyz_compat  # noqa: F401, I001  # pyright: ignore[reportUnusedImport]  # side-effect import; must run first; see module docstring.
+import respx_httpxyz  # noqa: F401, I001  # pyright: ignore[reportUnusedImport]  # side-effect import; must run first; registers HTTPCoreXYZMocker + repoints respx.mock default.
 
 from contextlib import contextmanager
 from datetime import timedelta
