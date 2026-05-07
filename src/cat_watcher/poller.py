@@ -32,7 +32,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -225,40 +225,52 @@ def relative_paths_for(camera_name: str, start_ts_local: datetime, suffix_mp4: s
     )
 
 
-def detection_fields_for(detector: Detector | None, clip_full: Path) -> dict[str, object]:
+class DetectionFields(TypedDict):
+    """Schema returned by :func:`detection_fields_for`. Spreadable into ``Clip(**fields)``."""
+
+    has_cat: bool
+    max_score: float
+    frames_sampled: int
+    frames_with_cat: int
+    best_box_xyxy: list[float] | None
+    detector_version: str
+    analysis_error: str | None
+
+
+def detection_fields_for(detector: Detector | None, clip_full: Path) -> DetectionFields:
     """Run the detector (or substitute the ``--no-detect`` markers) and return the Clip kwargs."""
     if detector is None:
-        return {
-            "has_cat": False,
-            "max_score": 0.0,
-            "frames_sampled": 0,
-            "frames_with_cat": 0,
-            "best_box_xyxy": None,
-            "detector_version": _DETECTOR_VERSION_NO_DETECT,
-            "analysis_error": _NO_DETECT_MARKER,
-        }
+        return DetectionFields(
+            has_cat=False,
+            max_score=0.0,
+            frames_sampled=0,
+            frames_with_cat=0,
+            best_box_xyxy=None,
+            detector_version=_DETECTOR_VERSION_NO_DETECT,
+            analysis_error=_NO_DETECT_MARKER,
+        )
     try:
         result = detector.detect(clip_full)
     except (DetectorError, OSError) as exc:
         logger.warning("detector failed for %s: %s", clip_full, exc)
-        return {
-            "has_cat": False,
-            "max_score": 0.0,
-            "frames_sampled": 0,
-            "frames_with_cat": 0,
-            "best_box_xyxy": None,
-            "detector_version": detector.version,
-            "analysis_error": f"detect failed: {exc}",
-        }
-    return {
-        "has_cat": result.has_cat,
-        "max_score": result.max_score,
-        "frames_sampled": result.frames_sampled,
-        "frames_with_cat": result.frames_with_cat,
-        "best_box_xyxy": list(result.best_box_xyxy) if result.best_box_xyxy is not None else None,
-        "detector_version": result.detector_version,
-        "analysis_error": None,
-    }
+        return DetectionFields(
+            has_cat=False,
+            max_score=0.0,
+            frames_sampled=0,
+            frames_with_cat=0,
+            best_box_xyxy=None,
+            detector_version=detector.version,
+            analysis_error=f"detect failed: {exc}",
+        )
+    return DetectionFields(
+        has_cat=result.has_cat,
+        max_score=result.max_score,
+        frames_sampled=result.frames_sampled,
+        frames_with_cat=result.frames_with_cat,
+        best_box_xyxy=list(result.best_box_xyxy) if result.best_box_xyxy is not None else None,
+        detector_version=result.detector_version,
+        analysis_error=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -291,9 +303,7 @@ def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible 
     this function inserts the row, preserving file-before-row ordering per spec §4.4.
     """
     with get_session(ctx.engine) as session:
-        existing = session.scalar(
-            select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == source_filename),
-        )
+        existing = session.scalar(select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == source_filename))
     if existing is not None:
         logger.info("skip duplicate: camera=%s source=%s", ctx.camera_name, source_filename)
         return None

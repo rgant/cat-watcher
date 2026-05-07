@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cat_watcher.config import Config
+
 
 _INTERNAL_SUBDIRS: tuple[str, ...] = ("models", "logs")
 _STORAGE_SUBDIRS: tuple[str, ...] = ("clips", "thumbs", "backups")
@@ -127,3 +129,12 @@ def wait_for_storage(
             msg = f"storage not available within {timeout_seconds}s: {path}"
             raise StorageUnavailableError(msg)
         time.sleep(interval_seconds)
+
+
+def wait_for_storage_using_config(config: Config) -> None:
+    """Convenience wrapper: pulls ``storage_root`` + ``[storage]`` knobs from ``Config``."""
+    wait_for_storage(
+        config.storage_root,
+        interval_seconds=config.storage.wait_interval_seconds,
+        timeout_seconds=config.storage.wait_timeout_seconds,
+    )

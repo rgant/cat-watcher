@@ -1746,7 +1746,7 @@ diagnostic and maintenance sub-commands. This satisfies the requirements for
 
 ---
 
-### Task 25: Umbrella CLI sub-commands
+### Task 25: Umbrella CLI sub-commands — DONE
 
 **Files:**
 

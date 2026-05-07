@@ -157,9 +157,9 @@ def _build_config(make_config: Callable[..., Config], internal_root: Path, stora
 def test_main_returns_zero_and_writes_backup_on_clean_run(tmp_path: Path, make_config: Callable[..., Config]) -> None:
     """Storage available + DB present → exit 0, backup file written, ``agent_starts`` row inserted.
 
-    The ``wait_for_storage`` patch lets us also assert the configured ``[storage]`` intervals
-    actually propagate to the wait helper — config values shouldn't be silently dropped on the way
-    through main().
+    Patching ``wait_for_storage_using_config`` confirms the wait fired with the live Config,
+    which in turn carries the ``[storage]`` intervals — so the wait wrapper sees the operator's
+    configured values, not the module-level defaults.
     """
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
@@ -168,15 +168,12 @@ def test_main_returns_zero_and_writes_backup_on_clean_run(tmp_path: Path, make_c
 
     with (
         patch("cat_watcher.backup.load_config", return_value=config),
-        patch("cat_watcher.backup.wait_for_storage", return_value=None) as wait_mock,
+        patch("cat_watcher.backup.wait_for_storage_using_config", return_value=None) as wait_mock,
     ):
         rc = main([])
 
     assert rc == 0
-    wait_mock.assert_called_once()
-    kwargs = wait_mock.call_args.kwargs
-    assert kwargs["interval_seconds"] == config.storage.wait_interval_seconds
-    assert kwargs["timeout_seconds"] == config.storage.wait_timeout_seconds
+    wait_mock.assert_called_once_with(config)
 
     backups = list((storage_root / "backups").glob(_BACKUP_GLOB))
     assert len(backups) == 1
@@ -200,7 +197,7 @@ def test_main_returns_two_when_storage_wait_times_out(tmp_path: Path, make_confi
     with (
         patch("cat_watcher.backup.load_config", return_value=config),
         patch(
-            "cat_watcher.backup.wait_for_storage",
+            "cat_watcher.backup.wait_for_storage_using_config",
             side_effect=StorageUnavailableError("storage not available within 600s"),
         ),
     ):

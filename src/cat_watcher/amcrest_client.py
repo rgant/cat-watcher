@@ -53,6 +53,16 @@ _PART_SUFFIX = ".part"
 _FIND_ENDPOINT = "/cgi-bin/mediaFileFind.cgi"
 _DOWNLOAD_ENDPOINT_PREFIX = "/cgi-bin/RPC_Loadfile"
 _AMCREST_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_GLOBAL_CGI_ENDPOINT = "/cgi-bin/global.cgi"
+_CONFIG_MANAGER_ENDPOINT = "/cgi-bin/configManager.cgi"
+# Per the Amcrest doc §4.6.2 the body is ``result = Y-M-D H-m-S`` with optional whitespace around
+# ``=`` and unpadded numeric fields. ``re.MULTILINE`` keeps the anchor pair safe in case the camera
+# sneaks a trailing ``ok`` line.
+_GETCURRENTTIME_VALUE_PATTERN = re.compile(r"^\s*result\s*=\s*(?P<value>.+?)\s*$", re.MULTILINE)
+# NTP config response per §4.6.6: a ``table.NTP.X=Y`` block. We only care about ``TimeZone`` (a
+# numeric Amcrest code) — the doc gives no IANA name surface, so we return the literal value and
+# let the caller compare it against the configured IANA zone literally.
+_NTP_TIMEZONE_VALUE_PATTERN = re.compile(r"^\s*table\.NTP\.TimeZone\s*=\s*(?P<value>.+?)\s*$", re.MULTILINE)
 
 # Transient HTTP failures that warrant retry. ``httpxyz.RemoteProtocolError`` covers the
 # camera-disconnected-mid-response case the spec calls out alongside connect/read timeouts.
@@ -263,6 +273,45 @@ class AmcrestClient:
             yield from self._iter_pages(find_handle, local_since=local_since, local_until=local_until)
         finally:
             self._destroy_find_handle(find_handle)
+
+    def get_camera_time(self) -> datetime:
+        """Fetch the camera's reported wall clock as a tz-aware UTC datetime.
+
+        Calls ``global.cgi?action=getCurrentTime`` (Amcrest API §4.6.2). The body is one line of
+        the form ``result = Y-M-D H:M:S`` in the camera's local timezone (per the doc, the format
+        is **not** affected by ``Locales.TimeFormat``); we parse it through :data:`_AMCREST_TIME_FORMAT`
+        and reinterpret using the ``camera_tz`` passed at construction time, then convert to UTC.
+        Raises :class:`CameraAPIError` on a malformed body. Used by ``cat-watcher test-cameras``
+        to compare camera-side wall clock against host clock for drift detection (spec §4.10).
+        """
+        response = self._request_with_retries("GET", _GLOBAL_CGI_ENDPOINT, params={"action": "getCurrentTime"})
+        match = _GETCURRENTTIME_VALUE_PATTERN.search(response.text)
+        if match is None:
+            msg = f"camera {self._camera.name!r} getCurrentTime returned no result line"
+            raise CameraAPIError(msg)
+        local = datetime.strptime(match.group("value"), _AMCREST_TIME_FORMAT).replace(tzinfo=self._tz)
+        return local.astimezone(UTC)
+
+    def get_camera_timezone(self) -> str:
+        """Fetch the camera's NTP-configured timezone as the literal string the camera reports.
+
+        Calls ``configManager.cgi?action=getConfig&name=NTP`` (Amcrest API §4.6.6) and returns the
+        ``table.NTP.TimeZone=`` value verbatim. Amcrest reports a numeric code (e.g. ``9``) rather
+        than an IANA name; the API does not surface the IANA equivalent. Callers compare this string
+        against the configured IANA zone literally — a mismatch is the operator-actionable signal
+        regardless of whether the Amcrest code happens to "really mean" the same zone. Raises
+        :class:`CameraAPIError` if the response lacks a ``TimeZone`` line.
+        """
+        response = self._request_with_retries(
+            "GET",
+            _CONFIG_MANAGER_ENDPOINT,
+            params={"action": "getConfig", "name": "NTP"},
+        )
+        match = _NTP_TIMEZONE_VALUE_PATTERN.search(response.text)
+        if match is None:
+            msg = f"camera {self._camera.name!r} getConfig name=NTP returned no TimeZone line"
+            raise CameraAPIError(msg)
+        return match.group("value")
 
     def _iter_pages(self, find_handle: str, *, local_since: str, local_until: str) -> Iterator[Recording]:
         """Inner loop: drain the camera's pagination once the search handle is open."""

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, create_engine, get_session
-from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage
+from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -125,11 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=config.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logger.info("backup agent starting; storage_root=%s keep_count=%d", config.storage_root, config.backup.keep_count)
     try:
-        wait_for_storage(
-            config.storage_root,
-            interval_seconds=config.storage.wait_interval_seconds,
-            timeout_seconds=config.storage.wait_timeout_seconds,
-        )
+        wait_for_storage_using_config(config)
     except StorageUnavailableError:
         logger.exception("backup aborted: storage_root unavailable")
         return _EXIT_STORAGE_UNAVAILABLE
