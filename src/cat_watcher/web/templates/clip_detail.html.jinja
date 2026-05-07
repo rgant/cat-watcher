@@ -68,10 +68,9 @@
   </section>
   <section aria-labelledby="label-heading">
     <h2 id="label-heading">Manual label</h2>
-    {# djlint:off J018 #}
-    {# Task 22 will name the set_label / clear_label routes; switch to url_for(...) when
-       those endpoints land. #}
-    <form class="label-form" method="post" action="/clips/{{ clip.id }}/label">
+    <form class="label-form"
+          method="post"
+          action="{{ url_for('set_label', clip_id=clip.id) }}">
       <label>
         Override
         <select name="has_cat">
@@ -93,13 +92,12 @@
     </form>
     {% if clip.manual_has_cat is not none %}
       <form method="post"
-            action="/clips/{{ clip.id }}/label"
-            hx-delete="/clips/{{ clip.id }}/label"
+            action="{{ url_for('set_label', clip_id=clip.id) }}"
+            hx-delete="{{ url_for('clear_label', clip_id=clip.id) }}"
             hx-confirm="Clear the manual label for this clip?"
             hx-on::after-request="window.location.reload()">
         <button type="submit" aria-label="Clear manual label for clip {{ clip.id }}">Clear manual label</button>
       </form>
     {% endif %}
-    {# djlint:on #}
   </section>
 {% endblock content %}

@@ -6,6 +6,8 @@ The full route surface lands across Tasks 20-24; this module today owns:
 * ``/clips`` and ``/clips/{id}`` (Task 21) — clip listing + detail (HTML).
 * ``/media/clip/{id}.mp4`` (Task 21) — MP4 streaming with HTTP byte-Range support.
 * ``/media/thumb/{id}.jpg`` (Task 21) — thumbnail JPEG.
+* ``POST /clips/{id}/label`` and ``DELETE /clips/{id}/label`` (Task 22) — manual label
+  set/clear; the POST redirects 303 back to the detail page so the form survives a refresh.
 
 Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state`` — they
 do **not** instantiate their own engine or templates loader.
@@ -22,10 +24,10 @@ modes for missing files:
 """
 
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Form, HTTPException, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import desc, select
 
 from cat_watcher.db import Camera, Clip, Heartbeat, get_session
@@ -67,6 +69,7 @@ _VIDEO_MEDIA_TYPE = "video/mp4"
 
 health_router = APIRouter()
 clips_router = APIRouter()
+label_router = APIRouter()
 media_router = APIRouter()
 
 
@@ -158,6 +161,50 @@ async def clip_detail(request: Request, clip_id: int) -> object:
         "clip_detail.html.jinja",
         {"clip": clip, "camera": camera, "tz": state.config.web.display_timezone},
     )
+
+
+@label_router.post("/clips/{clip_id}/label")
+async def set_label(
+    request: Request,
+    clip_id: int,
+    *,
+    has_cat: Annotated[bool, Form()],
+    notes: Annotated[str, Form()] = "",
+) -> Response:
+    """Persist a manual label override for ``clip_id``.
+
+    Empty ``notes`` collapses to ``NULL`` so the column distinguishes "no notes provided" from a
+    deliberate empty-string label. Redirects 303 back to the detail page; that's the
+    POST-Redirect-GET pattern the form relies on so a browser refresh after submit doesn't resubmit
+    the form.
+    """
+    state = _state(request)
+    with get_session(state.engine) as session:
+        clip = session.get(Clip, clip_id)
+        if clip is None:
+            raise HTTPException(status_code=404, detail="clip not found")
+        clip.manual_has_cat = has_cat
+        clip.manual_label_notes = notes or None
+        clip.manual_label_at = datetime.now(UTC)
+    return RedirectResponse(request.url_for("clip_detail", clip_id=clip_id), status_code=303)
+
+
+@label_router.delete("/clips/{clip_id}/label")
+async def clear_label(request: Request, clip_id: int) -> Response:
+    """Clear all three manual-label columns for ``clip_id`` back to ``NULL``.
+
+    Returns 204 (No Content) so the htmx caller can ``window.location.reload()`` without parsing a
+    body. 404 if the clip row is gone.
+    """
+    state = _state(request)
+    with get_session(state.engine) as session:
+        clip = session.get(Clip, clip_id)
+        if clip is None:
+            raise HTTPException(status_code=404, detail="clip not found")
+        clip.manual_has_cat = None
+        clip.manual_label_notes = None
+        clip.manual_label_at = None
+    return Response(status_code=204)
 
 
 def _clip_video_relpath(clip: Clip) -> str:

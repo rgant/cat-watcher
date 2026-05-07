@@ -282,7 +282,7 @@ def test_clip_detail_renders_manual_label_form(
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """``GET /clips/{id}`` renders a label form posting to ``/clips/{id}/label`` (Task 22 endpoint)."""
+    """``GET /clips/{id}`` renders a label form posting to the ``set_label`` endpoint."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(internal_root=internal_root, storage_root=storage_root)
@@ -291,7 +291,9 @@ def test_clip_detail_renders_manual_label_form(
         response = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    assert f'action="/clips/{clip_id}/label"' in response.text
+    # The action is rendered as an absolute URL by ``url_for(...)`` (Task 22 cleanup); pin the tail
+    # of the path so the test stays robust to host/port changes in the test client.
+    assert f'/clips/{clip_id}/label"' in response.text
     # The form must offer both has_cat values plus a notes field per Task 22's contract.
     assert 'name="has_cat"' in response.text
     assert 'name="notes"' in response.text

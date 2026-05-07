@@ -1592,7 +1592,7 @@ Scope: clip listing, detail views, and media streaming with HTTP Range support.
 
 ---
 
-### Task 22: Web Routes — Labeling
+### Task 22: Web Routes — Labeling — DONE
 
 Scope: manual annotation of clips (POST and DELETE).
 
