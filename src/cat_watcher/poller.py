@@ -566,7 +566,7 @@ def _parse_args(argv: Sequence[str] | None) -> PollerArgs:
         "--verbose",
         "-v",
         action="store_true",
-        help="show diagnostic logs at INFO level (httpx requests, empty-window notes, retention details). "
+        help="show diagnostic logs at INFO level (httpxyz requests, empty-window notes, retention details). "
         "Default suppresses these; the per-tick summary always prints to stdout.",
     )
     ns = parser.parse_args(argv, namespace=_ParsedArgs())
@@ -749,7 +749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     Default log level is ``WARNING`` so a healthy interactive run only emits the per-camera
     summary + retention line via stdout; problems surface on stderr through the warning/error
-    loggers. ``--verbose`` raises the level to ``INFO`` to expose httpx requests, the empty-window
+    loggers. ``--verbose`` raises the level to ``INFO`` to expose httpxyz requests, the empty-window
     note from ``amcrest_client``, and other diagnostic detail. The full structured-logging design
     (Task 26b in the plan) replaces this when it lands.
     """

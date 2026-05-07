@@ -1,5 +1,7 @@
 """Shared pytest fixtures for the cat-watcher test suite."""
 
+import httpxyz_compat  # noqa: F401, I001  # pyright: ignore[reportUnusedImport]  # side-effect import; must run first; see module docstring.
+
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING

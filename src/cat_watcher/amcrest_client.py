@@ -1,11 +1,11 @@
 """Wrapper over the Amcrest IP-camera HTTP API.
 
-Implementation choice — ``httpx.Client`` with ``httpx.DigestAuth`` against the camera's
+Implementation choice — ``httpxyz.Client`` with ``httpxyz.DigestAuth`` against the camera's
 ``mediaFileFind.cgi`` (factory.create / findFile / findNextFile / close / destroy) and
 ``RPC_Loadfile`` endpoints. See ``docs/resources/Amcrest-HTTP_API_V3.26.pdf`` for the wire format.
 
 Reasons not to depend on ``python-amcrest``: GPL-2.0-only license (incompatible with this project's
-AGPL-3.0-or-later), heavy transitive deps (requests + urllib3 + argcomplete alongside httpx), and
+AGPL-3.0-or-later), heavy transitive deps (requests + urllib3 + argcomplete alongside httpxyz), and
 no declared Python 3.14 support. The API surface we need is small enough to implement directly.
 
 The module surfaces a typed exception per failure mode (network / auth / other API problem) so
@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Self
 from urllib.parse import quote, urlencode
 
-import httpx
+import httpxyz
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -54,9 +54,9 @@ _FIND_ENDPOINT = "/cgi-bin/mediaFileFind.cgi"
 _DOWNLOAD_ENDPOINT_PREFIX = "/cgi-bin/RPC_Loadfile"
 _AMCREST_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# Transient HTTP failures that warrant retry. ``httpx.RemoteProtocolError`` covers the
+# Transient HTTP failures that warrant retry. ``httpxyz.RemoteProtocolError`` covers the
 # camera-disconnected-mid-response case the spec calls out alongside connect/read timeouts.
-_RETRYABLE_HTTPX_ERRORS = (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)
+_RETRYABLE_HTTPX_ERRORS = (httpxyz.ConnectError, httpxyz.ReadTimeout, httpxyz.RemoteProtocolError)
 _HTTP_BAD_REQUEST = 400
 _HTTP_INTERNAL_ERROR = 500
 _AUTH_STATUSES = frozenset({401, 403})
@@ -109,7 +109,7 @@ _RESULT_PATTERN = re.compile(r"^result=(\d+)\s*$", re.MULTILINE)
 def _amcrest_query(params: dict[str, str]) -> str:
     """Build a query string Amcrest's CGI parser will accept.
 
-    The parser has two non-standard requirements that ``httpx``'s default ``params=`` dict
+    The parser has two non-standard requirements that ``httpxyz``'s default ``params=`` dict
     violates:
 
     1. ``[`` / ``]`` must be **literal**, not percent-encoded (``%5B`` / ``%5D`` → 400).
@@ -119,7 +119,7 @@ def _amcrest_query(params: dict[str, str]) -> str:
     (e.g. ``condition.Types[0]=dav&condition.StartTime=2014-1-1%2012:00:00``). ``urllib``'s default
     ``quote_via=quote_plus`` produces ``+`` for spaces, so we force ``quote_via=quote``. Call sites
     with bracket-bearing parameters or whitespace-bearing values must build their query string
-    through this helper and append it to the path so ``httpx`` forwards the URL unchanged. Full
+    through this helper and append it to the path so ``httpxyz`` forwards the URL unchanged. Full
     diagnosis in ``docs/resources/amcrest-bracket-quirk.md``.
     """
     return urlencode(params, safe="[]", quote_via=quote)
@@ -138,13 +138,13 @@ def _parse_find_page(body: str) -> list[dict[str, str]]:
 
 
 class AmcrestClient:
-    """One client per camera. Holds a long-lived ``httpx.Client`` for connection reuse."""
+    """One client per camera. Holds a long-lived ``httpxyz.Client`` for connection reuse."""
 
     _camera: CameraConfig
     _tz: ZoneInfo
     _retry_attempts: int
     _retry_delay_seconds: float
-    _client: httpx.Client
+    _client: httpxyz.Client
 
     def __init__(
         self,
@@ -159,9 +159,9 @@ class AmcrestClient:
         self._tz = camera_tz
         self._retry_attempts = retry_attempts
         self._retry_delay_seconds = retry_delay_seconds
-        self._client = httpx.Client(
+        self._client = httpxyz.Client(
             base_url=f"http://{camera.host}:{camera.port}",
-            auth=httpx.DigestAuth(secrets.username, secrets.password.get_secret_value()),
+            auth=httpxyz.DigestAuth(secrets.username, secrets.password.get_secret_value()),
             timeout=_DEFAULT_TIMEOUT_SECONDS,
         )
 
@@ -170,11 +170,11 @@ class AmcrestClient:
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        """Context-manager exit. Closes the underlying httpx client."""
+        """Context-manager exit. Closes the underlying httpxyz client."""
         self.close()
 
     def close(self) -> None:
-        """Close the underlying httpx client; safe to call multiple times."""
+        """Close the underlying httpxyz client; safe to call multiple times."""
         self._client.close()
 
     def _classify_status(self, status_code: int) -> None:
@@ -192,7 +192,7 @@ class AmcrestClient:
         path: str,
         *,
         params: dict[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpxyz.Response:
         """HTTP call with bounded retries on transient failures. 4xx fails fast."""
         last_exc: BaseException | None = None
         for attempt in range(1, self._retry_attempts + 1):
@@ -215,7 +215,7 @@ class AmcrestClient:
 
             self._classify_status(response.status_code)
             if response.status_code >= _HTTP_INTERNAL_ERROR:
-                last_exc = httpx.HTTPStatusError(
+                last_exc = httpxyz.HTTPStatusError(
                     f"server error {response.status_code}",
                     request=response.request,
                     response=response,
@@ -268,7 +268,7 @@ class AmcrestClient:
         """Inner loop: drain the camera's pagination once the search handle is open."""
         # ``condition.Types[0]`` carries literal brackets the Amcrest CGI parser refuses to decode
         # from ``%5B`` / ``%5D``; build the query string via ``_amcrest_query`` and pass it as part
-        # of the path so ``httpx`` forwards it unchanged. ``condition.Channel`` is 1-indexed per
+        # of the path so ``httpxyz`` forwards it unchanged. ``condition.Channel`` is 1-indexed per
         # the API spec ("starting from 1") — our single-channel litter-box cameras are always 1.
         find_query = _amcrest_query(
             {
@@ -382,7 +382,7 @@ class AmcrestClient:
                 # ``except _RETRYABLE_HTTPX_ERRORS`` reacts the same way it does for connect /
                 # read-timeout failures, mirroring ``_request_with_retries``'s 5xx handling.
                 msg = f"camera {self._camera.name!r} returned HTTP {response.status_code} during download"
-                raise httpx.RemoteProtocolError(msg, request=response.request)
+                raise httpxyz.RemoteProtocolError(msg, request=response.request)
             fd = os.open(part_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             with closing(os.fdopen(fd, "wb")) as fp:
                 for chunk in response.iter_bytes(chunk_size=_DOWNLOAD_CHUNK_SIZE):

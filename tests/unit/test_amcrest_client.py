@@ -7,7 +7,7 @@ from pathlib import Path  # noqa: TC003  # runtime import: respx.mock calls insp
 from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo
 
-import httpx
+import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at runtime.
 import pytest
 import respx
 from pydantic import SecretStr
@@ -569,5 +569,5 @@ def test_iter_recordings_destroy_failure_logged_not_raised(caplog: pytest.LogCap
 def test_client_context_manager_closes_underlying_httpx() -> None:
     """``with AmcrestClient(...) as c:`` exits cleanly and the httpx client is closed."""
     with _make_client() as client:
-        assert isinstance(client._client, httpx.Client)
-    assert client._client.is_closed
+        assert isinstance(client._client, httpx.Client)  # type: ignore[unreachable]
+    assert client._client.is_closed  # type: ignore[unreachable]

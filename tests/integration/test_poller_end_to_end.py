@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
 from unittest.mock import MagicMock
 
-import httpx
+import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at runtime.
 import pytest  # noqa: TC002  # runtime: respx.mock evaluates pytest.MonkeyPatch annotations at decoration time
 import respx
 from sqlalchemy.engine import Engine  # noqa: TC002  # runtime: Engine-annotated helper called at module level via fixtures
