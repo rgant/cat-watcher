@@ -15,9 +15,11 @@ dependencies = [
   "fastapi>=0.136.1,<0.137",
   "httpxyz>=0.31.1,<0.32",
   "jinja2>=3.1.6,<4",
+  "pydantic>=2.13.4,<3",
   "pydantic-settings>=2.14.0,<3",
   "python-multipart>=0.0.27,<0.0.28",
   "sqlalchemy>=2.0.49,<3",
+  "starlette>=0.52.1,<0.53",
   "uvicorn[standard]>=0.46.0,<0.47",
 ]
 [project.scripts]
@@ -29,9 +31,9 @@ cat-watcher-backup = "cat_watcher.backup:main"
 
 [dependency-groups]
 dev = [
-  "aiosmtpd>=1.4.6,<2",
   "arel>=0.4.0,<0.5",
   "basedpyright>=1.39.3,<2",
+  "deptry>=0.25.1,<0.26",
   "djlint>=1.36.4,<2",
   "mypy>=1.20.2,<2",
   "pylint>=4.0.5,<5",
@@ -41,7 +43,6 @@ dev = [
   "pyproject-fmt>=2.21.2,<3",
   "pytest>=9.0.3,<10",
   "pytest-cov>=7.1.0,<8",
-  "pytest-mock>=3.15.1,<4",
   "pytest-randomly>=4.1.0,<5",
   "respx>=0.23.1,<0.24",
   "ruff>=0.15.12,<0.16",
@@ -54,7 +55,7 @@ numpy = ">=2.4.3,<3"
 opencv = ">=4.13.0,<5"
 pytorch = ">=2.10.0,<3"
 torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
-ultralytics = ">=8.4.46,<9"
+ultralytics = ">=8.4.47,<9"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
 [tool.pixi.pypi-dependencies]
@@ -146,6 +147,7 @@ cmd = """\
   basedpyright "$@" || e=$?
   mypy "$@" || e=$?
   pylint "$@" || e=$?
+  deptry . || e=$?
   djlint src/cat_watcher/web/templates/ --check || e=$?
   npx --no-install stylelint "src/cat_watcher/web/static/**/*.css" || e=$?
   npx --no-install eslint "src/cat_watcher/web/static/**/*.js" || e=$?
@@ -523,6 +525,13 @@ check-quote-consistency = false
 # static analysis can't see them and trips no-member on every migration helper call. Telling pylint
 # to skip member checks for the modules entirely is the documented escape hatch.
 ignored-modules = [ "alembic.context", "alembic.op" ]
+
+[tool.deptry]
+known_first_party = [ "cat_watcher" ]
+[tool.deptry.per_rule_ignores]
+DEP002 = [ "jinja2", "python-multipart" ]
+DEP003 = [ "numpy", "ultralytics" ]
+DEP004 = [ "arel" ]
 
 [tool.pyproject-fmt]
 keep_full_version = true

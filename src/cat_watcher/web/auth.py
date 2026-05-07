@@ -14,14 +14,14 @@ import binascii
 import hmac
 from typing import TYPE_CHECKING, override
 
+from fastapi import Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from fastapi import Request
     from pydantic import SecretStr
-    from starlette.requests import Request
     from starlette.types import ASGIApp
 
 
