@@ -29,15 +29,12 @@
          {% if current_path == "/" or current_path.startswith("/timeline") %}aria-current="page"{% endif %}>Timeline</a>
       <a href="{{ url_for('list_clips') }}"
          {% if current_path.startswith("/clips") %}aria-current="page"{% endif %}>Clips</a>
-      {# djlint:off J018 #}
-      {# /cameras, /stats, /alerts land in Task 24; switch to url_for(...) when their routes exist. #}
-      <a href="/cameras"
+      <a href="{{ url_for('cameras_page') }}"
          {% if current_path.startswith("/cameras") %}aria-current="page"{% endif %}>Cameras</a>
-      <a href="/stats"
+      <a href="{{ url_for('stats_page') }}"
          {% if current_path.startswith("/stats") %}aria-current="page"{% endif %}>Stats</a>
-      <a href="/alerts"
+      <a href="{{ url_for('alerts_page') }}"
          {% if current_path.startswith("/alerts") %}aria-current="page"{% endif %}>Alerts</a>
-      {# djlint:on #}
     </nav>
     <main>
       {% block content %}

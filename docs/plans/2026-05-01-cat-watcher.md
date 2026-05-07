@@ -1694,7 +1694,7 @@ presets.
 
 ---
 
-### Task 24: Web Routes — Cameras, Stats & Alerts
+### Task 24: Web Routes — Cameras, Stats & Alerts — DONE
 
 Scope: per-camera health, aggregated activity, and alert history.
 

@@ -1,0 +1,32 @@
+{% extends "base.html.jinja" %}
+{% block title %}
+  Stats · Cat Watcher
+{% endblock title %}
+{% block content %}
+  <h1>Activity (last 30 days)</h1>
+  {% if rows %}
+    <table class="stats-list">
+      <caption class="sr-only">Daily clip counts and cat-positive counts per camera.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Date</th>
+          <th scope="col">Camera</th>
+          <th scope="col">Clips</th>
+          <th scope="col">Cat-positive</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td data-label="Date">{{ row.date }}</td>
+            <td data-label="Camera">{{ row.camera_display_name }}</td>
+            <td data-label="Clips">{{ row.total }}</td>
+            <td data-label="Cat-positive">{{ row.cat_total }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No activity recorded in the last 30 days.</p>
+  {% endif %}
+{% endblock content %}

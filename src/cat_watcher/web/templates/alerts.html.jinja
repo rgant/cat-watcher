@@ -1,0 +1,38 @@
+{% extends "base.html.jinja" %}
+{% block title %}
+  Alerts · Cat Watcher
+{% endblock title %}
+{% block content %}
+  <h1>Alert history (last 30 days)</h1>
+  {% if alerts %}
+    <table class="alert-list">
+      <caption class="sr-only">Alerts dispatched in the last 30 days, newest first.</caption>
+      <thead>
+        <tr>
+          <th scope="col">Sent</th>
+          <th scope="col">Type</th>
+          <th scope="col">Camera</th>
+          <th scope="col">Email</th>
+          <th scope="col">macOS</th>
+          <th scope="col">Subject</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for alert in alerts %}
+          <tr>
+            <td data-label="Sent">
+              <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at.isoformat() }}</time>
+            </td>
+            <td data-label="Type">{{ alert.alert_type }}</td>
+            <td data-label="Camera">{{ alert.camera_display }}</td>
+            <td data-label="Email">{{ "✓" if alert.email_ok else "✗" }}</td>
+            <td data-label="macOS">{{ "✓" if alert.macos_ok else "✗" }}</td>
+            <td data-label="Subject">{{ alert.subject }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No alerts in the last 30 days.</p>
+  {% endif %}
+{% endblock content %}

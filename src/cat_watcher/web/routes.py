@@ -10,6 +10,9 @@ The full route surface lands across Tasks 20-24; this module today owns:
   set/clear; the POST redirects 303 back to the detail page so the form survives a refresh.
 * ``/`` and ``/timeline`` (Task 23) — per-camera SVG activity timeline; switches between per-clip
   markers and per-hour heatmap buckets at the 24h threshold (spec §4.7.1).
+* ``/cameras``, ``/stats``, ``/alerts`` (Task 24) — per-camera health, 30-day daily activity
+  aggregation (with manual-label override applied via ``COALESCE(manual_has_cat, has_cat)``),
+  and alert dispatch history.
 
 Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state`` — they
 do **not** instantiate their own engine or templates loader.
@@ -31,12 +34,12 @@ from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
-from sqlalchemy import desc, select
+from sqlalchemy import Integer, desc, func, select
 
 from cat_watcher.db import AlertSent, Camera, Clip, Heartbeat, get_session
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from fastapi.templating import Jinja2Templates
@@ -68,6 +71,13 @@ _AGENT_NAME_WEB = "web"
 _CLIPS_LIST_LIMIT = 200
 _THUMB_MEDIA_TYPE = "image/jpeg"
 _VIDEO_MEDIA_TYPE = "video/mp4"
+# Spec §4.7: ``/cameras`` shows the most recent N alerts per camera; 5 is the same N the design
+# spec calls out, kept here as a constant so the template doesn't have to know it.
+_CAMERA_RECENT_ALERTS_LIMIT = 5
+# Spec §4.7: ``/stats`` and ``/alerts`` cap their windows at 30 days so a long-running deployment
+# doesn't grow into a multi-thousand-row scroll.
+_HISTORY_DAYS = 30
+_NO_CAMERA_PLACEHOLDER = "—"
 
 
 health_router = APIRouter()
@@ -75,6 +85,9 @@ clips_router = APIRouter()
 label_router = APIRouter()
 media_router = APIRouter()
 timeline_router = APIRouter()
+cameras_router = APIRouter()
+stats_router = APIRouter()
+alerts_router = APIRouter()
 
 
 _TIMELINE_RANGES: dict[str, timedelta] = {
@@ -451,3 +464,181 @@ def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -
         }
         for bin_index, stats in sorted(buckets.items())
     ]
+
+
+@cameras_router.get("/cameras")
+async def cameras_page(request: Request) -> object:
+    """Render the per-camera health table (spec §4.7).
+
+    Each row surfaces the camera's polling state — display name, ``poll_status``, the timestamp
+    poll-status went non-OK (``poll_status_since``), the last poll attempt, the last clip ingested,
+    the last cat detection, and a truncated poll error — plus the camera's most recent alerts so an
+    operator can correlate "this camera went unreachable at HH:MM" with "an INACTIVITY alert fired
+    N hours later". A separate non-camera-scoped section covers ``camera_id IS NULL`` alerts on
+    ``/alerts``; this page is camera-scoped only.
+    """
+    state = _state(request)
+    with get_session(state.engine) as session:
+        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
+        recent_by_camera: dict[int, list[dict[str, object]]] = {}
+        for cam in cameras:
+            recent_alerts = list(
+                session.scalars(
+                    select(AlertSent)
+                    .where(AlertSent.camera_id == cam.id)
+                    .order_by(desc(AlertSent.sent_at))
+                    .limit(_CAMERA_RECENT_ALERTS_LIMIT),
+                ),
+            )
+            recent_by_camera[cam.id] = [_alert_summary(a, camera_display_name=cam.display_name) for a in recent_alerts]
+        camera_rows = [_camera_row(cam, recent_alerts=recent_by_camera[cam.id]) for cam in cameras]
+
+    return state.templates.TemplateResponse(
+        request,
+        "cameras.html.jinja",
+        {"cameras": camera_rows, "tz": state.config.web.display_timezone},
+    )
+
+
+@stats_router.get("/stats")
+async def stats_page(request: Request) -> object:
+    """Render the 30-day daily clip aggregation (spec §4.7).
+
+    Groups by ``(camera_id, date(start_ts))`` and computes total clips + cat-positive clips per
+    bucket. Cat-positive uses ``COALESCE(manual_has_cat, has_cat)`` so corrected manual labels flow
+    into the stat — a clip the detector got wrong but a human re-labeled is now counted on the
+    human's call. ``CAST … AS INTEGER`` is required because SQLite doesn't sum booleans directly;
+    with the cast each truthy bit becomes 1 and the SUM gives a per-day integer count.
+    """
+    state = _state(request)
+    cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
+    cat_expr = func.coalesce(Clip.manual_has_cat, Clip.has_cat).cast(Integer)
+
+    with get_session(state.engine) as session:
+        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
+        camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
+        date_label = func.date(Clip.start_ts).label("d")
+        # ``func.count`` is callable at runtime via SQLAlchemy's GenericFunction proxy; pylint can't
+        # see through the proxy and flags ``not-callable``, so we disable it on this one line.
+        rows = session.execute(
+            select(
+                Clip.camera_id,
+                date_label,
+                func.count().label("total"),  # pylint: disable=not-callable
+                func.sum(cat_expr).label("cat_total"),
+            )
+            .where(Clip.start_ts >= cutoff)
+            .group_by(Clip.camera_id, date_label)
+            .order_by(date_label.desc(), Clip.camera_id),
+        ).all()
+
+    stat_rows = [_stat_row(row, camera_display_by_id=camera_display_by_id) for row in rows]
+    return state.templates.TemplateResponse(
+        request,
+        "stats.html.jinja",
+        {"rows": stat_rows, "tz": state.config.web.display_timezone},
+    )
+
+
+@alerts_router.get("/alerts")
+async def alerts_page(request: Request) -> object:
+    """Render the last 30 days of dispatched alerts (spec §4.7).
+
+    Sorted newest-first. Camera-scoped alerts (``camera_id`` set) render the camera's display name;
+    non-camera alerts (``WEB_DOWN``, ``DISK_LOW``, etc.) render :data:`_NO_CAMERA_PLACEHOLDER` so
+    operators can scan the column for "which subsystem fired this" without losing the row to a
+    blank cell.
+    """
+    state = _state(request)
+    cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
+
+    with get_session(state.engine) as session:
+        cameras = list(session.scalars(select(Camera)))
+        camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
+        alerts = list(
+            session.scalars(
+                select(AlertSent).where(AlertSent.sent_at >= cutoff).order_by(desc(AlertSent.sent_at)),
+            ),
+        )
+        alert_rows = [
+            _alert_summary(
+                alert,
+                camera_display_name=camera_display_by_id.get(alert.camera_id) if alert.camera_id is not None else None,
+            )
+            for alert in alerts
+        ]
+
+    return state.templates.TemplateResponse(
+        request,
+        "alerts.html.jinja",
+        {"alerts": alert_rows, "tz": state.config.web.display_timezone},
+    )
+
+
+def _stat_row(row: object, *, camera_display_by_id: dict[int, str]) -> dict[str, object]:
+    """Project a stats query Row into a flat dict the template can render.
+
+    The query selects ``(camera_id, date_label, total, cat_total)`` so we destructure positionally
+    via ``cast`` + tuple-unpack rather than attribute access; SQLAlchemy types Row column accessors
+    as ``Any``, which would otherwise blossom into per-attribute ``reportAny`` warnings here. The
+    label expressions are typed positionally — column 0 is ``camera_id``, column 3 is the
+    ``func.sum(cat_expr)`` result which is ``None`` for an all-NULL bucket — so we coerce the
+    nullable last value to ``int`` for template arithmetic.
+    """
+    camera_id, date_value, total, cat_total = cast("tuple[int, object, int, int | None]", tuple(cast("Sequence[object]", row)))
+    return {
+        "camera_id": camera_id,
+        "camera_display_name": camera_display_by_id.get(camera_id, ""),
+        "date": date_value,
+        "total": total,
+        "cat_total": int(cat_total or 0),
+    }
+
+
+def _camera_row(cam: Camera, *, recent_alerts: list[dict[str, object]]) -> dict[str, object]:
+    """Project a Camera row into a flat dict the template can render without lazy loads.
+
+    Includes the precomputed ``recent_alerts`` list so the template's outer ``{% for cam %}`` loop
+    can render the camera's recent-alert sub-table without re-running a query per row.
+    ``poll_error`` is truncated here so the template doesn't have to know the cap (and the cap can
+    move without sweeping the templates).
+    """
+    return {
+        "id": cam.id,
+        "name": cam.name,
+        "display_name": cam.display_name,
+        "host": cam.host,
+        "poll_status": cam.poll_status.value,
+        "poll_status_since": cam.poll_status_since,
+        "last_polled_at": cam.last_polled_at,
+        "last_clip_at": cam.last_clip_at,
+        "last_cat_seen_at": cam.last_cat_seen_at,
+        "poll_error": _truncate(cam.poll_error, 200),
+        "recent_alerts": recent_alerts,
+    }
+
+
+def _alert_summary(alert: AlertSent, *, camera_display_name: str | None) -> dict[str, object]:
+    """Project an AlertSent row into a flat dict the alerts/cameras templates can render.
+
+    ``camera_display`` collapses the ``camera_id is None`` and ``camera_id is set but its row was
+    deleted from config`` cases into the same em-dash placeholder — both correspond to "no live
+    camera attached", which is what the operator cares about.
+    """
+    return {
+        "sent_at": alert.sent_at,
+        "alert_type": alert.alert_type.value,
+        "camera_display": camera_display_name or _NO_CAMERA_PLACEHOLDER,
+        "subject": alert.subject,
+        "email_ok": alert.email_ok,
+        "macos_ok": alert.macos_ok,
+    }
+
+
+def _truncate(value: str | None, limit: int) -> str | None:
+    """Cap ``value`` at ``limit`` characters with a single trailing ellipsis when truncated."""
+    if value is None:
+        return None
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"

@@ -126,6 +126,7 @@ cmd = """\
   markdownlint --fix . || e=$?
   djlint src/cat_watcher/web/templates/ --reformat || e=$?
   npx --no-install stylelint --fix "src/cat_watcher/web/static/**/*.css" || e=$?
+  npx --no-install eslint --fix "src/cat_watcher/web/static/**/*.js" || e=$?
   ruff check --fix --silent "$@" || e=$?
   ruff format "$@" || e=$?
   exit $e' _ {{ paths }}\
@@ -147,6 +148,7 @@ cmd = """\
   pylint "$@" || e=$?
   djlint src/cat_watcher/web/templates/ --check || e=$?
   npx --no-install stylelint "src/cat_watcher/web/static/**/*.css" || e=$?
+  npx --no-install eslint "src/cat_watcher/web/static/**/*.js" || e=$?
   find scripts tests/fixtures -name "*.sh" -type f -exec shellcheck "{}" + || e=$?
   # Uncomment when we have GitHub Actions
   # actionlint || e=$?

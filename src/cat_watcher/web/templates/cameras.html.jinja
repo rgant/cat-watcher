@@ -1,0 +1,89 @@
+{% extends "base.html.jinja" %}
+{% block title %}
+  Cameras · Cat Watcher
+{% endblock title %}
+{% block content %}
+  <h1>Cameras</h1>
+  {% if cameras %}
+    {% for cam in cameras %}
+      <section class="camera-card" aria-labelledby="camera-{{ cam.id }}-heading">
+        <header class="camera-header">
+          <h2 id="camera-{{ cam.id }}-heading">{{ cam.display_name }}</h2>
+          <span class="status-badge status-{{ cam.poll_status }}">{{ cam.poll_status }}</span>
+        </header>
+        <dl class="detail-meta">
+          <dt>Host</dt>
+          <dd>
+            {{ cam.host }}
+          </dd>
+          <dt>Poll status since</dt>
+          <dd>
+            {% if cam.poll_status_since is not none %}
+              <time datetime="{{ cam.poll_status_since.isoformat() }}">{{ cam.poll_status_since.isoformat() }}</time>
+            {% else %}
+              —
+            {% endif %}
+          </dd>
+          <dt>Last polled</dt>
+          <dd>
+            {% if cam.last_polled_at is not none %}
+              <time datetime="{{ cam.last_polled_at.isoformat() }}">{{ cam.last_polled_at.isoformat() }}</time>
+            {% else %}
+              —
+            {% endif %}
+          </dd>
+          <dt>Last clip</dt>
+          <dd>
+            {% if cam.last_clip_at is not none %}
+              <time datetime="{{ cam.last_clip_at.isoformat() }}">{{ cam.last_clip_at.isoformat() }}</time>
+            {% else %}
+              —
+            {% endif %}
+          </dd>
+          <dt>Last cat seen</dt>
+          <dd>
+            {% if cam.last_cat_seen_at is not none %}
+              <time datetime="{{ cam.last_cat_seen_at.isoformat() }}">{{ cam.last_cat_seen_at.isoformat() }}</time>
+            {% else %}
+              —
+            {% endif %}
+          </dd>
+          {% if cam.poll_error %}
+            <dt>Last poll error</dt>
+            <dd class="poll-error">
+              {{ cam.poll_error }}
+            </dd>
+          {% endif %}
+        </dl>
+        {% if cam.recent_alerts %}
+          <h3>Recent alerts</h3>
+          <table class="alert-list">
+            <caption class="sr-only">Most recent alerts for {{ cam.display_name }}.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Sent</th>
+                <th scope="col">Type</th>
+                <th scope="col">Subject</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for alert in cam.recent_alerts %}
+                <tr>
+                  <td data-label="Sent">
+                    <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at.isoformat() }}</time>
+                  </td>
+                  <td data-label="Type">{{ alert.alert_type }}</td>
+                  <td data-label="Subject">{{ alert.subject }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="empty-state">No alerts on record for this camera.</p>
+        {% endif %}
+      </section>
+    {% endfor %}
+  {% else %}
+    <p class="empty-state">No cameras configured.</p>
+  {% endif %}
+{% endblock content %}

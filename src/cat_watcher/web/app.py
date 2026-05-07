@@ -37,7 +37,16 @@ from starlette.routing import WebSocketRoute
 from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
 from cat_watcher.web.auth import BasicAuthMiddleware
-from cat_watcher.web.routes import clips_router, health_router, label_router, media_router, timeline_router
+from cat_watcher.web.routes import (
+    alerts_router,
+    cameras_router,
+    clips_router,
+    health_router,
+    label_router,
+    media_router,
+    stats_router,
+    timeline_router,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
@@ -107,6 +116,9 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     app.include_router(clips_router)
     app.include_router(label_router)
     app.include_router(media_router)
+    app.include_router(cameras_router)
+    app.include_router(stats_router)
+    app.include_router(alerts_router)
     if hotreload is not None:
         # ``WebSocketRoute(endpoint=...)`` accepts ``Callable[..., Any]`` (arel's raw ASGI form);
         # ``app.add_websocket_route`` types it narrowly and rejects ``HotReload`` at static-check.
