@@ -139,11 +139,11 @@ async def list_clips(
     state = _state(request)
 
     stmt = select(Clip).join(Camera).order_by(desc(Clip.start_ts)).limit(_CLIPS_LIST_LIMIT)
-    if camera is not None:
+    if camera:
         stmt = stmt.where(Camera.name == camera)
     if has_cat is not None:
         stmt = stmt.where(Clip.has_cat.is_(has_cat))
-    if date_str is not None:
+    if date_str:
         day = date.fromisoformat(date_str)
         day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
         stmt = stmt.where(Clip.start_ts >= day_start).where(Clip.start_ts < day_start + timedelta(days=1))
