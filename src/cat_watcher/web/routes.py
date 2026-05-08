@@ -28,9 +28,12 @@ modes for missing files:
   the operator-visible signal in logs separable from the bulk-offline case.
 """
 
+import operator
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Protocol, cast
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
@@ -41,11 +44,19 @@ from cat_watcher.db import AlertSent, Camera, Clip, Heartbeat, get_session
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
+    from typing import TypedDict
 
     from fastapi.templating import Jinja2Templates
     from sqlalchemy.engine import Engine
 
     from cat_watcher.config import Config
+
+    class _CameraRow(TypedDict):
+        """Flat projection of a :class:`Camera` ORM row consumed by the timeline view-model."""
+
+        id: int
+        name: str
+        display_name: str
 
 
 class _AppState(Protocol):
@@ -356,26 +367,22 @@ def _render_timeline(request: Request, *, range_key: str) -> object:
         # still get a usable page, just at the standard window.
         range_key = _TIMELINE_DEFAULT_RANGE
     start_window = datetime.now(UTC) - delta
+    display_tz = ZoneInfo(state.config.web.display_timezone)
 
-    with get_session(state.engine) as session:
-        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
-        clips = list(session.scalars(select(Clip).where(Clip.start_ts >= start_window).order_by(Clip.start_ts)))
-        alerts = list(session.scalars(select(AlertSent).where(AlertSent.sent_at >= start_window).order_by(AlertSent.sent_at)))
-        camera_rows = [_camera_lane(cam) for cam in cameras]
-        clip_markers_by_camera: dict[int, list[dict[str, object]]] = defaultdict(list)
-        for clip in clips:
-            clip_markers_by_camera[clip.camera_id].append(
-                _clip_marker(clip, start_window=start_window, total_seconds=delta.total_seconds()),
-            )
-        alert_markers = [_alert_marker(alert, start_window=start_window, total_seconds=delta.total_seconds()) for alert in alerts]
+    camera_rows, clip_markers_by_camera, alert_markers = _load_timeline_data(
+        engine=state.engine,
+        start_window=start_window,
+        total_seconds=delta.total_seconds(),
+        display_tz=display_tz,
+    )
 
     use_buckets = delta > _TIMELINE_BUCKET_THRESHOLD
-    if use_buckets:
-        lanes: dict[int, list[dict[str, object]]] = {
-            cam.id: _bucket_markers(clip_markers_by_camera.get(cam.id, []), total_seconds=delta.total_seconds()) for cam in cameras
-        }
-    else:
-        lanes = {cam.id: clip_markers_by_camera.get(cam.id, []) for cam in cameras}
+    lanes, lanes_have_clips, thumb_cards = _build_lanes_view(
+        camera_rows=camera_rows,
+        clip_markers_by_camera=clip_markers_by_camera,
+        total_seconds=delta.total_seconds(),
+        use_buckets=use_buckets,
+    )
 
     return state.templates.TemplateResponse(
         request,
@@ -383,7 +390,16 @@ def _render_timeline(request: Request, *, range_key: str) -> object:
         {
             "cameras": camera_rows,
             "lanes": lanes,
+            "lanes_have_clips": lanes_have_clips,
+            "next_longer_range_key": _next_longer_range(range_key),
             "alerts": alert_markers,
+            "thumb_cards": thumb_cards,
+            "time_axis_marks": _time_axis_marks(
+                range_key=range_key,
+                start_window=start_window,
+                total_seconds=delta.total_seconds(),
+                display_tz=display_tz,
+            ),
             "range_key": range_key,
             "ranges": list(_TIMELINE_RANGES),
             "use_buckets": use_buckets,
@@ -393,17 +409,86 @@ def _render_timeline(request: Request, *, range_key: str) -> object:
     )
 
 
-def _camera_lane(cam: Camera) -> dict[str, object]:
+def _load_timeline_data(
+    *,
+    engine: Engine,
+    start_window: datetime,
+    total_seconds: float,
+    display_tz: ZoneInfo,
+) -> tuple[list[_CameraRow], dict[int, list[dict[str, object]]], list[dict[str, object]]]:
+    """Pull the cameras / clips / alerts in the window and project them into template view-models.
+
+    All session-bound work happens inside one ``get_session`` so the rows are projected to plain
+    dicts before the session closes — the caller never touches a detached ORM instance.
+    """
+    with get_session(engine) as session:
+        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
+        clips = list(session.scalars(select(Clip).where(Clip.start_ts >= start_window).order_by(Clip.start_ts)))
+        alerts = list(session.scalars(select(AlertSent).where(AlertSent.sent_at >= start_window).order_by(AlertSent.sent_at)))
+        camera_rows = [_camera_lane(cam) for cam in cameras]
+        clip_markers_by_camera: dict[int, list[dict[str, object]]] = defaultdict(list)
+        for clip in clips:
+            clip_markers_by_camera[clip.camera_id].append(
+                _clip_marker(clip, start_window=start_window, total_seconds=total_seconds, display_tz=display_tz),
+            )
+        alert_markers = [_alert_marker(alert, start_window=start_window, total_seconds=total_seconds) for alert in alerts]
+    return camera_rows, clip_markers_by_camera, alert_markers
+
+
+def _build_lanes_view(
+    *,
+    camera_rows: list[_CameraRow],
+    clip_markers_by_camera: dict[int, list[dict[str, object]]],
+    total_seconds: float,
+    use_buckets: bool,
+) -> tuple[dict[int, list[dict[str, object]]], bool, list[dict[str, object]]]:
+    """Project per-camera clip markers into the SVG lanes view-model + flat newest-first thumb_cards.
+
+    The thumb-card list is sorted by ``start_ts`` DESC and interleaved across cameras so the strip
+    reads top-left to most-recent regardless of which camera produced it. Each card carries the
+    camera's display_name precomputed so the template iterates a single sequence.
+    """
+    if use_buckets:
+        lanes: dict[int, list[dict[str, object]]] = {
+            cam_row["id"]: _bucket_markers(
+                clip_markers_by_camera.get(cam_row["id"], []),
+                total_seconds=total_seconds,
+            )
+            for cam_row in camera_rows
+        }
+    else:
+        lanes = {cam_row["id"]: clip_markers_by_camera.get(cam_row["id"], []) for cam_row in camera_rows}
+    lanes_have_clips = any(lanes.get(cam_row["id"]) for cam_row in camera_rows)
+    camera_display_by_id = {cam_row["id"]: cam_row["display_name"] for cam_row in camera_rows}
+    thumb_cards = sorted(
+        [
+            {**marker, "camera_display_name": camera_display_by_id[cam_id]}
+            for cam_id, markers in clip_markers_by_camera.items()
+            for marker in markers
+        ],
+        key=operator.itemgetter("start_ts"),
+        reverse=True,
+    )
+    return lanes, lanes_have_clips, thumb_cards
+
+
+def _camera_lane(cam: Camera) -> _CameraRow:
     """Project a Camera row into a flat dict the template can render without lazy loads."""
     return {"id": cam.id, "name": cam.name, "display_name": cam.display_name}
 
 
-def _clip_marker(clip: Clip, *, start_window: datetime, total_seconds: float) -> dict[str, object]:
-    """Project a Clip into a flat dict + relative position fraction the SVG template can lay out.
+def _clip_marker(
+    clip: Clip,
+    *,
+    start_window: datetime,
+    total_seconds: float,
+    display_tz: ZoneInfo,
+) -> dict[str, object]:
+    """Project a Clip into the SVG-and-card view-model with a precomputed local-time stamp.
 
-    ``css_classes`` is precomputed here (rather than templated as multi-line ``{% if %}`` blocks) so
-    djlint's HTML reformatter can't insert newlines into the class attribute — that would break
-    integration tests that match on the rendered ``class="clip ..."`` substring.
+    ``css_classes`` and ``display_stamp`` are precomputed (rather than templated as conditionals or
+    filter chains) so djlint's HTML reformatter can't insert newlines into the class attribute, and
+    so Jinja stays free of timezone arithmetic.
     """
     offset_seconds = (clip.start_ts - start_window).total_seconds()
     effective = clip.has_cat if clip.manual_has_cat is None else clip.manual_has_cat
@@ -421,6 +506,8 @@ def _clip_marker(clip: Clip, *, start_window: datetime, total_seconds: float) ->
         "manual_label": clip.manual_has_cat is not None,
         "analysis_error": bool(clip.analysis_error),
         "css_classes": " ".join(classes),
+        "display_stamp": clip.start_ts.astimezone(display_tz).strftime("%H:%M:%S"),
+        "display_start": clip.start_ts.astimezone(display_tz).strftime("%a %H:%M:%S"),
         # Fractional positions in [0, 1]; the template multiplies by the lane's pixel width.
         "x_frac": max(0.0, min(1.0, offset_seconds / total_seconds)),
         "w_frac": max(0.0, min(1.0, clip.duration_seconds / total_seconds)),
@@ -438,12 +525,11 @@ def _alert_marker(alert: AlertSent, *, start_window: datetime, total_seconds: fl
 
 
 def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -> list[dict[str, object]]:
-    """Collapse per-clip markers into per-hour bins so heatmap cells replace dense overlap.
+    """Collapse per-clip markers into per-hour bins with precomputed opacity and fill-class.
 
-    Each output dict carries the bin's ``x_frac`` (left edge, fractional), ``w_frac`` (constant
-    bucket width, fractional), ``count`` (number of clips in the bin), and ``cat_count`` (subset
-    that resolved cat-positive after applying the manual override). The template uses ``count``
-    for the cell's ``<title>`` text and the color intensity scaling.
+    Each output dict carries: ``bin_index``, ``x_frac``, ``w_frac``, ``count``, ``cat_count``,
+    ``opacity`` (0.20-0.95 scaled to this *lane's* max count so a quiet camera doesn't get washed
+    out by a busy one), and ``fill_class`` (``bucket-cat`` or ``bucket-no-cat``).
     """
     buckets: dict[int, dict[str, int]] = defaultdict(lambda: {"count": 0, "cat_count": 0})
     bucket_w_frac = _BUCKET_SECONDS / total_seconds
@@ -454,6 +540,9 @@ def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -
         bucket["count"] += 1
         if marker["has_cat"]:
             bucket["cat_count"] += 1
+    if not buckets:
+        return []
+    lane_max = max(b["count"] for b in buckets.values())
     return [
         {
             "bin_index": bin_index,
@@ -461,9 +550,141 @@ def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -
             "w_frac": bucket_w_frac,
             "count": stats["count"],
             "cat_count": stats["cat_count"],
+            "opacity": round(0.20 + 0.75 * (stats["count"] / lane_max), 3),
+            "fill_class": "bucket-cat" if stats["cat_count"] > 0 else "bucket-no-cat",
         }
         for bin_index, stats in sorted(buckets.items())
     ]
+
+
+def _format_tick_label_hour_minute(dt_local: datetime) -> str:
+    """Used at 6h and 24h: ``HH:MM`` clock label."""
+    return dt_local.strftime("%H:%M")
+
+
+def _format_tick_label_weekday_hour(dt_local: datetime) -> str:
+    """Used at 7d: ``Mon 14:00`` so a label survives a date crossing without a separate marker."""
+    return dt_local.strftime("%a %H:%M")
+
+
+def _format_tick_label_day_month(dt_local: datetime) -> str:
+    """Used at 30d: ``5 May`` — no clock component needed when ticks are 24h apart."""
+    return dt_local.strftime("%-d %b")
+
+
+@dataclass(frozen=True, slots=True)
+class _TickConfig:
+    """Per-range tick cadence + labelling rule for the time-axis row."""
+
+    seconds: int  # spacing between adjacent ticks
+    label_every: int  # n-th tick gets a text label
+    formatter: Callable[[datetime], str]
+
+
+_TICK_CONFIG: dict[str, _TickConfig] = {
+    "6h": _TickConfig(seconds=30 * 60, label_every=2, formatter=_format_tick_label_hour_minute),
+    "24h": _TickConfig(seconds=60 * 60, label_every=1, formatter=_format_tick_label_hour_minute),
+    "7d": _TickConfig(seconds=6 * 60 * 60, label_every=2, formatter=_format_tick_label_weekday_hour),
+    "30d": _TickConfig(seconds=24 * 60 * 60, label_every=1, formatter=_format_tick_label_day_month),
+}
+
+
+def _format_day_label(dt_local: datetime, *, range_key: str, end_local: datetime) -> str | None:
+    """Choose the label that sits next to a midnight day-boundary marker, by range.
+
+    ``None`` means render the boundary line with no label (6h windows are too short to need a date
+    prompt). ``today``/``yesterday`` is used at 24h so the operator can read the boundary without
+    parsing dates. 7d and 30d get a full ``5 May`` style date.
+    """
+    if range_key == "6h":
+        return None
+    if range_key == "24h":
+        return "today" if dt_local.date() == end_local.date() else "yesterday"
+    return dt_local.strftime("%-d %b")
+
+
+def _tick_marks(
+    *,
+    range_key: str,
+    start_window: datetime,
+    total_seconds: float,
+    display_tz: ZoneInfo,
+) -> list[dict[str, object]]:
+    """Build the per-range tick row: every nth tick gets a label, the rest are unlabeled."""
+    tick_config = _TICK_CONFIG[range_key]
+    n_ticks = int(total_seconds // tick_config.seconds)
+    marks: list[dict[str, object]] = []
+    for i in range(1, n_ticks + 1):
+        offset = i * tick_config.seconds
+        tick_dt_local = (start_window + timedelta(seconds=offset)).astimezone(display_tz)
+        label = tick_config.formatter(tick_dt_local) if i % tick_config.label_every == 0 else None
+        marks.append({"x_frac": offset / total_seconds, "label": label, "kind": "tick"})
+    return marks
+
+
+def _day_boundary_marks(
+    *,
+    range_key: str,
+    start_window: datetime,
+    total_seconds: float,
+    display_tz: ZoneInfo,
+) -> list[dict[str, object]]:
+    """Build the per-midnight day-boundary marks in ``display_tz`` for the window.
+
+    Iteration is in *calendar-day* space: ``date + timedelta(days=1)`` always advances exactly one
+    calendar day, and ``datetime.combine`` re-resolves the UTC offset for each midnight. Adding
+    ``timedelta(days=1)`` to a tz-aware ``datetime`` instead would carry the start-of-window's
+    offset across DST transitions and place the boundary an hour off (or on the wrong date).
+    """
+    start_local = start_window.astimezone(display_tz)
+    end_local = (start_window + timedelta(seconds=total_seconds)).astimezone(display_tz)
+    marks: list[dict[str, object]] = []
+    day = start_local.date() + timedelta(days=1)
+    while day <= end_local.date():
+        cursor = datetime.combine(day, datetime.min.time(), tzinfo=display_tz)
+        offset = (cursor - start_local).total_seconds()
+        if 0 < offset < total_seconds:
+            marks.append(
+                {
+                    "x_frac": offset / total_seconds,
+                    "label": _format_day_label(cursor, range_key=range_key, end_local=end_local),
+                    "kind": "day",
+                },
+            )
+        day += timedelta(days=1)
+    return marks
+
+
+def _time_axis_marks(
+    *,
+    range_key: str,
+    start_window: datetime,
+    total_seconds: float,
+    display_tz: ZoneInfo,
+) -> list[dict[str, object]]:
+    """Build the SVG time-axis view-model: tick rows, day boundaries, and a 'now' marker.
+
+    Each output dict carries ``x_frac`` ([0, 1] left fraction), an optional ``label`` (string or
+    ``None``), and a ``kind`` discriminator: ``"tick"``, ``"day"``, or ``"now"``. The template
+    consumes the list in order and picks the SVG element type per kind.
+    """
+    return [
+        *_tick_marks(range_key=range_key, start_window=start_window, total_seconds=total_seconds, display_tz=display_tz),
+        *_day_boundary_marks(range_key=range_key, start_window=start_window, total_seconds=total_seconds, display_tz=display_tz),
+        {"x_frac": 1.0, "label": None, "kind": "now"},
+    ]
+
+
+def _next_longer_range(range_key: str) -> str | None:
+    """Return the next preset wider than ``range_key`` in :data:`_TIMELINE_RANGES`, or ``None``.
+
+    Used by the empty-state CTA: at 6h -> 24h, at 24h -> 7d, at 7d -> 30d, at 30d -> ``None``.
+    """
+    keys = list(_TIMELINE_RANGES)
+    if range_key not in keys:
+        return None
+    idx = keys.index(range_key)
+    return keys[idx + 1] if idx + 1 < len(keys) else None
 
 
 @cameras_router.get("/cameras")

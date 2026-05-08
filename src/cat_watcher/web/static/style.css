@@ -22,10 +22,20 @@
   --color-bg-card: oklch(100% 0 0deg);
   --color-link: oklch(43.6% .133 257.9deg);
   --color-link-hover: oklch(35.4% .109 257deg);
-  --color-cat: oklch(51.3% .139 143.2deg);
-  --color-no-cat: oklch(62.7% 0 0deg);
+
+  /* --color-cat / --color-no-cat are sized for AA text contrast (used by /clips .badge-cat /
+   * .badge-no-cat). The Timeline's SVG markers and card borders use the *-graphic variants
+   * below, which prioritize visual punch over WCAG text-contrast since they're non-text. */
+  --color-cat: oklch(47% .17 145deg);
+  --color-no-cat: oklch(51% 0 0deg);
+  --color-cat-graphic: oklch(60% .22 142deg);
+  --color-no-cat-graphic: oklch(90% 0 0deg);
   --color-manual: oklch(52.7% .172 259deg);
   --color-error: oklch(49.7% .18 26.8deg);
+  --color-warn: oklch(55% .14 60deg);
+  --color-warn-bg: oklch(96% .04 65deg);
+  --color-warn-text: oklch(40% .12 65deg);
+  --font-mono: menlo, consolas, monospace;
   --space-xs: .25rem;
   --space-sm: .5rem;
   --space-md: 1rem;
@@ -33,6 +43,8 @@
   --tap-target: 2.75rem; /* 44px @ 16px root — matches WCAG SC 2.5.5 minimum */
   --content-max: 80rem;
   --hairline: .0625rem; /* 1px @ 16px root — for visually-hidden helpers and 1px borders */
+  --z-stripe: 1; /* Card-side stripe sits above its sibling card image but below modals/menus */
+  --z-tooltip: 1000;
 }
 
 /* stylelint-disable selector-max-universal -- Reset requires universal selectors */
@@ -458,6 +470,20 @@ video {
   video {
     max-inline-size: 40rem;
   }
+
+  .timeline-header {
+    flex-direction: row;
+    gap: var(--space-md);
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  .range-presets a {
+    /* Tighter padding once we're confident there's a real pointer driving the segmented control;
+     * the surrounding pill keeps the visual height reasonable. */
+    min-block-size: 2rem;
+    padding: var(--space-xs) var(--space-md);
+  }
 }
 
 /* =====================================================================
@@ -479,5 +505,471 @@ video {
     & dt {
       margin-block-start: 0;
     }
+  }
+}
+
+/* =====================================================================
+ * Timeline page (/, /timeline)
+ *
+ * Layered like the rest of this stylesheet: mobile-first base rules, then
+ * @media (min-width:...) blocks for tablet and desktop. Selectors are
+ * scoped under .timeline-svg / .thumb-strip / .timeline-header so they
+ * don't leak to other pages.
+ * ===================================================================== */
+
+.timeline-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-block-end: var(--space-md);
+}
+
+.range-presets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+
+  padding: .1875rem;
+  border-radius: 8px;
+
+  background: var(--color-bg-stripe);
+
+  & a {
+    display: inline-flex;
+    flex-wrap: nowrap;
+    align-items: center;
+
+    /* WCAG SC 2.5.5 minimum is preserved by the surrounding pill height; the @media (>=768px)
+     * block below tightens this padding once a real pointer is the likely input mode. */
+    min-block-size: var(--tap-target);
+    padding: var(--space-xs) var(--space-md);
+    border-radius: 6px;
+
+    font-family: var(--font-mono), monospace;
+    font-size: .875rem;
+    color: var(--color-muted);
+    text-decoration: none;
+  }
+
+  & a[aria-current='page'] {
+    color: var(--color-text);
+    background: var(--color-bg-card);
+    box-shadow: 0 1px 2px oklch(0% 0 0deg / 8%);
+  }
+}
+
+.banner-offline {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-sm);
+  align-items: center;
+
+  margin-block-end: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: var(--hairline) solid var(--color-warn);
+  border-radius: 4px;
+
+  color: var(--color-warn-text);
+
+  background: var(--color-warn-bg);
+}
+
+.timeline-svg {
+  inline-size: 100%;
+  block-size: auto;
+  margin-block-end: var(--space-md);
+
+  & .lane-label {
+    font-family: var(--font-mono), monospace;
+    font-size: .625rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+
+    fill: var(--color-muted);
+  }
+
+  & .lane-axis {
+    opacity: .5;
+    stroke: var(--color-border);
+    stroke-width: 1;
+  }
+
+  & .clip {
+    rx: 1px;
+  }
+
+  & .clip-cat {
+    fill: var(--color-cat-graphic);
+  }
+
+  & .clip-no-cat {
+    fill: var(--color-no-cat-graphic);
+  }
+
+  & .clip-manual {
+    stroke: var(--color-manual);
+    stroke-width: 1.5;
+  }
+
+  & .clip-error {
+    stroke: var(--color-error);
+    stroke-width: 1.5;
+  }
+}
+
+@media (hover: hover) {
+  .timeline-svg .clip:hover,
+  .timeline-svg .bucket:hover {
+    filter: drop-shadow(0 0 2px var(--color-link));
+  }
+}
+
+.timeline-svg .bucket-cat {
+  fill: var(--color-cat-graphic);
+}
+
+.timeline-svg .bucket-no-cat {
+  fill: var(--color-no-cat-graphic);
+}
+
+.timeline-svg .alert-line {
+  stroke: var(--color-warn);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.timeline-svg .alert-label {
+  font-family: var(--font-mono), monospace;
+  font-size: .625rem;
+
+  /* paint-order: stroke fill paints the stroke first (a fat translucent white halo around each
+   * glyph) then the fill on top — cheap legibility win against any underlying clip color without
+   * adding a backing <rect> to the template. */
+  paint-order: stroke fill;
+
+  fill: var(--color-warn);
+  stroke: oklch(100% 0 0deg / 70%);
+  stroke-linejoin: round;
+  stroke-width: 3;
+}
+
+.timeline-svg .axis-tick {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.timeline-svg .axis-tick-label {
+  font-family: var(--font-mono), monospace;
+  font-size: .5625rem;
+  fill: var(--color-muted);
+}
+
+.timeline-svg .axis-day-boundary {
+  opacity: .7;
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.timeline-svg .axis-day-label {
+  font-family: var(--font-mono), monospace;
+  font-size: .5625rem;
+  fill: var(--color-muted);
+}
+
+.timeline-svg .axis-now {
+  stroke: var(--color-link);
+  stroke-width: 1;
+}
+
+.timeline-svg .axis-now-dot {
+  fill: var(--color-link);
+}
+
+.thumb-strip {
+  display: grid;
+  grid-template-columns: [thumb-start] 1fr [thumb-end]; /* mobile: single column */
+  gap: var(--space-md);
+
+  margin: 0;
+  padding: 0;
+
+  list-style: '';
+
+  & .clip {
+    position: relative;
+
+    overflow: hidden;
+
+    /* Small gutter around the <img> so the inset box-shadow state-border (1px no-cat, 2px cat,
+     * 2px error) reads as a "matted frame" rather than being hidden under the photo. */
+    padding: .1875rem;
+    border-radius: 6px;
+
+    background: var(--color-bg-stripe);
+
+    /* The inset state border is delivered via box-shadow so it doesn't shift the layout when its
+   * width changes between the 1px no-cat case and the 2px cat / error case. */
+    box-shadow: inset 0 0 0 1px var(--color-no-cat-graphic);
+  }
+
+  & .clip-cat {
+    box-shadow: inset 0 0 0 2px var(--color-cat-graphic);
+  }
+
+  & .clip-error {
+    box-shadow: inset 0 0 0 2px var(--color-error);
+  }
+}
+
+/* Hover/active scale animation is wrapped in a reduced-motion guard further down; the
+ * transition declaration is gated to the same media query so users who request reduced
+ * motion get an instant state-change instead of a 0.12s ease. */
+@media (prefers-reduced-motion: no-preference) {
+  .thumb-strip .clip {
+    transition: transform .12s ease-out;
+  }
+}
+
+/* When both manual and error apply, the manual blue stripe is added on the side; the inset
+ * border still reads error-red because manual is rendered as a side-stripe, not as a
+ * box-shadow. */
+.thumb-strip .clip-manual::before {
+  content: '';
+
+  position: absolute;
+  z-index: var(--z-stripe);
+  inset-block: 0;
+  inset-inline-start: 0;
+
+  inline-size: .25rem;
+
+  background: var(--color-manual);
+}
+
+.thumb-strip .clip-error::after {
+  /* Small red dot in the top-right corner: extra signal for error so the card reads even when
+   * scrolling fast and the inset border blurs. */
+  content: '';
+
+  position: absolute;
+  inset-block-start: .375rem;
+  inset-inline-end: .375rem;
+
+  inline-size: .5rem;
+  block-size: .5rem;
+  border-radius: 50%;
+
+  background: var(--color-error);
+}
+
+.thumb-strip a {
+  position: relative;
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+.thumb-strip img {
+  display: block;
+
+  aspect-ratio: 16 / 9;
+  inline-size: 100%;
+  block-size: auto;
+
+  /* Match the outer .clip's border-radius so the image fits cleanly inside the matted-frame gutter. */
+  border-radius: 6px;
+
+  object-fit: cover;
+}
+
+.thumb-meta {
+  position: absolute;
+  inset-block-end: 0;
+  inset-inline: 0;
+
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-sm);
+  justify-content: space-between;
+
+  padding: var(--space-xs) var(--space-sm);
+
+  /* Round the bottom corners to match the image's border-radius so the gradient strip's
+   * bottom-left/right don't poke past the image's curve. */
+  border-end-start-radius: 6px;
+  border-end-end-radius: 6px;
+
+  font-family: var(--font-mono), monospace;
+  font-size: .75rem;
+  color: oklch(100% 0 0deg);
+
+  background: linear-gradient(transparent, oklch(0% 0 0deg / 55%));
+}
+
+.thumb-camera {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  /* Hover scale + soft outer ring. The outer ring is a translucent --color-link tint stacked
+   * AFTER the existing inset state-border (1px no-cat / 2px cat / 2px error) so both shadows
+   * paint together; adding an outer-only shadow without re-declaring the inset would clobber
+   * the matted-frame border. Hardcoded oklch matches --color-link at 25% alpha. */
+  .thumb-strip .clip:hover {
+    transform: scale(1.02);
+    box-shadow:
+      inset 0 0 0 1px var(--color-no-cat-graphic),
+      0 0 0 4px oklch(43.6% .133 257.9deg / 25%);
+  }
+
+  .thumb-strip .clip-cat:hover {
+    box-shadow:
+      inset 0 0 0 2px var(--color-cat-graphic),
+      0 0 0 4px oklch(43.6% .133 257.9deg / 25%);
+  }
+
+  .thumb-strip .clip-error:hover {
+    box-shadow:
+      inset 0 0 0 2px var(--color-error),
+      0 0 0 4px oklch(43.6% .133 257.9deg / 25%);
+  }
+}
+
+.thumb-strip .clip:active,
+.thumb-strip a:active .clip {
+  transform: scale(.99);
+}
+
+@media (width >= 30rem) {
+  .thumb-strip {
+    grid-template-columns: [thumb-start] 1fr [col-2] 1fr [thumb-end];
+  }
+}
+
+@media (width >= 48rem) {
+  .thumb-strip {
+    grid-template-columns: [thumb-start] 1fr [col-2] 1fr [col-3] 1fr [thumb-end];
+  }
+}
+
+@media (width >= 64rem) {
+  .thumb-strip {
+    grid-template-columns: [thumb-start] 1fr [col-2] 1fr [col-3] 1fr [col-4] 1fr [thumb-end];
+  }
+}
+
+#timeline-region .empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  align-items: center;
+
+  padding: var(--space-lg) var(--space-md);
+
+  text-align: center;
+
+  /* color: muted is inherited from the legacy .empty-state rule above. */
+
+  & .empty-icon {
+    inline-size: 3rem;
+    block-size: 3rem;
+    color: var(--color-border);
+  }
+
+  & h2 {
+    margin: 0;
+
+    /* Override the legacy italic so the h2 reads as a normal headline. */
+    font-style: normal;
+    color: var(--color-text);
+  }
+
+  & p {
+    max-inline-size: 28rem;
+    margin: 0;
+
+    /* Override legacy italic for the prose. The block layout speaks for itself. */
+    font-style: normal;
+  }
+}
+
+.empty-ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  justify-content: center;
+}
+
+#timeline-region.htmx-request {
+  pointer-events: none;
+  opacity: .5;
+
+  @media (prefers-reduced-motion: no-preference) {
+    transition: opacity .15s ease-out;
+  }
+}
+
+.timeline-tooltip {
+  pointer-events: none;
+
+  position: fixed;
+  z-index: var(--z-tooltip);
+
+  padding: .25rem .5rem;
+  border-radius: 4px;
+
+  font-size: .75rem;
+  line-height: 1.3;
+  color: oklch(95% 0 0deg);
+  white-space: nowrap;
+
+  background: oklch(20% .005 240deg);
+}
+
+.timeline-tooltip::before {
+  /* Small upward-pointing triangle anchored above the tooltip's left edge. The tooltip itself is
+   * positioned 12px below/right of the cursor by timeline.js, so the pointer points UP toward the
+   * cursor. The border-bottom-color matches the tooltip's dark background so the triangle reads
+   * as part of the same shape. */
+  content: '';
+
+  position: absolute;
+  inset-block-start: -12px;
+  inset-inline-start: 12px;
+
+  border: 6px solid transparent;
+  border-block-end-color: oklch(20% .005 240deg);
+}
+
+.timeline-error-toast {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+  justify-content: space-between;
+
+  margin-block-end: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: var(--hairline) solid var(--color-warn);
+  border-radius: 4px;
+
+  color: var(--color-warn-text);
+
+  background: var(--color-warn-bg);
+
+  & button {
+    cursor: pointer;
+
+    margin: 0;
+    padding: var(--space-xs) var(--space-sm);
+    border: var(--hairline) solid var(--color-warn);
+    border-radius: 3px;
+
+    font-size: .75rem;
+    color: inherit;
+
+    background: transparent;
   }
 }
