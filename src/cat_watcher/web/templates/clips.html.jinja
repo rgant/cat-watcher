@@ -47,7 +47,7 @@
         <tr>
           <th scope="col">Thumbnail</th>
           <th scope="col">Camera</th>
-          <th scope="col">Start (UTC)</th>
+          <th scope="col">Start</th>
           <th scope="col">Duration</th>
           <th scope="col">Cat?</th>
           <th scope="col">Score</th>
@@ -67,9 +67,9 @@
               </a>
             </td>
             <td data-label="Camera">{{ row.camera_display_name }}</td>
-            <td data-label="Start (UTC)">
+            <td data-label="Start">
               <a href="{{ url_for('clip_detail', clip_id=row.id) }}">
-                <time datetime="{{ row.start_ts.isoformat() }}">{{ row.start_ts.isoformat() }}</time>
+                <time datetime="{{ row.start_ts.isoformat() }}">{{ row.display_start }}</time>
               </a>
             </td>
             <td data-label="Duration">{{ "%.1f"|format(row.duration_seconds) }}s</td>

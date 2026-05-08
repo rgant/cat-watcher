@@ -148,6 +148,7 @@ async def list_clips(
     timezone-aware filtering to a later iteration.
     """
     state = _state(request)
+    display_tz = ZoneInfo(state.config.web.display_timezone)
 
     stmt = select(Clip).join(Camera).order_by(desc(Clip.start_ts)).limit(_CLIPS_LIST_LIMIT)
     if camera:
@@ -164,7 +165,7 @@ async def list_clips(
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
         # Build a {camera_id: display_name} mapping eagerly so the template can render the camera
         # display name without triggering lazy-loaded attribute access on a closed session.
-        clip_rows = [_clip_summary(clip, cameras) for clip in clips]
+        clip_rows = [_clip_summary(clip, cameras, display_tz=display_tz) for clip in clips]
 
     return state.templates.TemplateResponse(
         request,
@@ -186,6 +187,7 @@ async def clip_detail(request: Request, clip_id: int) -> object:
     contract; the endpoints themselves land in Task 22.
     """
     state = _state(request)
+    display_tz = ZoneInfo(state.config.web.display_timezone)
 
     with get_session(state.engine) as session:
         clip = session.get(Clip, clip_id)
@@ -197,10 +199,20 @@ async def clip_detail(request: Request, clip_id: int) -> object:
         if camera is not None:
             session.expunge(camera)
 
+    # The Amcrest video has the camera-local clock burned into the OSD; rendering the heading
+    # in display_timezone keeps the page label aligned with what the user sees in the player.
+    # Kept here (not in the template) per the project's precompute-in-routes convention.
+    display_start = clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+
     return state.templates.TemplateResponse(
         request,
         "clip_detail.html.jinja",
-        {"clip": clip, "camera": camera, "tz": state.config.web.display_timezone},
+        {
+            "clip": clip,
+            "camera": camera,
+            "display_start": display_start,
+            "tz": state.config.web.display_timezone,
+        },
     )
 
 
@@ -281,8 +293,13 @@ async def media_thumb(request: Request, clip_id: int) -> FileResponse:
     return FileResponse(file_path, media_type=_THUMB_MEDIA_TYPE)
 
 
-def _clip_summary(clip: Clip, cameras: list[Camera]) -> dict[str, object]:
-    """Project a Clip + its Camera into a flat dict the template can render without lazy loads."""
+def _clip_summary(clip: Clip, cameras: list[Camera], *, display_tz: ZoneInfo) -> dict[str, object]:
+    """Project a Clip + its Camera into a flat dict the template can render without lazy loads.
+
+    ``display_start`` is precomputed in ``display_tz`` so the visible cell aligns with the
+    camera-OSD time burned into the video; the raw ``start_ts`` (UTC) is also passed for the
+    HTML5 ``<time datetime="…">`` attribute.
+    """
     by_id = {cam.id: cam for cam in cameras}
     cam = by_id.get(clip.camera_id)
     return {
@@ -291,6 +308,7 @@ def _clip_summary(clip: Clip, cameras: list[Camera]) -> dict[str, object]:
         "camera_name": cam.name if cam is not None else "",
         "source_filename": clip.source_filename,
         "start_ts": clip.start_ts,
+        "display_start": clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
         "duration_seconds": clip.duration_seconds,
         "has_cat": clip.has_cat,
         "manual_has_cat": clip.manual_has_cat,

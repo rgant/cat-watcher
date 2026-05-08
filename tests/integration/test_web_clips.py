@@ -160,6 +160,35 @@ def test_clips_list_returns_200_and_renders_camera_display_name(
     assert "Pantry Litter Box" in response.text
 
 
+def test_clips_list_renders_start_ts_in_display_timezone(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Each row's ``Start`` cell renders the clip start in ``web.display_timezone``, matching the
+    OSD time burned into the video. The ``<time datetime="…">`` attribute keeps UTC ISO for HTML5
+    semantics; only the visible text is localized.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    # 18:47:04 UTC on 2026-05-01 → 14:47:04 EDT (default display_timezone is America/New_York).
+    start_ts = datetime(2026, 5, 1, 18, 47, 4, tzinfo=UTC)
+    _ = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        start_ts=start_ts,
+    )
+
+    with web_test_client(config) as client:
+        response = client.get("/clips", headers=_AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert "2026-05-01 14:47:04 EDT" in response.text
+    assert 'datetime="2026-05-01T18:47:04+00:00"' in response.text
+
+
 def test_clips_list_filter_by_camera_name(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
@@ -285,6 +314,37 @@ def test_clip_detail_renders_video_player_targeting_media_route(
     assert f"/media/clip/{clip_id}.mp4" in response.text
     assert "0.92" in response.text  # max_score
     assert "yolov11n@deadbeef" in response.text  # detector_version
+
+
+def test_clip_detail_heading_renders_in_display_timezone(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Heading time-of-day is in ``web.display_timezone``, matching the camera-OSD time burned into
+    the video. The ``<time datetime="…">`` attribute keeps UTC ISO for HTML5 semantics, but the
+    visible text uses the configured display zone — ``Clip.start_ts`` is stored UTC, so a raw
+    ``isoformat()`` would disagree with the on-screen video timestamp by the tz offset.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    # 18:47:04 UTC on 2026-05-01 → 14:47:04 EDT (default display_timezone is America/New_York,
+    # which is UTC-4 in May).
+    start_ts = datetime(2026, 5, 1, 18, 47, 4, tzinfo=UTC)
+    _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        start_ts=start_ts,
+    )
+
+    with web_test_client(config) as client:
+        response = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert "2026-05-01 14:47:04 EDT" in response.text
+    assert 'datetime="2026-05-01T18:47:04+00:00"' in response.text
 
 
 def test_clip_detail_renders_manual_label_form(

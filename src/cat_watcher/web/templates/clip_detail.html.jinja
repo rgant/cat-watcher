@@ -10,7 +10,7 @@
     <h1>
       {{ camera.display_name if camera else "(unknown camera)" }}
       ·
-      <time datetime="{{ clip.start_ts.isoformat() }}">{{ clip.start_ts.isoformat() }}</time>
+      <time datetime="{{ clip.start_ts.isoformat() }}">{{ display_start }}</time>
     </h1>
   </header>
   <video controls preload="metadata" aria-label="Clip {{ clip.id }} video">
