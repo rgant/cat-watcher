@@ -27,6 +27,10 @@ provisions the Python/conda environment; `npm ci` provisions the JS-based
 linters (stylelint). The three are independent and must run in that order
 because subsequent commands depend on each.
 
+The Gmail vars in `.env` are the trickiest — see
+[`docs/outbound-email-setup.md`](docs/outbound-email-setup.md) for app-password
+and SMTP details.
+
 `npm ci` (clean install) is preferred over `npm install` for reproducibility: it
 installs the exact versions in `package-lock.json` and refuses to run if the
 lockfile is out of sync. Use `npm update <pkg>` only when intentionally
