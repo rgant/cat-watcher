@@ -508,6 +508,7 @@ class _CameraTickResult:
     status_on_failure: PollStatus = PollStatus.OK  # only consulted when success=False
     error_msg: str = ""
     ingested: list[Clip] = field(default_factory=list)
+    listed: int = 0  # only meaningful under --list-only; mutually exclusive with ``ingested``
 
 
 def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchestration helper; dataclass-bundling these would just nest the noise
@@ -545,11 +546,13 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
 
     client = AmcrestClient(cam_cfg, config.camera_secrets, camera_tz=camera_tz)
     ingested: list[Clip] = []
+    listed = 0
     try:
         with client:
             for rec in _limited(client.iter_recordings(since=since, until=until), args.limit):
                 if args.list_only:
-                    logger.info("list-only: camera=%s source=%s start=%s", cam_cfg.name, rec.source_filename, rec.start_ts.isoformat())
+                    _emit(f"  {rec.start_ts.isoformat()}  {rec.source_filename}")
+                    listed += 1
                     continue
                 clip = _ingest_recording(rec, client=client, ctx=ctx)
                 if clip is not None:
@@ -562,6 +565,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
             status_on_failure=PollStatus.UNREACHABLE,
             error_msg=str(exc),
             ingested=ingested,
+            listed=listed,
         )
     except (CameraAuthError, CameraAPIError) as exc:
         logger.warning("camera %s API error: %s", cam_cfg.name, exc)
@@ -571,8 +575,9 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
             status_on_failure=PollStatus.ERROR,
             error_msg=str(exc),
             ingested=ingested,
+            listed=listed,
         )
-    return _CameraTickResult(success=True, window=window, ingested=ingested)
+    return _CameraTickResult(success=True, window=window, ingested=ingested, listed=listed)
 
 
 def _limited[ItemT](items: Iterable[ItemT], limit: int | None) -> Iterator[ItemT]:
@@ -819,7 +824,7 @@ def _print_camera_summary(*, cam_cfg: CameraConfig, outcome: _CameraTickResult, 
         _emit(f"{cam_cfg.name}: tick failed ({outcome.status_on_failure.value}) — {outcome.error_msg}{window}")
         return
     if list_only:
-        _emit(f"{cam_cfg.name}: list-only complete{window}")
+        _emit(f"{cam_cfg.name}: would ingest {outcome.listed} clip(s){window}")
     elif outcome.ingested:
         _emit(f"{cam_cfg.name}: ingested {len(outcome.ingested)} clip(s){window}")
     else:
@@ -848,9 +853,11 @@ def _print_retention_summary(report: retention.RetentionReport) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code.
 
-    Default log level is ``WARNING`` so a healthy interactive run only emits the per-camera
-    summary + retention line via stdout; problems surface on stderr through the warning/error
-    loggers. ``--verbose`` raises the level to ``INFO`` to expose httpxyz requests, the empty-window
+    Stdout always carries the user-facing report — per-camera summary lines, retention sweep
+    line, and (under ``--list-only``) the per-clip manifest — independent of log level.
+    Default log level is ``WARNING`` so only genuine problems surface on stderr.
+    ``--verbose`` raises the level to ``INFO`` and routes diagnostic detail to stderr (and the
+    JSONL log): httpxyz requests, the empty-window
     note from ``amcrest_client``, and other diagnostic detail. The full structured-logging design
     (Task 26b in the plan) replaces this when it lands.
     """

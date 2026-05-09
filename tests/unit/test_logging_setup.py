@@ -187,6 +187,24 @@ def test_rotation_creates_backup_file(tmp_path: Path, monkeypatch: pytest.Monkey
     assert rolled, f"expected at least one rotated backup, found: {backups}"
 
 
+def test_stderr_handler_respects_level_parameter(tmp_path: Path) -> None:
+    """The stderr handler must be set to the same level as the root logger.
+
+    Pins the contract that ``--verbose`` (level=INFO) actually surfaces INFO records on
+    stderr, and the default (level=WARNING) keeps stderr quiet. Without this, INFO records
+    from httpxyz / amcrest_client only reach the JSONL file.
+    """
+    setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
+    handlers = logging.getLogger().handlers
+    info_streams = sum(1 for h in handlers if type(h) is logging.StreamHandler and h.level == logging.INFO)
+    assert info_streams == 1, f"expected one StreamHandler at INFO, got handlers={handlers!r}"
+
+    setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.WARNING)
+    handlers = logging.getLogger().handlers
+    warning_streams = sum(1 for h in handlers if type(h) is logging.StreamHandler and h.level == logging.WARNING)
+    assert warning_streams == 1, f"expected one StreamHandler at WARNING, got handlers={handlers!r}"
+
+
 def test_single_line_invariant_with_embedded_newlines() -> None:
     """A message containing literal newlines still serializes to a single physical line."""
     record = _build_record(msg="line one\nline two\nline three")

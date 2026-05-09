@@ -6,6 +6,7 @@ Verifies the file-before-row ordering invariant: the ``clips`` row only commits 
 and .jpg files exist on disk.
 """
 
+import logging
 from collections.abc import Callable  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
@@ -224,6 +225,48 @@ def test_full_tick_list_only_is_strict_dry_run(
             assert session.query(Heartbeat).count() == 0
     finally:
         engine.dispose()
+
+
+@respx.mock
+def test_list_only_emits_per_clip_lines_and_count_to_stdout(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--list-only`` must print every clip in the window to stdout, regardless of log level.
+
+    Contract under test: the listing IS the command's output, not diagnostic detail. It must
+    bypass the Python logging module (and the WARNING / INFO level threshold) entirely so that
+    ``cat-watcher-poller --list-only`` is useful as a manifest preview without any ``--verbose``
+    incantation. Regression coverage for the bug where ``logger.info("list-only: ...")`` was
+    silenced at default level — see commit-msg history if this assertion ever flips.
+    """
+    # Pin the root logger at WARNING (the default) to prove per-clip stdout output is not log-gated.
+    saved_level = logging.getLogger().level
+    logging.getLogger().setLevel(logging.WARNING)
+    try:
+        internal_root, storage_root = storage_dirs
+        config = make_config(internal_root, storage_root)
+
+        engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+        Base.metadata.create_all(engine)
+
+        _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+
+        args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), list_only=True)
+        try:
+            run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        finally:
+            engine.dispose()
+
+        captured = capsys.readouterr()
+        # Per-clip line — indented two spaces, ISO timestamp, source filename
+        assert "06.47.04-06.48.58[M][0@0][0].mp4" in captured.out, f"expected per-clip line in stdout, got:\n{captured.out}"
+        # Summary line — count appears in stdout
+        assert "would ingest 1 clip(s)" in captured.out, f"expected count in summary line, got:\n{captured.out}"
+    finally:
+        logging.getLogger().setLevel(saved_level)
 
 
 @respx.mock

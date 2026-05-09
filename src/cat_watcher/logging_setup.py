@@ -8,8 +8,10 @@ the root logger:
   ``<internal_root>/logs/<agent>.jsonl`` (10 MB rotation, 7 backups). Every record is one line of
   JSON conforming to the schema in
   ``docs/specs/2026-05-05-structured-logging-design.md``.
-* A :class:`logging.StreamHandler` on stderr at ``WARNING`` so genuine problems still hit the
-  LaunchAgent's ``<agent>.stderr.log`` fallback even if no one is reading the JSONL file.
+* A :class:`logging.StreamHandler` on stderr at the same ``level`` as the root logger, so
+  genuine problems hit the LaunchAgent's ``<agent>.stderr.log`` fallback even if no one is
+  reading the JSONL file. Under ``--verbose``/``level=INFO``, diagnostic detail (httpxyz
+  requests, the empty-window note from amcrest_client, retries) also surfaces on stderr.
 
 The formatter stamps each record with the agent slug and current PID, so existing
 ``logging.getLogger(__name__)`` call sites pick those fields up without any per-call change.
@@ -151,7 +153,7 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
     file_handler.setFormatter(formatter)
 
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setLevel(level)
     stderr_handler.setFormatter(formatter)
 
     root = logging.getLogger()
