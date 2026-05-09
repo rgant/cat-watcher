@@ -12,12 +12,13 @@ from pathlib import Path  # noqa: TC003  # runtime: pytest evaluates fixture ann
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
 from cat_watcher.config import Config  # noqa: TC001  # runtime: make_config callable annotation
 from cat_watcher.db import Base, Clip, create_engine, get_session
-from cat_watcher.detector import DetectionResult, Detector
+from cat_watcher.detector import DetectionResult, Detector, ScoredFrame
 from cat_watcher.import_local import ImportReport, import_local
 from cat_watcher.poller import PollerLockedError, pid_lock
 
@@ -39,8 +40,12 @@ def _setup_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
     return internal_root, storage_root, source_root
 
 
-def _make_detector() -> MagicMock:
-    """A Detector mock that returns a positive cat detection."""
+def _make_detector(*, scored_frames: tuple[ScoredFrame, ...] = ()) -> MagicMock:
+    """A Detector mock that returns a positive cat detection.
+
+    Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
+    per-frame thumbnail pipeline has frames to encode.
+    """
     detector = MagicMock(spec=Detector)
     detector.version = "yolo11n.pt@deadbeef"
     detector.detect.return_value = DetectionResult(
@@ -50,8 +55,15 @@ def _make_detector() -> MagicMock:
         frames_with_cat=5,
         best_box_xyxy=(10.0, 20.0, 30.0, 40.0),
         detector_version="yolo11n.pt@deadbeef",
+        scored_frames=scored_frames,
     )
     return detector
+
+
+def _stub_scored_frames(scores: tuple[float, ...]) -> tuple[ScoredFrame, ...]:
+    """Build ``ScoredFrame``s with stub ndarrays for tests that exercise the per-frame thumb path."""
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    return tuple(ScoredFrame(ordinal=i, t_offset_seconds=float(i + 1), score=score, frame=stub_frame) for i, score in enumerate(scores))
 
 
 def _build_sd_tree(  # noqa: PLR0913  # pylint: disable=too-many-locals  # synthesizes one Amcrest SD path; each axis is a real test variation
@@ -154,6 +166,68 @@ def test_import_local_ingests_clip_to_canonical_layout(  # pylint: disable=too-m
             assert clip.analysis_error is None
             assert clip.start_ts == datetime(2026, 4, 27, 5, 50, 17, tzinfo=UTC)
             assert clip.end_ts == datetime(2026, 4, 27, 5, 51, 20, tzinfo=UTC)
+    finally:
+        engine.dispose()
+
+
+def test_import_local_writes_per_frame_thumbs(
+    tmp_path: Path,
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """Success path: one JPEG per scored frame, one ``ClipFrame`` row per scored frame.
+
+    ``Clip.thumb_path`` points at the highest-scoring frame's relpath (ordinal 1, score 0.85). The
+    SD-card jpg sibling is NOT consulted on the success path — confirming the shared per-frame
+    pipeline takes precedence over import_local's SD-card-thumb shortcut.
+    """
+    internal_root, storage_root, source_root = _setup_dirs(tmp_path)
+    _materialize_engine(internal_root)
+
+    _, sd_thumb = _build_sd_tree(source_root, clip_payload=synthetic_clip_path.read_bytes())
+    assert sd_thumb is not None
+    sd_thumb_payload = sd_thumb.read_bytes()
+
+    detector = _make_detector(scored_frames=_stub_scored_frames((0.1, 0.85, 0.3, 0.6)))
+
+    engine = _open_engine(internal_root)
+    try:
+        report = import_local(
+            engine=engine,
+            config=make_config(internal_root, storage_root),
+            camera_name="pantry",
+            source_dir=source_root,
+            detector=detector,
+            limit=None,
+            now=_NOW,
+        )
+    finally:
+        engine.dispose()
+
+    assert report == ImportReport(inspected=1, ingested=1, duplicates=0, skipped=0, errors=0)
+
+    per_clip_dir = storage_root / "thumbs/pantry/2026-04-27/055017"
+    for ordinal in range(4):
+        assert (per_clip_dir / f"{ordinal:02d}.jpg").is_file()
+
+    engine = _open_engine(internal_root)
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert clip.thumb_path == "thumbs/pantry/2026-04-27/055017/01.jpg"
+            assert clip.thumb_path.endswith("/01.jpg")
+            assert len(clip.frames) == 4
+            assert clip.frames[0].ordinal == 0
+            assert clip.frames[0].score == 0.1
+            assert clip.frames[1].score == 0.85
+            assert clip.frames[2].score == 0.3
+            assert clip.frames[3].score == 0.6
+            assert clip.frames[0].t_offset_seconds == 1.0
+            assert clip.frames[1].thumb_path == clip.thumb_path
+            # The SD-card jpg shortcut is fallback-only; on the success path the per-frame writer
+            # encodes from in-memory ndarrays, so the primary thumb's bytes must NOT match the
+            # SD-card jpg's bytes.
+            assert (storage_root / clip.thumb_path).read_bytes() != sd_thumb_payload
     finally:
         engine.dispose()
 

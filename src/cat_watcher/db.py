@@ -62,6 +62,7 @@ __all__ = (
     "Base",
     "Camera",
     "Clip",
+    "ClipFrame",
     "Heartbeat",
     "PollStatus",
     "UtcDateTime",
@@ -203,11 +204,46 @@ class Clip(Base):
     manual_label_notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     camera: Mapped[Camera] = relationship(back_populates="clips")
+    # ``passive_deletes=True`` defers row removal to the DB-level ``ondelete=CASCADE`` on
+    # ``ClipFrame.clip_id`` (cheaper than letting the ORM emit per-child DELETEs); requires the
+    # connect-time ``PRAGMA foreign_keys=ON`` set by ``create_engine``.
+    frames: Mapped[list[ClipFrame]] = relationship(
+        back_populates="clip",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ClipFrame.ordinal",
+    )
 
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint("camera_id", "source_filename", name="uq_clips_camera_source"),
         Index("ix_clips_camera_start", "camera_id", "start_ts"),
         Index("ix_clips_camera_hascat_start", "camera_id", "has_cat", "start_ts"),
+    )
+
+
+class ClipFrame(Base):
+    """One row per detector-sampled frame inside a ``Clip``; ``Clip.thumb_path`` points at the best.
+
+    The detector samples N frames per clip; each scored frame yields a JPEG thumbnail and a
+    ``ClipFrame`` row. ``ordinal`` is a 0-based stable index over the sampled frames (not raw video
+    frame numbers), so ``(clip_id, ordinal)`` is the natural identity. ``score`` is the YOLO
+    max-cat-score for the frame (0.0 when no qualifying detection).
+    """
+
+    __tablename__: str = "clip_frames"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    clip_id: Mapped[int] = mapped_column(Integer, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    t_offset_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    thumb_path: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    clip: Mapped[Clip] = relationship(back_populates="frames")
+
+    __table_args__: tuple[SchemaItem, ...] = (
+        UniqueConstraint("clip_id", "ordinal", name="uq_clip_frames_clip_ordinal"),
+        Index("ix_clip_frames_clip", "clip_id"),
     )
 
 

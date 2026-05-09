@@ -1668,12 +1668,13 @@ packages:
 - pypi: ./
   name: cat-watcher
   version: 0.1.0
-  sha256: 5ed1d2d4e4e1e275308c223cf1cc6a494c521d1a634c258b9610887f65c0b934
+  sha256: 62c185345a7966b0a2e20495d5535657a3128e841ab491d8d643143c0fe81067
   requires_dist:
   - alembic>=1.18.4,<2
   - fastapi>=0.136.1,<0.137
   - httpxyz>=0.31.1,<0.32
   - jinja2>=3.1.6,<4
+  - pillow>=12.2.0,<13
   - pydantic>=2.13.4,<3
   - pydantic-settings>=2.14.0,<3
   - python-multipart>=0.0.27,<0.0.28

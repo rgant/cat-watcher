@@ -3,9 +3,19 @@
   Clip {{ clip.id }} · Cat Watcher
 {% endblock title %}
 {% block content %}
-  <p>
-    <a href="{{ url_for('list_clips') }}">← Back to clips</a>
-  </p>
+  <nav class="clip-nav" aria-label="Clip navigation">
+    {% if prev_clip_id %}
+      <a href="{{ url_for('clip_detail', clip_id=prev_clip_id) }}" rel="prev">← Newer</a>
+    {% else %}
+      <span class="clip-nav-disabled" aria-disabled="true">← Newer</span>
+    {% endif %}
+    <a href="{{ url_for('list_clips') }}">All clips</a>
+    {% if next_clip_id %}
+      <a href="{{ url_for('clip_detail', clip_id=next_clip_id) }}" rel="next">Older →</a>
+    {% else %}
+      <span class="clip-nav-disabled" aria-disabled="true">Older →</span>
+    {% endif %}
+  </nav>
   <header>
     <h1>
       {{ camera.display_name if camera else "(unknown camera)" }}
@@ -17,6 +27,29 @@
     <source src="{{ url_for('media_clip', clip_id=clip.id) }}" type="video/mp4">
     Your browser does not support HTML5 video.
   </video>
+  {% if frames %}
+    <section class="contact-sheet" aria-labelledby="contact-sheet-heading">
+      <h2 id="contact-sheet-heading" class="sr-only">Frames</h2>
+      <ol class="contact-sheet-list">
+        {% for frame in frames %}
+          <li>
+            <button type="button"
+                    class="contact-sheet-button"
+                    data-seek-seconds="{{ frame.t_offset_seconds }}"
+                    aria-label="Jump to {{ frame.display_offset }}">
+              <img src="{{ url_for('media_frame', frame_id=frame.id) }}"
+                   alt="Frame at {{ frame.display_offset }}"
+                   loading="lazy"
+                   width="320"
+                   height="180">
+              <span class="contact-sheet-time">{{ frame.display_offset }}</span>
+              <span class="{{ 'contact-sheet-score contact-sheet-score-below' if frame.below_threshold else 'contact-sheet-score' }}">{{ frame.display_score }}</span>
+            </button>
+          </li>
+        {% endfor %}
+      </ol>
+    </section>
+  {% endif %}
   <section aria-labelledby="detection-heading">
     <h2 id="detection-heading">Detection</h2>
     <dl class="detail-meta">
@@ -100,4 +133,5 @@
       </form>
     {% endif %}
   </section>
+  <script src="{{ url_for('static', path='clip_detail.js') }}" defer></script>
 {% endblock content %}

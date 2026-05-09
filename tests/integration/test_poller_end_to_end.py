@@ -12,6 +12,7 @@ from pathlib import Path  # noqa: TC003  # runtime: respx.mock evaluates fixture
 from unittest.mock import MagicMock
 
 import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at runtime.
+import numpy as np
 import pytest  # noqa: TC002  # runtime: respx.mock evaluates pytest.MonkeyPatch annotations at decoration time
 import respx
 from sqlalchemy.engine import Engine  # noqa: TC002  # runtime: Engine-annotated helper called at module level via fixtures
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from cat_watcher.config import CameraConfig, Config
 from cat_watcher.db import AgentStart, Base, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
-from cat_watcher.detector import DetectionResult, Detector, DetectorError
+from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
 from cat_watcher.poller import PollerArgs, run_tick
 
 _BASE_URL = "http://cam.example.com:80"
@@ -53,19 +54,34 @@ def _seed_amcrest_mocks(payload: bytes) -> None:
     _ = respx.get(_DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=payload))
 
 
-def _make_detector(*, has_cat: bool) -> MagicMock:
-    """A Detector mock that returns a canned DetectionResult."""
-    detector = MagicMock(spec=Detector)
-    detector.version = "yolo11n.pt@deadbeef"
-    detector.detect.return_value = DetectionResult(
+def _make_detector(
+    *,
+    has_cat: bool,
+    scored_frames: tuple[ScoredFrame, ...] = (),
+) -> MagicMock:
+    """A Detector mock that returns a canned DetectionResult.
+
+    Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
+    per-frame thumbnail pipeline has frames to encode.
+    """
+    mock_detector = MagicMock(spec=Detector)
+    mock_detector.version = "yolo11n.pt@deadbeef"
+    mock_detector.detect.return_value = DetectionResult(
         has_cat=has_cat,
         max_score=0.92 if has_cat else 0.0,
         frames_sampled=5,
         frames_with_cat=5 if has_cat else 0,
         best_box_xyxy=(10.0, 20.0, 30.0, 40.0) if has_cat else None,
         detector_version="yolo11n.pt@deadbeef",
+        scored_frames=scored_frames,
     )
-    return detector
+    return mock_detector
+
+
+def _stub_scored_frames(scores: tuple[float, ...]) -> tuple[ScoredFrame, ...]:
+    """Build ``ScoredFrame``s with stub ndarrays for tests that exercise the per-frame thumb path."""
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    return tuple(ScoredFrame(ordinal=i, t_offset_seconds=float(i + 1), score=score, frame=stub_frame) for i, score in enumerate(scores))
 
 
 @respx.mock
@@ -664,5 +680,128 @@ def test_full_tick_invokes_retention_sweep_to_prune_aged_clips(
         with get_session(engine) as session:
             aged_rows = session.query(Clip).filter(Clip.source_filename == "aged.mp4").all()
         assert aged_rows == []
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_writes_per_frame_thumbs_and_clip_frames(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """Success path: one JPEG per scored frame, one ``ClipFrame`` row per scored frame.
+
+    ``Clip.thumb_path`` points at the highest-scoring frame's relpath (ordinal 1, score 0.85).
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+    scored = _stub_scored_frames((0.1, 0.85, 0.3, 0.6))
+    detector = _make_detector(has_cat=True, scored_frames=scored)
+
+    args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
+    try:
+        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+    finally:
+        engine.dispose()
+
+    per_clip_dir = storage_root / "thumbs/pantry/2026-05-01/064704"
+    for ordinal in range(4):
+        assert (per_clip_dir / f"{ordinal:02d}.jpg").is_file()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert clip.thumb_path.endswith("/01.jpg")
+            assert clip.thumb_path == "thumbs/pantry/2026-05-01/064704/01.jpg"
+            assert len(clip.frames) == 4
+            assert clip.frames[0].score == 0.1
+            assert clip.frames[1].score == 0.85
+            assert clip.frames[2].score == 0.3
+            assert clip.frames[3].score == 0.6
+            assert clip.frames[1].thumb_path == clip.thumb_path
+            assert clip.frames[0].ordinal == 0
+            assert clip.frames[0].t_offset_seconds == 1.0
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_no_detect_falls_back_to_single_thumb(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """``--no-detect`` path: legacy single-frame thumb at ``<HHMMSS>.jpg`` and no ``ClipFrame`` rows."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+
+    args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), no_detect=True)
+    try:
+        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+    finally:
+        engine.dispose()
+
+    legacy_thumb = storage_root / "thumbs/pantry/2026-05-01/064704.jpg"
+    assert legacy_thumb.is_file()
+    assert not (storage_root / "thumbs/pantry/2026-05-01/064704").is_dir()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert clip.thumb_path == "thumbs/pantry/2026-05-01/064704.jpg"
+            assert len(clip.frames) == 0
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_detection_error_falls_back_to_single_thumb(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """A ``DetectorError`` during detection routes the clip through the legacy fallback thumb path."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+    detector = MagicMock(spec=Detector)
+    detector.version = "yolo11n.pt@deadbeef"
+    detector.detect.side_effect = DetectorError("test failure")
+
+    args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
+    try:
+        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+    finally:
+        engine.dispose()
+
+    legacy_thumb = storage_root / "thumbs/pantry/2026-05-01/064704.jpg"
+    assert legacy_thumb.is_file()
+    assert not (storage_root / "thumbs/pantry/2026-05-01/064704").is_dir()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert clip.thumb_path == "thumbs/pantry/2026-05-01/064704.jpg"
+            assert len(clip.frames) == 0
+            assert clip.analysis_error is not None
+            assert clip.analysis_error.startswith("detect failed")
     finally:
         engine.dispose()

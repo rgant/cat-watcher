@@ -44,15 +44,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 
 from cat_watcher.amcrest_client import AmcrestClient, CameraError
 from cat_watcher.config import CameraConfig, load_config
-from cat_watcher.db import AgentStart, AlertSent, Camera, Clip, Heartbeat, create_engine, get_session
+from cat_watcher.db import AgentStart, AlertSent, Camera, Clip, ClipFrame, Heartbeat, create_engine, get_session
 from cat_watcher.detector import Detector
 from cat_watcher.import_local import import_local
 from cat_watcher.notifier import send_email, send_macos_notification
-from cat_watcher.poller import DetectionFields, PollerLockedError, detection_fields_for
+from cat_watcher.poller import DetectionFields, PollerLockedError, detection_for, write_per_frame_thumbs
 from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
 
 if TYPE_CHECKING:
@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
+    from cat_watcher.detector import ScoredFrame
 
 
 logger = logging.getLogger(__name__)
@@ -646,6 +647,15 @@ def _run_reanalyze(args: _ParsedArgs) -> int:
     return _EXIT_OK if report.total_errored == 0 else _EXIT_GENERIC_FAILURE
 
 
+@dataclass(frozen=True)
+class _ReanalyzeContext:
+    """Per-loop context for reanalyze. Bundles the inputs ``_backfill_clip_frames`` needs."""
+
+    config: Config
+    camera_name_by_id: dict[int, str]
+    camera_tz_by_name: dict[str, ZoneInfo]
+
+
 def _reanalyze_loop(
     *,
     engine: Engine,
@@ -653,9 +663,11 @@ def _reanalyze_loop(
     detector: Detector,
     args: _ParsedArgs,
 ) -> tuple[_ReanalyzeReport, dict[int, str]]:
-    """Process qualifying clips with a yield_per cursor; bounds memory regardless of clip count."""
+    """Process qualifying clips one at a time; commits per clip so concurrent writers (web/poller
+    heartbeats) aren't starved while YOLO + JPEG encoding holds the per-clip session.
+    """
     report = _ReanalyzeReport()
-    stmt = select(Clip).order_by(Clip.start_ts.asc())
+    stmt = select(Clip.id).order_by(Clip.start_ts.asc())
     if not args.all:
         stmt = stmt.where(Clip.analysis_error.is_not(None))
     if args.camera:
@@ -663,26 +675,59 @@ def _reanalyze_loop(
     if args.limit is not None:
         stmt = stmt.limit(args.limit)
 
+    camera_tz_by_name = {cam.name: ZoneInfo(cam.timezone or config.web.display_timezone) for cam in config.cameras}
+
     with get_session(engine) as session:
-        camera_display_by_id = {cam.id: cam.display_name for cam in session.scalars(select(Camera))}
-        for clip in session.scalars(stmt).yield_per(_REANALYZE_BATCH_SIZE):
-            counts = report.for_camera(clip.camera_id)
-            full_path = config.storage_root / clip.file_path
-            if not full_path.is_file():
-                logger.warning("reanalyze: clip %d file missing at %s; skipping", clip.id, full_path)
-                counts.skipped_missing += 1
+        cameras = list(session.scalars(select(Camera)))
+        camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
+        ctx = _ReanalyzeContext(
+            config=config,
+            camera_name_by_id={cam.id: cam.name for cam in cameras},
+            camera_tz_by_name=camera_tz_by_name,
+        )
+        clip_ids: list[int] = list(session.scalars(stmt).all())
+
+    for clip_id in clip_ids:
+        with get_session(engine) as session:
+            clip = session.get(Clip, clip_id)
+            if clip is None:
                 continue
-            fields = detection_fields_for(detector, full_path)
-            _apply_detection_fields(clip, fields)
-            if fields["analysis_error"] is not None:
-                counts.errored += 1
-            else:
-                counts.rescored += 1
+            _reanalyze_one_clip(
+                clip=clip,
+                session=session,
+                detector=detector,
+                ctx=ctx,
+                counts=report.for_camera(clip.camera_id),
+            )
     return report, camera_display_by_id
 
 
+def _reanalyze_one_clip(
+    *,
+    clip: Clip,
+    session: Session,
+    detector: Detector,
+    ctx: _ReanalyzeContext,
+    counts: _ReanalyzeCameraCounts,
+) -> None:
+    """Re-detect one clip in place; on success replace ``clip_frames`` and repoint ``thumb_path``."""
+    full_path = ctx.config.storage_root / clip.file_path
+    if not full_path.is_file():
+        logger.warning("reanalyze: clip %d file missing at %s; skipping", clip.id, full_path)
+        counts.skipped_missing += 1
+        return
+    fields, scored_frames = detection_for(detector, full_path)
+    _apply_detection_fields(clip, fields)
+    if fields["analysis_error"] is None and scored_frames:
+        _backfill_clip_frames(clip=clip, scored_frames=scored_frames, session=session, ctx=ctx)
+    if fields["analysis_error"] is not None:
+        counts.errored += 1
+    else:
+        counts.rescored += 1
+
+
 def _apply_detection_fields(clip: Clip, fields: DetectionFields) -> None:
-    """Copy ``detection_fields_for`` output onto ``clip``. ``manual_has_cat`` is intentionally untouched.
+    """Copy ``detection_for`` field output onto ``clip``. ``manual_has_cat`` is intentionally untouched.
 
     The COALESCE projection in the web layer makes the manual override prevail over re-detection;
     overwriting it here would silently discard operator labels.
@@ -695,6 +740,42 @@ def _apply_detection_fields(clip: Clip, fields: DetectionFields) -> None:
     clip.best_box_xyxy = None if box is None else list(box)
     clip.detector_version = fields["detector_version"]
     clip.analysis_error = fields["analysis_error"]
+
+
+def _backfill_clip_frames(
+    *,
+    clip: Clip,
+    scored_frames: tuple[ScoredFrame, ...],
+    session: Session,
+    ctx: _ReanalyzeContext,
+) -> None:
+    """Encode per-frame thumbs, replace ``clip_frames`` rows, repoint ``Clip.thumb_path``, unlink legacy thumb.
+
+    Idempotent re-run: any pre-existing ``ClipFrame`` rows for ``clip`` are deleted before the new
+    batch is attached. The delete + insert + thumb_path repoint commit atomically with the caller's
+    per-clip session. The legacy single-frame thumb at the old ``thumb_path`` is unlinked
+    best-effort once ``thumb_path`` actually changes; permission failures are logged so a single
+    bad file doesn't abort the whole reanalyze run.
+    """
+    camera_name = ctx.camera_name_by_id[clip.camera_id]
+    camera_tz = ctx.camera_tz_by_name.get(camera_name) or ZoneInfo(ctx.config.web.display_timezone)
+    local_dt = clip.start_ts.astimezone(camera_tz)
+    new_thumb_relpath, clip_frames = write_per_frame_thumbs(
+        scored_frames=scored_frames,
+        storage_root=ctx.config.storage_root,
+        camera_name=camera_name,
+        local_dt=local_dt,
+    )
+    _ = session.execute(delete(ClipFrame).where(ClipFrame.clip_id == clip.id))
+    clip.frames = clip_frames
+    old_thumb_relpath = clip.thumb_path
+    clip.thumb_path = new_thumb_relpath
+    if old_thumb_relpath != clip.thumb_path:
+        old_thumb_full = ctx.config.storage_root / old_thumb_relpath
+        try:
+            old_thumb_full.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("reanalyze: could not unlink legacy thumb %s: %s", old_thumb_full, exc)
 
 
 # --- backup --------------------------------------------------------------------------------------

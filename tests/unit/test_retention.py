@@ -12,7 +12,7 @@ from pathlib import Path  # runtime: ``monkeypatch.setattr(Path, ...)`` patches 
 from typing import TYPE_CHECKING
 
 from cat_watcher.config import RetentionConfig
-from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, get_session
+from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, ClipFrame, get_session
 from cat_watcher.retention import RetentionReport, sweep
 
 if TYPE_CHECKING:
@@ -480,3 +480,131 @@ def test_sweep_full_pipeline_against_representative_state(db_engine: Engine, tmp
     assert not aged_orphan.exists()
     assert not (tmp_path / "clips/pantry/2026-03-17").exists()
     assert not (tmp_path / "thumbs/pantry/2026-03-17").exists()
+
+
+# --- per-frame thumb retention (Task 9) ----------------------------------------------------------
+
+
+def _write_per_frame_thumbs(storage_root: Path, per_clip_dir: str, frame_count: int) -> list[str]:
+    """Create ``frame_count`` thumb files under ``per_clip_dir`` and return their relpaths."""
+    relpaths: list[str] = []
+    for ordinal in range(frame_count):
+        rel = f"{per_clip_dir}/{ordinal:02d}.jpg"
+        full = storage_root / rel
+        full.parent.mkdir(parents=True, exist_ok=True)
+        _ = full.write_bytes(b"frame-bytes")
+        relpaths.append(rel)
+    return relpaths
+
+
+def _seed_per_frame_clip(  # noqa: PLR0913  # test-fixture builder; inlining the args at every callsite is noisier
+    engine: Engine,
+    *,
+    camera_id: int,
+    storage_root: Path,
+    rel_clip: str,
+    per_clip_dir: str,
+    frame_count: int,
+    best_ordinal: int,
+    start_ts: datetime,
+) -> tuple[int, list[str]]:
+    """Insert a Clip with ``frame_count`` ClipFrame rows + thumbs at ``per_clip_dir/<NN>.jpg``.
+
+    Returns ``(clip_id, frame_relpaths)``. ``Clip.thumb_path`` is set to the ordinal indicated by
+    ``best_ordinal``.
+    """
+    clip_path = storage_root / rel_clip
+    clip_path.parent.mkdir(parents=True, exist_ok=True)
+    _ = clip_path.write_bytes(b"clip-bytes")
+
+    frame_relpaths = _write_per_frame_thumbs(storage_root, per_clip_dir, frame_count)
+    clip = Clip(
+        camera_id=camera_id,
+        source_filename=rel_clip.rsplit("/", 1)[-1],
+        start_ts=start_ts,
+        end_ts=start_ts + timedelta(seconds=2),
+        duration_seconds=2.0,
+        file_path=rel_clip,
+        thumb_path=frame_relpaths[best_ordinal],
+        file_size_bytes=10,
+        detector_version="test@deadbeef",
+        ingested_at=start_ts,
+    )
+    with get_session(engine) as session:
+        session.add(clip)
+        session.flush()
+        clip_id = clip.id
+        for ordinal, rel in enumerate(frame_relpaths):
+            session.add(
+                ClipFrame(
+                    clip_id=clip_id,
+                    ordinal=ordinal,
+                    t_offset_seconds=float(ordinal),
+                    score=0.5,
+                    thumb_path=rel,
+                ),
+            )
+    return clip_id, frame_relpaths
+
+
+def test_retention_pass1_unlinks_per_frame_thumbs(db_engine: Engine, tmp_path: Path) -> None:
+    """Pass 1 unlinks every per-frame thumb file and rmdirs the per-clip <HHMMSS>/ subdir."""
+    cam_id = _seed_camera(db_engine)
+    old_ts = _NOW - timedelta(days=45)
+    rel_clip = "clips/pantry/2026-03-17/103045.mp4"
+    per_clip_dir = "thumbs/pantry/2026-03-17/103045"
+    clip_id, frame_relpaths = _seed_per_frame_clip(
+        db_engine,
+        camera_id=cam_id,
+        storage_root=tmp_path,
+        rel_clip=rel_clip,
+        per_clip_dir=per_clip_dir,
+        frame_count=4,
+        best_ordinal=1,
+        start_ts=old_ts,
+    )
+
+    report = sweep(engine=db_engine, storage_root=tmp_path, retention=_retention(), now=_NOW)
+
+    assert report.clips_removed_pass1 == 1
+    with get_session(db_engine) as session:
+        assert session.get(Clip, clip_id) is None
+    for rel in frame_relpaths:
+        assert not (tmp_path / rel).exists()
+    assert not (tmp_path / per_clip_dir).exists()
+    # No legacy flat-file leftover at <HHMMSS>.jpg either.
+    assert not (tmp_path / "thumbs/pantry/2026-03-17/103045.jpg").exists()
+
+
+def test_retention_pass2_treats_clip_frames_as_survivors(db_engine: Engine, tmp_path: Path) -> None:
+    """Pass 2 keeps every ClipFrame.thumb_path as a survivor and only sweeps the unrelated orphan."""
+    cam_id = _seed_camera(db_engine)
+    young_ts = _NOW - timedelta(days=2)
+    rel_clip = "clips/pantry/2026-04-29/120000.mp4"
+    per_clip_dir = "thumbs/pantry/2026-04-29/120000"
+    _, frame_relpaths = _seed_per_frame_clip(
+        db_engine,
+        camera_id=cam_id,
+        storage_root=tmp_path,
+        rel_clip=rel_clip,
+        per_clip_dir=per_clip_dir,
+        frame_count=4,
+        best_ordinal=2,
+        start_ts=young_ts,
+    )
+    # Backdate every per-frame thumb so it WOULD be orphan-swept if not protected by ClipFrame.
+    old_ts = (_NOW - timedelta(days=60)).timestamp()
+    for rel in frame_relpaths:
+        os.utime(tmp_path / rel, (old_ts, old_ts))
+    orphan = _make_orphan(
+        tmp_path,
+        "thumbs/pantry/2026-04-29/_orphan.jpg",
+        mtime=_NOW - timedelta(days=60),
+    )
+
+    report = sweep(engine=db_engine, storage_root=tmp_path, retention=_retention(), now=_NOW)
+
+    for rel in frame_relpaths:
+        assert (tmp_path / rel).is_file()
+    assert not orphan.exists()
+    assert report.orphans_removed_pass2 == 1

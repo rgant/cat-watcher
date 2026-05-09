@@ -39,7 +39,7 @@ from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import Integer, desc, func, select
 
-from cat_watcher.db import AlertSent, Camera, Clip, Heartbeat, get_session
+from cat_watcher.db import AlertSent, Camera, Clip, ClipFrame, Heartbeat, get_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -188,12 +188,36 @@ async def clip_detail(request: Request, clip_id: int) -> object:
     """
     state = _state(request)
     display_tz = ZoneInfo(state.config.web.display_timezone)
+    confidence_threshold = state.config.detector.confidence_threshold
 
     with get_session(state.engine) as session:
         clip = session.get(Clip, clip_id)
         if clip is None:
             raise HTTPException(status_code=404, detail="clip not found")
         camera = session.get(Camera, clip.camera_id)
+        # Project ``clip.frames`` into plain dicts BEFORE expunge so the relationship's lazy load
+        # runs while the session is still live. Ordering comes from the relationship's
+        # ``order_by="ClipFrame.ordinal"``; per-frame display strings + ``below_threshold`` are
+        # precomputed here per the project's precompute-in-routes convention so the template stays
+        # free of arithmetic and threshold knowledge.
+        frames = [
+            {
+                "id": f.id,
+                "ordinal": f.ordinal,
+                "t_offset_seconds": f.t_offset_seconds,
+                "display_offset": f"{int(f.t_offset_seconds // 60):d}:{int(f.t_offset_seconds % 60):02d}",
+                "score": f.score,
+                "display_score": f"{f.score:.2f}",
+                "below_threshold": f.score < confidence_threshold,
+            }
+            for f in clip.frames
+        ]
+        # Global next/prev neighbors by ``start_ts`` — listing-order independent. Newer = greater
+        # ``start_ts``; older = lesser. Same-timestamp collisions are rare enough on a single-host
+        # ingest that the simple ordering is fine; extreme ties just resolve via the index's
+        # tie-break and the operator can fall back to the listing.
+        prev_clip_id = session.scalar(select(Clip.id).where(Clip.start_ts > clip.start_ts).order_by(Clip.start_ts.asc()).limit(1))
+        next_clip_id = session.scalar(select(Clip.id).where(Clip.start_ts < clip.start_ts).order_by(desc(Clip.start_ts)).limit(1))
         # Detach the rows from the session so the template can read attributes after exit.
         session.expunge(clip)
         if camera is not None:
@@ -210,7 +234,10 @@ async def clip_detail(request: Request, clip_id: int) -> object:
         {
             "clip": clip,
             "camera": camera,
+            "frames": frames,
             "display_start": display_start,
+            "prev_clip_id": prev_clip_id,
+            "next_clip_id": next_clip_id,
             "tz": state.config.web.display_timezone,
         },
     )
@@ -293,6 +320,14 @@ async def media_thumb(request: Request, clip_id: int) -> FileResponse:
     return FileResponse(file_path, media_type=_THUMB_MEDIA_TYPE)
 
 
+@media_router.get("/media/frame/{frame_id}.jpg", name="media_frame")
+async def media_frame(request: Request, frame_id: int) -> FileResponse:
+    """Serve the per-frame JPEG keyed by ``ClipFrame.id``; same 404/503/410 semantics as :func:`media_thumb`."""
+    state = _state(request)
+    file_path = _resolve_frame_media_path(engine=state.engine, frame_id=frame_id, config=state.config)
+    return FileResponse(file_path, media_type=_THUMB_MEDIA_TYPE)
+
+
 def _clip_summary(clip: Clip, cameras: list[Camera], *, display_tz: ZoneInfo) -> dict[str, object]:
     """Project a Clip + its Camera into a flat dict the template can render without lazy loads.
 
@@ -334,6 +369,27 @@ def _resolve_media_path(
         if clip is None:
             raise HTTPException(status_code=404, detail="clip not found")
         relative = get_relpath(clip)
+    if not _storage_root_available(config.storage_root):
+        raise HTTPException(status_code=503, detail="external storage offline")
+    full = config.storage_root / relative
+    if not full.is_file():
+        raise HTTPException(status_code=410, detail="media file unavailable")
+    return full
+
+
+def _resolve_frame_media_path(*, engine: Engine, frame_id: int, config: Config) -> Path:
+    """Look up ``ClipFrame.id`` and return the on-disk path for its ``thumb_path``.
+
+    Mirrors :func:`_resolve_media_path` but keyed on a per-frame row instead of a clip. Kept as a
+    parallel function (rather than retrofitting the clip helper's signature with a model selector)
+    because the lookup model and 404 message differ; the storage-online + file-exists tail is short
+    enough that the tiny duplication reads better than a generic abstraction.
+    """
+    with get_session(engine) as session:
+        frame = session.get(ClipFrame, frame_id)
+        if frame is None:
+            raise HTTPException(status_code=404, detail="frame not found")
+        relative = frame.thumb_path
     if not _storage_root_available(config.storage_root):
         raise HTTPException(status_code=503, detail="external storage offline")
     full = config.storage_root / relative

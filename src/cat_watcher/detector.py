@@ -7,9 +7,11 @@ Pipeline per clip:
    bytes piped to stdout. The bytes are reshaped into a ``numpy.ndarray`` at the camera's native
    resolution; YOLO does its own internal scaling.
 
-3. Each frame is passed through the loaded YOLO model. Detections are filtered to
-   ``COCO class 15 (cat)`` above ``confidence_threshold``. The highest-confidence cat box across all
-   frames becomes ``DetectionResult.best_box_xyxy``.
+3. Each frame is passed through the loaded YOLO model. The highest-confidence ``COCO class 15
+   (cat)`` box per frame is recorded regardless of threshold so its raw score lands on the
+   ``ScoredFrame``; ``confidence_threshold`` gates ``frames_with_cat`` / ``has_cat`` only. The
+   highest-scoring cat box across all frames (sub-threshold included) becomes
+   ``DetectionResult.best_box_xyxy``.
 
 Construction is two-phase to keep tests fast and unit-pure:
 
@@ -55,10 +57,22 @@ class DetectorError(RuntimeError):
 
 
 class _CatHit(NamedTuple):
-    """A single qualifying cat detection: confidence above threshold + its box."""
+    """The highest-scoring cat-class detection within a single frame (raw confidence + box).
+
+    Threshold gating is applied by :meth:`Detector._aggregate`, not at construction.
+    """
 
     score: float
     box: tuple[float, float, float, float]
+
+
+class ScoredFrame(NamedTuple):
+    """One detector-sampled frame retained for downstream thumbnail emission."""
+
+    ordinal: int
+    t_offset_seconds: float
+    score: float
+    frame: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -71,6 +85,7 @@ class DetectionResult:
     frames_with_cat: int
     best_box_xyxy: tuple[float, float, float, float] | None
     detector_version: str
+    scored_frames: tuple[ScoredFrame, ...] = ()
 
 
 def _yolo_factory(model_path: Path) -> YOLO:  # pragma: no cover  # boundary; tests inject mocks
@@ -240,22 +255,29 @@ class Detector:
         """Run the full pipeline (probe -> sample -> infer) and return a :class:`DetectionResult`."""
         duration, width, height = _probe_video(clip_path)
         timestamps = _sample_timestamps(duration, self._frames_to_sample)
-        frames = [_extract_frame(clip_path, ts, width=width, height=height) for ts in timestamps]
-        return self._aggregate(frames)
+        sampled = [(ts, _extract_frame(clip_path, ts, width=width, height=height)) for ts in timestamps]
+        return self._aggregate(sampled)
 
-    def _aggregate(self, frames: list[np.ndarray]) -> DetectionResult:
+    def _aggregate(self, sampled: list[tuple[float, np.ndarray]]) -> DetectionResult:
         max_score = 0.0
         best_box: tuple[float, float, float, float] | None = None
         frames_with_cat = 0
+        scored: list[ScoredFrame] = []
 
-        for frame in frames:
+        for ordinal, (timestamp, frame) in enumerate(sampled):
             # ``YOLO.__call__`` is annotated as returning bare ``list`` (no element type); cast at
             # the boundary so downstream code can access Results attributes directly.
             results = cast("list[Results]", self._model(frame, verbose=False))
             hit = self._best_cat_in_frame(results)
+            score = hit.score if hit is not None else 0.0
+            scored.append(ScoredFrame(ordinal=ordinal, t_offset_seconds=timestamp, score=score, frame=frame))
             if hit is None:
                 continue
-            frames_with_cat += 1
+            # Threshold gates the boolean ``has_cat`` / ``frames_with_cat`` columns; ``max_score``
+            # and ``best_box`` follow the raw highest-scoring cat across all frames so the
+            # contact-sheet diagnostic surface can show near-miss values instead of a flat 0.0.
+            if hit.score >= self._confidence_threshold:
+                frames_with_cat += 1
             if hit.score > max_score:
                 max_score = hit.score
                 best_box = hit.box
@@ -263,14 +285,20 @@ class Detector:
         return DetectionResult(
             has_cat=frames_with_cat > 0,
             max_score=max_score,
-            frames_sampled=len(frames),
+            frames_sampled=len(sampled),
             frames_with_cat=frames_with_cat,
             best_box_xyxy=best_box,
             detector_version=self._version,
+            scored_frames=tuple(scored),
         )
 
     def _best_cat_in_frame(self, results: list[Results]) -> _CatHit | None:
-        """Return the best qualifying cat in this frame, or ``None`` if there isn't one."""
+        """Return the highest-scoring cat-class detection in this frame, regardless of threshold.
+
+        ``None`` only when there are zero cat-class boxes at all. The threshold filter lives in
+        :meth:`_aggregate` so sub-threshold cat scores still flow into ``ScoredFrame.score`` for
+        contact-sheet diagnostics.
+        """
         for result in results:
             boxes = result.boxes
             if boxes is None:
@@ -279,15 +307,12 @@ class Detector:
             cls = np.asarray(boxes.cls, dtype=np.float64)
             conf = np.asarray(boxes.conf, dtype=np.float64)
             xyxy = np.asarray(boxes.xyxy, dtype=np.float64)
-            mask = np.logical_and(
-                np.equal(cls, _COCO_CAT_CLASS_ID),
-                np.greater_equal(conf, self._confidence_threshold),
-            )
+            mask = np.equal(cls, _COCO_CAT_CLASS_ID)
             if not mask.any():
                 continue
 
-            # ``np.where(mask, conf, -1)`` zeros-out non-cat / sub-threshold detections so argmax
-            # picks among only the qualifying boxes.
+            # ``np.where(mask, conf, -1)`` masks out non-cat detections so argmax picks among
+            # only the cat-class boxes.
             top_idx = int(np.argmax(np.where(mask, conf, -1.0)))
 
             top_score = cast("list[float]", conf.tolist())[top_idx]

@@ -15,7 +15,7 @@ import pytest
 from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]  # ultralytics lazily loads models
 from ultralytics.engine.results import Boxes, Results
 
-from cat_watcher.detector import DetectionResult, Detector, DetectorError
+from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
 
 _COCO_CAT = 15
 _COCO_DOG = 16
@@ -87,7 +87,12 @@ def test_detect_no_cat_when_no_frames_match(synthetic_clip_path: Path) -> None:
 
 
 def test_detect_filters_below_confidence_threshold(synthetic_clip_path: Path) -> None:
-    """A cat detection below the threshold doesn't count."""
+    """A sub-threshold cat detection records its raw score but doesn't flip ``has_cat``.
+
+    Diagnostic contract: contact-sheet thumbnails surface "near-miss" frames so the operator can
+    see *why* the detector ruled the clip cat-free; recording the actual sub-threshold score (vs.
+    a flat 0.0) is what makes that surface useful.
+    """
     below_threshold = _fake_results(cls_ids=[_COCO_CAT], confidences=[0.20], boxes=[[1.0, 2.0, 3.0, 4.0]])
     detector, _ = _make_detector(return_value=below_threshold, frames_to_sample=3, confidence_threshold=0.50)
 
@@ -95,7 +100,9 @@ def test_detect_filters_below_confidence_threshold(synthetic_clip_path: Path) ->
 
     assert result.has_cat is False
     assert result.frames_with_cat == 0
-    assert result.best_box_xyxy is None
+    assert result.max_score == 0.20
+    assert result.best_box_xyxy == (1.0, 2.0, 3.0, 4.0)
+    assert all(sf.score == 0.20 for sf in result.scored_frames)
 
 
 def test_detect_filters_non_cat_classes(synthetic_clip_path: Path) -> None:
@@ -294,6 +301,56 @@ def test_detect_raises_on_short_ffmpeg_output(synthetic_clip_path: Path, monkeyp
 
     with pytest.raises(DetectorError, match="expected"):
         _ = detector.detect(synthetic_clip_path)
+
+
+def test_detect_returns_scored_frames_in_order(synthetic_clip_path: Path) -> None:
+    """``DetectionResult.scored_frames`` carries one ``ScoredFrame`` per sampled frame, ordered by sample order."""
+    side_effect = [
+        _fake_results(cls_ids=[_COCO_CAT], confidences=[0.50], boxes=[[0.0, 0.0, 1.0, 1.0]]),
+        _fake_results(cls_ids=[_COCO_CAT], confidences=[0.90], boxes=[[0.0, 0.0, 1.0, 1.0]]),
+        _fake_results(cls_ids=[_COCO_CAT], confidences=[0.40], boxes=[[0.0, 0.0, 1.0, 1.0]]),
+    ]
+    detector, _ = _make_detector(side_effect=side_effect, frames_to_sample=3)
+
+    result = detector.detect(synthetic_clip_path)
+
+    assert len(result.scored_frames) == 3
+    assert tuple(sf.ordinal for sf in result.scored_frames) == (0, 1, 2)
+    assert tuple(sf.score for sf in result.scored_frames) == (0.50, 0.90, 0.40)
+    assert result.max_score == 0.90
+    assert all(isinstance(sf, ScoredFrame) for sf in result.scored_frames)
+
+
+def test_scored_frame_records_zero_score_when_no_cat(synthetic_clip_path: Path) -> None:
+    """Frames with no qualifying cat still appear in ``scored_frames`` with ``score=0.0``."""
+    per_frame = _fake_results(cls_ids=[], confidences=[], boxes=[])
+    detector, _ = _make_detector(return_value=per_frame, frames_to_sample=4)
+
+    result = detector.detect(synthetic_clip_path)
+
+    assert result.has_cat is False
+    assert len(result.scored_frames) == 4
+    assert all(sf.score == 0.0 for sf in result.scored_frames)
+
+
+def test_scored_frame_carries_frame_ndarray(synthetic_clip_path: Path) -> None:
+    """Each ``ScoredFrame.frame`` is the actual decoded RGB24 ndarray for that timestamp."""
+    per_frame = _fake_results(cls_ids=[_COCO_CAT], confidences=[0.80], boxes=[[1.0, 2.0, 3.0, 4.0]])
+    detector, _ = _make_detector(return_value=per_frame, frames_to_sample=3)
+
+    result = detector.detect(synthetic_clip_path)
+
+    # ``synthetic_clip_path`` is built by ``make_clip`` at 400x266 RGB24.
+    expected_shape = (266, 400, 3)
+    assert len(result.scored_frames) == 3
+    for sf in result.scored_frames:
+        assert isinstance(sf.frame, np.ndarray)
+        assert sf.frame.dtype == np.uint8
+        assert sf.frame.shape == expected_shape
+    # Timestamps are strictly increasing across the (0, duration) interior.
+    offsets = [sf.t_offset_seconds for sf in result.scored_frames]
+    assert offsets == sorted(offsets)
+    assert offsets[0] > 0.0
 
 
 def test_detect_samples_frames_at_distinct_timestamps(synthetic_clip_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

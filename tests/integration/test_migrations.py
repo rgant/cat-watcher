@@ -28,6 +28,7 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "alembic_version",
         "alerts_sent",
         "cameras",
+        "clip_frames",
         "clips",
         "heartbeats",
     },

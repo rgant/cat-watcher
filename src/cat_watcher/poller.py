@@ -37,11 +37,11 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from cat_watcher import retention
+from cat_watcher import retention, thumbnails
 from cat_watcher.alerts import dispatch_candidate, evaluate_heartbeat_watchdog
 from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuthError, CameraUnreachableError
 from cat_watcher.config import Config, load_config
-from cat_watcher.db import AgentStart, AlertType, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
+from cat_watcher.db import AgentStart, AlertType, Camera, Clip, ClipFrame, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import Detector, DetectorError
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
     from cat_watcher.amcrest_client import Recording
     from cat_watcher.config import CameraConfig
+    from cat_watcher.detector import ScoredFrame
 
 
 logger = logging.getLogger(__name__)
@@ -237,10 +238,16 @@ class DetectionFields(TypedDict):
     analysis_error: str | None
 
 
-def detection_fields_for(detector: Detector | None, clip_full: Path) -> DetectionFields:
-    """Run the detector (or substitute the ``--no-detect`` markers) and return the Clip kwargs."""
+def detection_for(detector: Detector | None, clip_full: Path) -> tuple[DetectionFields, tuple[ScoredFrame, ...]]:
+    """Run the detector (or substitute ``--no-detect`` markers) and return ``(DetectionFields, scored_frames)``.
+
+    The returned tuple's second element is empty when ``detector`` is ``None`` or detection
+    raised; on success it is the detector's full per-frame buffer (one entry per sampled frame).
+    Callers branch on ``analysis_error is None and scored_frames`` to choose between the per-frame
+    thumb pipeline and the legacy single-frame fallback.
+    """
     if detector is None:
-        return DetectionFields(
+        fields = DetectionFields(
             has_cat=False,
             max_score=0.0,
             frames_sampled=0,
@@ -249,11 +256,12 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
             detector_version=_DETECTOR_VERSION_NO_DETECT,
             analysis_error=_NO_DETECT_MARKER,
         )
+        return fields, ()
     try:
         result = detector.detect(clip_full)
     except (DetectorError, OSError) as exc:
         logger.warning("detector failed for %s: %s", clip_full, exc)
-        return DetectionFields(
+        fields = DetectionFields(
             has_cat=False,
             max_score=0.0,
             frames_sampled=0,
@@ -262,7 +270,8 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
             detector_version=detector.version,
             analysis_error=f"detect failed: {exc}",
         )
-    return DetectionFields(
+        return fields, ()
+    fields = DetectionFields(
         has_cat=result.has_cat,
         max_score=result.max_score,
         frames_sampled=result.frames_sampled,
@@ -271,6 +280,15 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
         detector_version=result.detector_version,
         analysis_error=None,
     )
+    return fields, result.scored_frames
+
+
+def detection_fields_for(detector: Detector | None, clip_full: Path) -> DetectionFields:
+    """Run the detector and return the Clip kwargs; thin shim around :func:`detection_for` for callers
+    (reanalyze CLI, unit tests) that don't need the per-frame buffer.
+    """
+    fields, _ = detection_for(detector, clip_full)
+    return fields
 
 
 @dataclass(frozen=True)
@@ -286,6 +304,69 @@ class IngestContext:
     now: datetime
 
 
+def write_per_frame_thumbs(
+    *,
+    scored_frames: tuple[ScoredFrame, ...],
+    storage_root: Path,
+    camera_name: str,
+    local_dt: datetime,
+) -> tuple[str, list[ClipFrame]]:
+    """Encode every ``ScoredFrame`` to ``thumbs/<camera>/<date>/<HHMMSS>/`` and build matching ``ClipFrame`` rows.
+
+    Returns ``(best_thumb_relpath, clip_frames)`` — the relpath of the highest-scoring frame
+    (suitable for ``Clip.thumb_path``) and the unattached ``ClipFrame`` instances ordered by
+    ordinal. Files are fsynced before return; the caller commits the rows in its own session.
+    """
+    per_clip_dir = thumbnails.per_clip_thumb_dir(camera_name, local_dt)
+    (storage_root / per_clip_dir).mkdir(parents=True, exist_ok=True)
+    records = thumbnails.write_clip_frames(scored_frames, storage_root=storage_root, per_clip_dir=per_clip_dir)
+    clip_frames = [
+        ClipFrame(
+            ordinal=record.ordinal,
+            t_offset_seconds=record.t_offset_seconds,
+            score=record.score,
+            thumb_path=record.thumb_relpath,
+        )
+        for record in records
+    ]
+    return thumbnails.best_frame_relpath(records), clip_frames
+
+
+def _materialize_thumbs(  # noqa: PLR0913  # explicit args trace the IO surface; bundling adds noise
+    *,
+    detect_kwargs: DetectionFields,
+    scored_frames: tuple[ScoredFrame, ...],
+    clip_full: Path,
+    local_dt: datetime,
+    materialize_thumb: Callable[[Path, Path], None],
+    ctx: IngestContext,
+) -> tuple[str, list[ClipFrame]]:
+    """Pick the per-frame thumb pipeline or the legacy single-thumb fallback; encode the JPEG(s).
+
+    Returns ``(rel_thumb, clip_frames)`` — the relpath that becomes ``Clip.thumb_path`` and the
+    pending ``ClipFrame`` rows (empty in the fallback branch). All files are fsynced before return.
+    """
+    if detect_kwargs["analysis_error"] is None and scored_frames:
+        return write_per_frame_thumbs(
+            scored_frames=scored_frames,
+            storage_root=ctx.storage_root,
+            camera_name=ctx.camera_name,
+            local_dt=local_dt,
+        )
+    rel_thumb_legacy = relative_paths_for(ctx.camera_name, local_dt)[1]
+    thumb_full = ctx.storage_root / rel_thumb_legacy
+    thumb_full.parent.mkdir(parents=True, exist_ok=True)
+    materialize_thumb(clip_full, thumb_full)
+    return rel_thumb_legacy, []
+
+
+def _clip_already_ingested(ctx: IngestContext, source_filename: str) -> bool:
+    """True iff a Clip row already exists for ``(ctx.cam_id, source_filename)`` (idempotency guard)."""
+    with get_session(ctx.engine) as session:
+        existing = session.scalar(select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == source_filename))
+    return existing is not None
+
+
 def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible per-clip contract (identity + IO + ctx)
     *,
     source_filename: str,
@@ -298,26 +379,34 @@ def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible 
     """Run the per-clip pipeline shared by the poller and ``import_local``.
 
     Steps: duplicate-check (idempotent on ``(camera_id, source_filename)``) -> compute canonical
-    paths + mkdir -> ``materialize_clip(clip_full)`` -> ``materialize_thumb(clip_full, thumb_full)``
-    -> detect -> insert ``clips`` row. The materializer callbacks must complete (with fsync) before
-    this function inserts the row, preserving file-before-row ordering per spec §4.4.
+    paths + mkdir -> ``materialize_clip(clip_full)`` -> detect. On the success path the detector's
+    per-frame buffer is encoded to one JPEG per frame plus a ``ClipFrame`` row each, and
+    ``Clip.thumb_path`` points at the highest-scoring frame; on the no-detect / detection-error
+    fallback ``materialize_thumb`` extracts a single legacy thumb at ``<HHMMSS>.jpg``.
+
+    All file IO (clip download, frame encodes, fsync) completes before any DB insert, preserving
+    file-before-row ordering per spec §4.4. ``Clip`` and its ``ClipFrame`` rows commit in the same
+    transaction so a crash leaves either both or neither.
     """
-    with get_session(ctx.engine) as session:
-        existing = session.scalar(select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == source_filename))
-    if existing is not None:
+    if _clip_already_ingested(ctx, source_filename):
         logger.info("skip duplicate: camera=%s source=%s", ctx.camera_name, source_filename)
         return None
 
     local_dt = start_ts.astimezone(ctx.camera_tz)
-    rel_clip, rel_thumb = relative_paths_for(ctx.camera_name, local_dt)
+    rel_clip = relative_paths_for(ctx.camera_name, local_dt)[0]
     clip_full = ctx.storage_root / rel_clip
-    thumb_full = ctx.storage_root / rel_thumb
     clip_full.parent.mkdir(parents=True, exist_ok=True)
-    thumb_full.parent.mkdir(parents=True, exist_ok=True)
 
     materialize_clip(clip_full)
-    materialize_thumb(clip_full, thumb_full)
-    detect_kwargs = detection_fields_for(ctx.detector, clip_full)
+    detect_kwargs, scored_frames = detection_for(ctx.detector, clip_full)
+    rel_thumb, clip_frames = _materialize_thumbs(
+        detect_kwargs=detect_kwargs,
+        scored_frames=scored_frames,
+        clip_full=clip_full,
+        local_dt=local_dt,
+        materialize_thumb=materialize_thumb,
+        ctx=ctx,
+    )
 
     clip = Clip(
         camera_id=ctx.cam_id,
@@ -329,6 +418,7 @@ def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible 
         thumb_path=rel_thumb,
         file_size_bytes=clip_full.stat().st_size,
         ingested_at=ctx.now,
+        frames=clip_frames,
         **detect_kwargs,
     )
     with get_session(ctx.engine) as session:

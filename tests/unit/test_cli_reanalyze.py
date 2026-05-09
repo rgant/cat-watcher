@@ -1,7 +1,7 @@
 """Tests for ``cat-watcher reanalyze`` (Task 25).
 
 Reanalyze re-scores clips whose detection failed (default filter ``analysis_error IS NOT NULL``) or
-every clip (``--all``). Each test patches the detector + the ``detection_fields_for`` helper so the
+every clip (``--all``). Each test patches the detector + the ``detection_for`` helper so the
 CPU-heavy YOLO path is never touched; what's exercised here is the row-update logic, the filter
 rules, the ``--limit`` / ``--camera`` flags, and the preserve-``manual_has_cat`` invariant. Lives
 in its own module to keep ``test_cli.py`` under pylint's ``too-many-lines`` cap.
@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, create_autospec, patch
 
+import numpy as np
 from cli_test_helpers import (
     config_with_dirs,
     init_schema,
@@ -20,10 +21,12 @@ from cli_test_helpers import (
     seed_camera,
     seed_clip,
 )
+from sqlalchemy import select
 
 from cat_watcher.__main__ import _run_reanalyze
 from cat_watcher.config import Config  # noqa: TC001  # runtime: make_config callable annotation
-from cat_watcher.detector import Detector
+from cat_watcher.db import ClipFrame, create_engine, get_session
+from cat_watcher.detector import Detector, ScoredFrame
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,12 +73,22 @@ def _set_weights_present(config: Config) -> None:
     """Drop a non-empty file at ``<internal_root>/models/<detector.model>``.
 
     The reanalyze handler refuses to start if the weights file is absent. Several tests don't care
-    about the actual model — they patch ``Detector.from_weights`` and ``detection_fields_for`` —
+    about the actual model — they patch ``Detector.from_weights`` and ``detection_for`` —
     but the existence-check still has to pass first.
     """
     models_dir = config.internal_root / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     _ = (models_dir / config.detector.model).write_bytes(b"placeholder weights")
+
+
+def _read_clip_frames(config: Config, clip_id: int) -> list[ClipFrame]:
+    """Read ``ClipFrame`` rows for ``clip_id`` ordered by ordinal, detached from any session."""
+    engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            return list(session.scalars(select(ClipFrame).where(ClipFrame.clip_id == clip_id).order_by(ClipFrame.ordinal)))
+    finally:
+        engine.dispose()
 
 
 # --- tests ---------------------------------------------------------------------------------------
@@ -114,7 +127,7 @@ def test_reanalyze_rescores_skip_marker_clips(tmp_path: Path, make_config: Calla
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields(has_cat=True)),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), ())),
     ):
         exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     assert exit_code == 0
@@ -138,7 +151,7 @@ def test_reanalyze_default_skips_clean_clips(tmp_path: Path, make_config: Callab
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     clip = read_clip(config, clip_id)
@@ -157,7 +170,7 @@ def test_reanalyze_all_rescores_every_clip(tmp_path: Path, make_config: Callable
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields(version="yolov11n@new")),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(version="yolov11n@new"), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="", limit=None, all=True))
     clip = read_clip(config, clip_id)
@@ -182,7 +195,7 @@ def test_reanalyze_preserves_manual_has_cat(tmp_path: Path, make_config: Callabl
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields(has_cat=False)),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=False), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     clip = read_clip(config, clip_id)
@@ -216,7 +229,7 @@ def test_reanalyze_skips_missing_files_with_warning(tmp_path: Path, make_config:
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(), ())),
     ):
         exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     assert exit_code == 0
@@ -248,7 +261,7 @@ def test_reanalyze_limit_caps_count_in_start_ts_order(tmp_path: Path, make_confi
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="", limit=2, all=False))
     # Earliest two get cleared; the latest still carries its skip marker.
@@ -271,7 +284,7 @@ def test_reanalyze_camera_filter_restricts_scope(tmp_path: Path, make_config: Ca
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="pantry", limit=None, all=False))
     assert read_clip(config, pantry_clip).analysis_error is None
@@ -301,7 +314,7 @@ def test_reanalyze_emits_one_summary_line_per_camera(
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_fields_for", return_value=_detection_fields()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     out = capsys.readouterr().out
@@ -329,8 +342,8 @@ def test_reanalyze_returns_one_when_any_clip_errors(
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
         patch(
-            "cat_watcher.__main__.detection_fields_for",
-            return_value=_detection_fields(analysis_error="detect failed: synthetic"),
+            "cat_watcher.__main__.detection_for",
+            return_value=(_detection_fields(analysis_error="detect failed: synthetic"), ()),
         ),
     ):
         exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
@@ -355,3 +368,52 @@ def test_reanalyze_no_qualifying_clips_prints_message_and_exits_zero(
         exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=True))
     assert exit_code == 0
     assert "no qualifying clips" in capsys.readouterr().out
+
+
+def _build_scored_frames(scores: tuple[float, ...]) -> tuple[ScoredFrame, ...]:
+    """Build ``ScoredFrame``s with stub ndarrays for the backfill test."""
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    return tuple(ScoredFrame(ordinal=i, t_offset_seconds=float(i + 1), score=score, frame=stub_frame) for i, score in enumerate(scores))
+
+
+def test_reanalyze_all_backfills_clip_frames(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """``--all`` over a clip with no per-frame thumbs encodes them, replaces the row, repoints thumb_path.
+
+    Pins the backfill contract: pre-existing clips ingested before the per-frame work get a fresh
+    set of ``clip_frames`` rows + a per-frame ``thumb_path``, and the legacy single-file thumb is
+    cleaned up so ``thumbs/`` doesn't accumulate orphans.
+    """
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+    _set_weights_present(config)
+    _ = _ensure_clip_file(config)
+    legacy_thumb_full = config.storage_root / "thumbs/pantry/legacy.jpg"
+    legacy_thumb_full.parent.mkdir(parents=True, exist_ok=True)
+    _ = legacy_thumb_full.write_bytes(b"\xff\xd8\xff\xe0placeholder")
+    clip_id = seed_clip(
+        config,
+        camera_id=seed_camera(config),
+        start_ts=datetime(2026, 5, 1, 12, 30, 45, tzinfo=UTC),
+        analysis_error=None,
+        thumb_path="thumbs/pantry/legacy.jpg",
+    )
+    scored_frames = _build_scored_frames((0.1, 0.85, 0.3, 0.6))
+
+    with (
+        patch("cat_watcher.__main__.load_config", return_value=config),
+        patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), scored_frames)),
+    ):
+        exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=True))
+    assert exit_code == 0
+
+    per_clip_dir = config.storage_root / "thumbs" / "pantry" / "2026-05-01" / "123045"
+    for ordinal in range(4):
+        assert (per_clip_dir / f"{ordinal:02d}.jpg").is_file()
+
+    clip = read_clip(config, clip_id)
+    assert clip.thumb_path.endswith("/01.jpg")
+    assert legacy_thumb_full.is_file() is False
+    frames = _read_clip_frames(config, clip_id)
+    assert len(frames) == 4
+    assert [frame.score for frame in frames] == [0.1, 0.85, 0.3, 0.6]

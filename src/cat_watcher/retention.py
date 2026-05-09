@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import delete, select
 
-from cat_watcher.db import AgentStart, AlertSent, Clip, get_session
+from cat_watcher.db import AgentStart, AlertSent, Clip, ClipFrame, get_session
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -98,11 +98,23 @@ def _pass1_db_driven(engine: Engine, storage_root: Path, cutoff: datetime) -> in
                 continue
             file_path = storage_root / clip.file_path
             thumb_path = storage_root / clip.thumb_path
+            # Read per-frame state while ``clip`` is still attached. A non-empty ``clip.frames``
+            # signals the new layout where the highest-scoring thumb lives one level deeper than
+            # the legacy layout — its parent is the per-clip ``<HHMMSS>/`` subdir we want to rmdir.
+            frame_relpaths: list[str] = [f.thumb_path for f in clip.frames]
+            per_clip_dir: Path | None = thumb_path.parent if clip.frames else None
             session.delete(clip)
         # Files unlinked AFTER the row commit so a crash between the two leaves only an orphan
         # file (handled by pass 2), never a dangling row pointing at a missing path.
         _ = _unlink_best_effort(file_path)
         _ = _unlink_best_effort(thumb_path)
+        for rel in frame_relpaths:
+            _ = _unlink_best_effort(storage_root / rel)
+        if per_clip_dir is not None:
+            try:
+                per_clip_dir.rmdir()
+            except OSError as exc:
+                logger.warning("retention: rmdir failed for %s: %s", per_clip_dir, exc)
         removed += 1
     return removed
 
@@ -112,6 +124,7 @@ def _pass2_orphan_files(engine: Engine, storage_root: Path, cutoff: datetime) ->
     with get_session(engine) as session:
         survivors: set[str] = set(session.scalars(select(Clip.file_path)).all())
         survivors.update(session.scalars(select(Clip.thumb_path)).all())
+        survivors.update(session.scalars(select(ClipFrame.thumb_path)).all())
 
     cutoff_ts = cutoff.timestamp()
     removed = 0
@@ -137,7 +150,12 @@ def _pass2_orphan_files(engine: Engine, storage_root: Path, cutoff: datetime) ->
 
 
 def _cleanup_empty_date_dirs(storage_root: Path) -> int:
-    """``rmdir`` any clips/<slug>/<YYYY-MM-DD>/ or thumbs/<slug>/<YYYY-MM-DD>/ that's empty."""
+    """``rmdir`` any clips/<slug>/<YYYY-MM-DD>/ or thumbs/<slug>/<YYYY-MM-DD>/ that's empty.
+
+    Under ``thumbs/`` each date dir may contain per-clip ``<HHMMSS>/`` subdirectories (new layout)
+    alongside legacy ``<HHMMSS>.jpg`` flat files. Empty per-clip subdirs are rmdir'd first so they
+    don't block their parent date-dir cleanup; ``dirs_removed`` counts only date dirs.
+    """
     removed = 0
     for top in (_CLIPS_DIR, _THUMBS_DIR):
         root = storage_root / top
@@ -149,6 +167,8 @@ def _cleanup_empty_date_dirs(storage_root: Path) -> int:
             for date_dir in slug_dir.iterdir():
                 if not date_dir.is_dir():
                     continue
+                if top == _THUMBS_DIR:
+                    _rmdir_empty_per_clip_subdirs(date_dir)
                 try:
                     date_dir.rmdir()
                 except OSError:
@@ -156,6 +176,18 @@ def _cleanup_empty_date_dirs(storage_root: Path) -> int:
                     continue
                 removed += 1
     return removed
+
+
+def _rmdir_empty_per_clip_subdirs(date_dir: Path) -> None:
+    """Inside a ``thumbs/<slug>/<YYYY-MM-DD>/`` dir, rmdir any empty per-clip ``<HHMMSS>/`` subdir."""
+    for child in date_dir.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            child.rmdir()
+        except OSError:
+            # Non-empty (frames still reference it) or already gone — ignore.
+            continue
 
 
 def _prune(

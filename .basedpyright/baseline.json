@@ -15,6 +15,14 @@
                 "code": "reportAny",
                 "range": {
                     "startColumn": 4,
+                    "endColumn": 24,
+                    "lineCount": 1
+                }
+            },
+            {
+                "code": "reportAny",
+                "range": {
+                    "startColumn": 4,
                     "endColumn": 19,
                     "lineCount": 1
                 }

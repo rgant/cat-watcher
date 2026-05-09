@@ -16,9 +16,9 @@ from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations 
 from typing import TYPE_CHECKING
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import desc, select
 
-from cat_watcher.db import Camera, Clip
+from cat_watcher.db import Camera, Clip, ClipFrame
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -110,6 +110,75 @@ def _build_clip(  # noqa: PLR0913  # constructor wrapper; flat kwargs map 1:1 to
         detector_version="yolov11n@deadbeef",
         ingested_at=datetime.now(UTC),
     )
+
+
+def _seed_clip_frame(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    *,
+    internal_root: Path,
+    storage_root: Path,
+    clip_id: int,
+    frame_bytes: bytes | None = b"\xff\xd8\xff\xe0frame-bytes",
+) -> int:
+    """Seed one ``ClipFrame`` row tied to ``clip_id`` and optionally write its JPEG to disk.
+
+    Returns the new ``ClipFrame.id``. ``frame_bytes=None`` simulates the row-without-file drift the
+    410 path covers. The relpath matches the production layout
+    (``thumbs/<cam>/<YYYY-MM-DD>/<HHMMSS>/<NN>.jpg``) so filesystem-coupled regressions surface here
+    instead of getting masked by a synthetic test path. The ordinal is pinned to 0 — sufficient for
+    the route's behavioral coverage; tests that care about multi-frame layout build their own.
+    """
+    rel_thumb = _frame_relpath_from_clip(db_session_factory, internal_root=internal_root, clip_id=clip_id)
+    if frame_bytes is not None:
+        full = storage_root / rel_thumb
+        full.parent.mkdir(parents=True, exist_ok=True)
+        _ = full.write_bytes(frame_bytes)
+
+    with db_session_factory(internal_root) as session:
+        frame = ClipFrame(clip_id=clip_id, ordinal=0, t_offset_seconds=0.0, score=0.91, thumb_path=rel_thumb)
+        session.add(frame)
+        session.flush()
+        return frame.id
+
+
+def _frame_relpath_from_clip(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    *,
+    internal_root: Path,
+    clip_id: int,
+) -> str:
+    """Compute the per-frame relpath ``thumbs/<cam>/<date>/<HHMMSS>/00.jpg`` from the seeded clip."""
+    with db_session_factory(internal_root) as session:
+        clip = session.get(Clip, clip_id)
+        assert clip is not None
+        camera = session.get(Camera, clip.camera_id)
+        assert camera is not None
+        date_dir = clip.start_ts.strftime("%Y-%m-%d")
+        hhmmss = clip.start_ts.strftime("%H%M%S")
+        return f"thumbs/{camera.name}/{date_dir}/{hhmmss}/00.jpg"
+
+
+def _seed_clip_frame_at(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    *,
+    internal_root: Path,
+    clip_id: int,
+    spec: tuple[int, float],
+    score: float = 0.5,
+) -> int:
+    """Seed one ``ClipFrame`` row at ``(ordinal, t_offset_seconds)`` with ``score``; no JPEG written.
+
+    The contact-sheet tests don't render the JPEG bytes (the ``<img>`` URL is what matters), so we
+    skip the on-disk write that :func:`_seed_clip_frame` performs and keep ``thumb_path`` distinct
+    per ordinal so a regression in the per-frame relpath would still surface.
+    """
+    ordinal, t_offset_seconds = spec
+    rel_thumb = f"thumbs/clip-{clip_id}/{ordinal:02d}.jpg"
+    with db_session_factory(internal_root) as session:
+        frame = ClipFrame(clip_id=clip_id, ordinal=ordinal, t_offset_seconds=t_offset_seconds, score=score, thumb_path=rel_thumb)
+        session.add(frame)
+        session.flush()
+        return frame.id
 
 
 def _seed_extra_clip(
@@ -385,6 +454,91 @@ def test_clip_detail_returns_404_for_unknown_clip(
     assert response.status_code == 404
 
 
+def test_clip_detail_renders_prev_next_navigation(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Detail page links to the chronologically-newer (``← Newer``) and older (``Older →``) clips.
+
+    Three clips at distinct timestamps; visit the middle one and assert both neighbors are linked
+    by id. Pin the rel attributes so a regression that swaps prev/next surfaces here.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, oldest_id = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        start_ts=datetime(2026, 5, 1, 6, 0, 0, tzinfo=UTC),
+    )
+    _seed_extra_clip(
+        db_session_factory,
+        internal_root,
+        source_filename="070000.mp4",
+        start_ts=datetime(2026, 5, 1, 7, 0, 0, tzinfo=UTC),
+        has_cat=True,
+    )
+    _seed_extra_clip(
+        db_session_factory,
+        internal_root,
+        source_filename="080000.mp4",
+        start_ts=datetime(2026, 5, 1, 8, 0, 0, tzinfo=UTC),
+        has_cat=True,
+    )
+    with db_session_factory(internal_root) as session:
+        rows = list(session.scalars(select(Clip).order_by(Clip.start_ts.asc())).all())
+    middle_id = rows[1].id
+    newest_id = rows[2].id
+
+    with web_test_client(config) as client:
+        response = client.get(f"/clips/{middle_id}", headers=_AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert f'href="http://testserver/clips/{newest_id}" rel="prev"' in response.text
+    assert f'href="http://testserver/clips/{oldest_id}" rel="next"' in response.text
+
+
+def test_clip_detail_disables_navigation_at_endpoints(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The newest clip has ``← Newer`` rendered as a disabled span; the oldest clip's ``Older →``
+    is the disabled one. Asserts via the ``clip-nav-disabled`` CSS class so a refactor that drops
+    the visual cue surfaces here.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, oldest_id = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        start_ts=datetime(2026, 5, 1, 6, 0, 0, tzinfo=UTC),
+    )
+    _seed_extra_clip(
+        db_session_factory,
+        internal_root,
+        source_filename="070000.mp4",
+        start_ts=datetime(2026, 5, 1, 7, 0, 0, tzinfo=UTC),
+        has_cat=True,
+    )
+    with db_session_factory(internal_root) as session:
+        newest_id = session.scalar(select(Clip.id).order_by(desc(Clip.start_ts)).limit(1))
+    assert newest_id is not None
+
+    with web_test_client(config) as client:
+        newest_response = client.get(f"/clips/{newest_id}", headers=_AUTH_HEADER)
+        oldest_response = client.get(f"/clips/{oldest_id}", headers=_AUTH_HEADER)
+
+    assert '<span class="clip-nav-disabled" aria-disabled="true">← Newer</span>' in newest_response.text
+    assert 'rel="next"' in newest_response.text
+    assert '<span class="clip-nav-disabled" aria-disabled="true">Older →</span>' in oldest_response.text
+    assert 'rel="prev"' in oldest_response.text
+
+
 def test_media_clip_returns_full_file_when_no_range_header(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
@@ -594,6 +748,112 @@ def test_media_thumb_returns_410_when_thumb_missing(
     assert response.status_code == 410
 
 
+def test_media_frame_returns_jpeg_bytes(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """``/media/frame/{id}.jpg`` returns the per-frame JPEG with a JPEG content type."""
+    payload = b"\xff\xd8\xff\xe0" + b"per-frame-bytes"
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+    )
+    frame_id = _seed_clip_frame(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        clip_id=clip_id,
+        frame_bytes=payload,
+    )
+
+    with web_test_client(config) as client:
+        response = client.get(f"/media/frame/{frame_id}.jpg", headers=_AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert response.content == payload
+    assert response.headers["content-type"].startswith("image/jpeg")
+
+
+def test_media_frame_returns_404_for_unknown_id(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """No ``ClipFrame`` row → ``404`` (distinct from 410, which means "row exists, file gone")."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    with web_test_client(config) as client:
+        response = client.get("/media/frame/9999.jpg", headers=_AUTH_HEADER)
+
+    assert response.status_code == 404
+
+
+def test_media_frame_returns_503_when_storage_offline(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    tmp_path: Path,
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Same 503 contract as ``/media/thumb`` — drive offline → 503."""
+    internal_root, _ = storage_dirs
+    missing_storage = tmp_path / "drive-not-mounted"
+    config = make_config(internal_root, missing_storage)
+    _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=missing_storage,
+        write_files=False,
+    )
+    frame_id = _seed_clip_frame(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=missing_storage,
+        clip_id=clip_id,
+        frame_bytes=None,
+    )
+
+    with web_test_client(config) as client:
+        response = client.get(f"/media/frame/{frame_id}.jpg", headers=_AUTH_HEADER)
+
+    assert response.status_code == 503
+
+
+def test_media_frame_returns_410_when_file_missing(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Same 410 contract as ``/media/thumb`` — drive mounted but per-frame file gone."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        write_files=False,
+    )
+    frame_id = _seed_clip_frame(
+        db_session_factory,
+        internal_root=internal_root,
+        storage_root=storage_root,
+        clip_id=clip_id,
+        frame_bytes=None,
+    )
+
+    with web_test_client(config) as client:
+        response = client.get(f"/media/frame/{frame_id}.jpg", headers=_AUTH_HEADER)
+
+    assert response.status_code == 410
+
+
 @pytest.mark.parametrize(
     ("range_header", "expected_status"),
     [
@@ -754,3 +1014,71 @@ def test_clips_list_filters_compose_with_and_semantics(
     # The right-camera-wrong-has_cat clip is added via ``_seed_extra_clip`` to the same
     # camera as the target; its ID we don't track but its filename ``120100.mp4`` is unique.
     assert "120100" not in body, "wrong has_cat must be excluded"
+
+
+def _frame_button_slice(body: str, frame_id: int) -> str:
+    """Return ``body`` between the frame's media URL and the next ``</button>``.
+
+    Slicing keeps a neighbour frame's markers from leaking into a substring check on this
+    frame's wrapper.
+    """
+    start = body.find(f"/media/frame/{frame_id}.jpg")
+    return body[start : body.find("</button>", start)]
+
+
+def test_clip_detail_renders_contact_sheet_in_ordinal_order(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Contact sheet renders one keyboard-accessible click-to-seek button per frame, ordinal-asc.
+
+    Frames are inserted with shuffled ordinals so the ordering signal comes from the route's
+    relationship-ordered read, not insert order. Scores are mixed above/below the default 0.35
+    threshold so the same response covers ordinal ordering, ``data-seek-seconds`` carriage,
+    and the threshold-styling cue (``contact-sheet-score-below``) on a single page render.
+    """
+    internal_root, storage_root = storage_dirs
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    # Insert order 2/0/3/1 is distinct from the expected ordinal-asc render order, so a regression
+    # that dropped the relationship's ``order_by`` would surface as out-of-order positions below.
+    # Scores: ordinal 0 below threshold (0.10), 2 below (0.20), 1 above (0.50), 3 above (0.90).
+    rows: list[tuple[tuple[int, float], float]] = [((2, 10.0), 0.20), ((0, 0.0), 0.10), ((3, 15.0), 0.90), ((1, 5.0), 0.50)]
+    ids_by_ordinal: dict[int, int] = {
+        spec[0]: _seed_clip_frame_at(db_session_factory, internal_root=internal_root, clip_id=clip_id, spec=spec, score=score)
+        for spec, score in rows
+    }
+
+    with web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER).text
+
+    assert 'class="contact-sheet"' in body
+    assert 'class="contact-sheet-button"' in body
+    positions = [body.find(f"/media/frame/{ids_by_ordinal[o]}.jpg") for o in (0, 1, 2, 3)]
+    assert all(p > 0 for p in positions), "every frame's media-frame URL must appear in body"
+    assert positions == sorted(positions), "contact-sheet must render in ordinal-ascending order"
+    for spec, _ in rows:
+        assert f'data-seek-seconds="{spec[1]}"' in body
+    # Sub-threshold frame (ordinal 0, score 0.10) carries the muted class; above-threshold (ordinal
+    # 1, score 0.50) does not.
+    assert "contact-sheet-score-below" in _frame_button_slice(body, ids_by_ordinal[0])
+    assert "contact-sheet-score-below" not in _frame_button_slice(body, ids_by_ordinal[1])
+
+
+def test_clip_detail_hides_contact_sheet_for_legacy_clip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A clip with no ``ClipFrame`` rows must not render the contact-sheet section at all."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+
+    with web_test_client(config) as client:
+        response = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert 'class="contact-sheet"' not in response.text

@@ -13,6 +13,7 @@ from cat_watcher.db import (
     AlertType,
     Camera,
     Clip,
+    ClipFrame,
     Heartbeat,
     PollStatus,
     UtcDateTime,
@@ -174,6 +175,41 @@ def test_camera_cascade_deletes_clips(db_engine: Engine) -> None:
     with get_session(db_engine) as session:
         assert session.scalars(select(Camera)).all() == []
         assert session.scalars(select(Clip)).all() == []
+
+
+def test_clip_frame_model_round_trip_and_cascades(db_engine: Engine) -> None:
+    """Per-frame thumbnail rows attach to a ``Clip``, sort by ``ordinal``, and cascade on delete.
+
+    Confirms three guarantees the rest of the pipeline depends on:
+    * The ``Clip.frames`` relationship returns rows in ``ordinal`` ASC regardless of insert order.
+    * ``ondelete=CASCADE`` plus ``passive_deletes=True`` removes ``ClipFrame`` rows when a parent
+      ``Clip`` is deleted at the DB level (relies on ``PRAGMA foreign_keys=ON`` from the engine).
+    * Field round-trip preserves ``score`` / ``t_offset_seconds`` / ``thumb_path`` exactly.
+    """
+    camera = _make_camera()
+    clip = _make_clip(camera)
+    # Insert the higher-ordinal frame first to prove the relationship sorts on read, not on insert.
+    frame_late = ClipFrame(clip=clip, ordinal=1, t_offset_seconds=1.5, score=0.42, thumb_path="frames/pantry/0001.jpg")
+    frame_early = ClipFrame(clip=clip, ordinal=0, t_offset_seconds=0.0, score=0.91, thumb_path="frames/pantry/0000.jpg")
+
+    with get_session(db_engine) as session:
+        session.add_all([camera, clip, frame_late, frame_early])
+
+    with get_session(db_engine) as session:
+        loaded_clip = session.scalars(select(Clip)).one()
+        assert len(loaded_clip.frames) == 2
+        assert [f.ordinal for f in loaded_clip.frames] == [0, 1]
+        assert loaded_clip.frames[0].score == pytest.approx(0.91)  # pyright: ignore[reportUnknownMemberType]
+        assert loaded_clip.frames[0].t_offset_seconds == pytest.approx(0.0)  # pyright: ignore[reportUnknownMemberType]
+        assert loaded_clip.frames[0].thumb_path == "frames/pantry/0000.jpg"
+        assert loaded_clip.frames[1].thumb_path == "frames/pantry/0001.jpg"
+
+    with get_session(db_engine) as session:
+        session.delete(session.scalars(select(Clip)).one())
+
+    with get_session(db_engine) as session:
+        assert session.scalars(select(Clip)).all() == []
+        assert session.scalars(select(ClipFrame)).all() == []
 
 
 def test_alert_sent_survives_camera_deletion(db_engine: Engine) -> None:

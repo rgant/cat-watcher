@@ -973,3 +973,124 @@ video {
     background: transparent;
   }
 }
+
+/* =====================================================================
+ * Clip-detail contact sheet
+ *
+ * Row of small per-frame thumbnails under the <video> element. Layered
+ * with the same mobile-first breakpoints as ``.thumb-strip``: 2 columns
+ * at phone-landscape, 4 at tablet, 6 at desktop. Each frame is a small
+ * card with the t-offset stamp underneath.
+ * ===================================================================== */
+
+.contact-sheet {
+  margin-block: var(--space-sm);
+}
+
+.contact-sheet-list {
+  display: grid;
+  grid-template-columns: [contact-start] 1fr [col-2] 1fr [contact-end]; /* mobile: 2 columns */
+  gap: var(--space-sm);
+
+  margin: var(--space-sm) 0 0;
+  padding: 0;
+
+  list-style: '';
+
+  & li {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  & img {
+    display: block;
+    inline-size: 100%;
+    block-size: auto;
+    border-radius: 4px;
+  }
+}
+
+.contact-sheet-time {
+  font-family: var(--font-mono), monospace;
+  font-size: .85em;
+  color: var(--color-muted);
+}
+
+/* Click-to-seek wrapper: the entire frame card is the click target so a tap anywhere on the
+ * thumbnail or its caption row seeks the <video> player. ``width: 100%`` makes the button
+ * stretch to its flex parent (<li>) so the click area fills the grid cell. */
+.contact-sheet-button {
+  cursor: pointer;
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  align-items: center;
+
+  inline-size: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+
+  font: inherit;
+  color: inherit;
+
+  background: transparent;
+
+  &:focus-visible {
+    outline: 2px solid var(--color-link);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) {
+  .contact-sheet-button:hover {
+    background: var(--color-bg-stripe);
+  }
+}
+
+.contact-sheet-score {
+  font-family: var(--font-mono), monospace;
+  font-size: .85em;
+  color: var(--color-text);
+}
+
+/* Sub-threshold scores get the same muted treatment as ``.contact-sheet-time`` so the operator
+ * can see at a glance which frames the detector ruled out. The threshold itself lives in
+ * config; the route precomputes the per-frame branch and toggles this class. */
+.contact-sheet-score-below {
+  color: var(--color-muted);
+}
+
+@media (width >= 48rem) {
+  .contact-sheet-list {
+    grid-template-columns: [contact-start] 1fr [col-2] 1fr [col-3] 1fr [col-4] 1fr [contact-end];
+  }
+}
+
+@media (width >= 64rem) {
+  .contact-sheet-list {
+    grid-template-columns: [contact-start] 1fr [col-2] 1fr [col-3] 1fr [col-4] 1fr [col-5] 1fr [col-6] 1fr [contact-end];
+  }
+}
+
+.clip-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+
+  margin-block-end: 1rem;
+
+  & a,
+  & span {
+    text-decoration: none;
+  }
+}
+
+.clip-nav-disabled {
+  cursor: not-allowed;
+  color: var(--color-muted);
+}
