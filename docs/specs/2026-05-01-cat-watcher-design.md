@@ -1,7 +1,7 @@
-# Cat Watcher — Phase 1 Design
+# Cat Watcher — Version 1 Design
 
 **Date:** 2026-05-01\
-**Status:** Approved (pending user review of this spec)\
+**Status:** Implemented (Version 1)\
 **Author:** J Rob Gant + Claude (brainstorming)
 
 ## 1. Overview
@@ -17,12 +17,12 @@ sometimes silently fails. This project replaces both pain points with a local
 pipeline running on my home Mac mini, controlled and developed from a separate
 MacBook.
 
-### 1.1. Phase 1 goals
+### 1.1. Version 1 goals
 
 1. Reliable ingest of motion-triggered clips from both cameras into local
    storage with metadata in SQLite.
 2. Cat-vs-no-cat classification per clip (off-the-shelf model, no training
-   required for phase 1).
+   required for version 1).
 3. Web UI to browse and play recent clips, filterable by camera, date, and "has
    cat / no cat detected".
 4. Two alert types delivered by email and macOS notification:
@@ -42,7 +42,7 @@ MacBook.
 - Statistical baseline frequency anomaly (mean+2σ over rolling baseline)
 - Visit clustering (multiple clips for one physical visit)
 
-The Phase 1 spec is intentionally small. Each deferred feature gets its own
+The Version 1 spec is intentionally small. Each deferred feature gets its own
 design + implementation cycle once the base is running.
 
 ### 1.3. Non-goals
@@ -181,12 +181,12 @@ class DetectionResult:
 
 Internally: ffmpeg samples N evenly-spaced frames (default 5), ultralytics
 YOLOv11n runs inference on each, results aggregated. The detector interface is
-pluggable so models can be swapped in phase 2 without touching callers.
+pluggable so models can be swapped in version 2 without touching callers.
 
 **License:** ultralytics is AGPL-3.0; the project repo is licensed
 AGPL-3.0-or-later to match.
 
-**Phase 1 model:** `yolov11n.pt` (nano, ~6 MB) with confidence threshold 0.35.
+**Version 1 model:** `yolov11n.pt` (nano, ~6 MB) with confidence threshold 0.35.
 The COCO "cat" class (id 15) is the only class checked. Model weights are
 downloaded once on first run (or via a setup recipe) into
 `internal_root/models/`; gitignored.
@@ -542,8 +542,8 @@ window correct across DST transitions; UTC arithmetic has no spring/fall
 discontinuities. Camera-clock drift between install-time verifications is a
 known risk: a camera that drifts hours into the future would file clips with
 future `start_ts` values and skew both watchdog and frequency rules. A periodic
-drift re-check (e.g., on every Nth poll tick) is a candidate for phase-2
-hardening; phase 1 relies on the install-time check plus manual re-runs of
+drift re-check (e.g., on every Nth poll tick) is a candidate for version-2
+hardening; version 1 relies on the install-time check plus manual re-runs of
 `cat-watcher test-cameras` during operations.
 
 ### 4.12. `cat_watcher.backup`
@@ -562,13 +562,13 @@ on internal storage is intact (and the next successful backup restores
 
 **Same-drive failure caveat:** if both drives fail simultaneously (fire, theft,
 lightning), nothing survives. Off-host backup (cloud / NAS / second external) is
-phase-2 territory.
+version-2 territory.
 
 Clips and thumbnails are **not** backed up here — they're large, the cameras' SD
-cards are the canonical source for the trailing 30 days, and a separate phase-2
-design will tackle off-host backup if needed. The DB is the only piece of state
-that doesn't exist anywhere else (manual labels, alerts history, camera runtime
-state).
+cards are the canonical source for the trailing 30 days, and a separate
+version-2 design will tackle off-host backup if needed. The DB is the only piece
+of state that doesn't exist anywhere else (manual labels, alerts history, camera
+runtime state).
 
 On startup the backup agent (a) performs the §4.13 storage-availability wait (it
 needs the external drive to write the backup), (b) inserts a row into
@@ -910,7 +910,7 @@ WAL mode on. Foreign keys on (`PRAGMA foreign_keys = ON`).
 | `max_score`          | float     | top confidence across sampled frames               |
 | `frames_sampled`     | int       |                                                    |
 | `frames_with_cat`    | int       |                                                    |
-| `best_box_xyxy`      | JSON?     | for future use (phase-2 ROI overlap)               |
+| `best_box_xyxy`      | JSON?     | for future use (version-2 ROI overlap)             |
 | `detector_version`   | str       | model name + sha256 of weights                     |
 | `ingested_at`        | datetime  |                                                    |
 | `analysis_error`     | str?      | if ffmpeg/detector failed; clip kept un-analyzed   |
@@ -1587,7 +1587,7 @@ Or wrapped as `pixi run deploy-update` (defined in §10.4).
 
 ### 11.3. Backup
 
-Phase 1 backs up the SQLite DB only — see §4.12 for the implementation (daily
+Version 1 backs up the SQLite DB only — see §4.12 for the implementation (daily
 LaunchAgent at 03:00, hot-copy to `/Volumes/Data/cat-watcher/backups/`, last 7
 retained, cross-volume since DB lives on internal storage). Backup freshness is
 monitored by the `BACKUP_STALE` rule (§4.5) — if the newest backup file is older
@@ -1596,7 +1596,7 @@ than 36h, the alerts agent emails.
 Clips and thumbnails are not backed up: they're large, the cameras' SD cards
 hold the trailing 30 days as a canonical source, and the loss of older clips on
 a worst-case drive failure is accepted. Off-host backup (cloud, NAS, second
-external) is phase-2 scope.
+external) is version-2 scope.
 
 To restore: stop the agents (`launchctl bootout gui/$(id -u)/...`), copy the
 chosen backup file over the live `cat_watcher.sqlite`, restart agents.
@@ -1657,45 +1657,45 @@ periodic-agent template.
 
 In rough priority order; each gets its own design + plan cycle.
 
-### Phase 2a — Per-cat identification
+### Version 2a — Per-cat identification
 
-Train a Rufus-vs-Marcel classifier on accumulated phase-1 footage. The phase-1
-manual-label workflow (`clips.manual_has_cat` + `manual_label_notes`) produces
-the labeled training set: every UI correction becomes a labeled example.
-`manual_label_notes` extends to a structured form (e.g., `cat:rufus` /
+Train a Rufus-vs-Marcel classifier on accumulated version-1 footage. The
+version-1 manual-label workflow (`clips.manual_has_cat` + `manual_label_notes`)
+produces the labeled training set: every UI correction becomes a labeled
+example. `manual_label_notes` extends to a structured form (e.g., `cat:rufus` /
 `cat:marcel` / `cat:both`) so the same labeling UI doubles as training-data
 collection without schema churn. Likely a small image classifier (resnet18 /
 mobilenet) fine-tuned on crops cut from `best_box_xyxy`. Training on the MacBook
 (Apple Silicon, MPS); inference runs on the Mac mini directly via PyTorch
-(sourced from conda-forge through pixi, same path as phase 1's YOLO inference).
-Schema gain: `clips.cat_id` (FK to a new `cats` table). Per-cat stats become
-possible.
+(sourced from conda-forge through pixi, same path as version 1's YOLO
+inference). Schema gain: `clips.cat_id` (FK to a new `cats` table). Per-cat
+stats become possible.
 
-### Phase 2b — Framing/coverage alert
+### Version 2b — Framing/coverage alert
 
 Four-corner approach: the operator marks 4 corner points on a reference frame
 per camera; a small keypoint check (or template matching against the reference
 patch around each corner) verifies all 4 stay visible in periodic samples. Fires
 when any corner goes missing.
 
-### Phase 2c — Statistical baseline frequency anomaly
+### Version 2c — Statistical baseline frequency anomaly
 
 Layer on top of the hard-threshold rule: learn a per-camera, per-time-of-day
 baseline; alert when current 6-hour rolling rate exceeds (mean + 2σ). Cold-start
 window of ~3 weeks before this rule goes live.
 
-### Phase 2d — Visit clustering
+### Version 2d — Visit clustering
 
 Cluster clips within an N-second gap into "visits" so high-frequency alerts and
 stats can speak in visits rather than raw clip counts. Depends on YOLO tracking
-for cross-frame identity (introduced as part of phase 2a).
+for cross-frame identity (introduced as part of version 2a).
 
 ### Phase 3 — Behavior classification
 
 Hardest piece; depends on accumulated labeled data and possibly a short-clip
 action-recognition model. Genuinely research-grade for the specific sub-classes
-(urinating vs defecating). Spec to be written when phase-2 work has matured the
-dataset.
+(urinating vs defecating). Spec to be written when version-2 work has matured
+the dataset.
 
 ## 13. Open items / decisions deferred to writing-plans
 
@@ -1703,7 +1703,7 @@ dataset.
   with manual digest auth. Decide at implementation time based on
   `python-amcrest`'s current maintenance status and coverage of the required API
   endpoints (recording listing + download).
-- First-run model-cache strategy. Phase 1 commits to `yolov11n.pt` (§4.3); the
+- First-run model-cache strategy. Version 1 commits to `yolov11n.pt` (§4.3); the
   open question is _when_ the weights land in `internal_root/models/`. Two
   options: (a) lazy — first poller tick downloads on demand, with the price
   being a slow, network-dependent first poll on a host that may not have great

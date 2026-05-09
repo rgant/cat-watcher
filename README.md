@@ -191,17 +191,111 @@ transient — delete it once the import reports `errors=0`.
 
 ## Deploying to the Mac mini
 
-Production runs four LaunchAgents (`poller`, `alerts`, `web`, `backup`) under
-the operator's GUI session. The plist templates live under `scripts/plists/` and
-are rendered at install time from `config.toml`'s cadence values:
+Production runs four user-level LaunchAgents (`poller`, `alerts`, `web`,
+`backup`) under the operator's GUI session — `LaunchAgents`, not
+`LaunchDaemons`, so the host must stay logged in. The plist templates live under
+`scripts/plists/` and are rendered at install time from `config.toml`'s cadence
+values. `install-agents` is idempotent: re-running after an edit to
+`config.toml` or a plist template cleanly picks up the new values.
+
+### First-boot procedure (fresh hardware)
+
+Prerequisites: dedicated user account with auto-login + persistent GUI session,
+[Homebrew](https://brew.sh/) installed, and the external storage drive mounted
+at the path you'll set as `storage_root` (the agents wait for it on each boot —
+see `[storage]` knobs in `config.example.toml`).
 
 ```bash
-pixi run install-agents     # render templates, bootout any old versions, bootstrap each agent
-pixi run agents-status      # `launchctl list | grep cat-watcher` — quick health check
-pixi run uninstall-agents   # graceful bootout + remove plists from ~/Library/LaunchAgents
+git clone <repo-url> ~/Apps/cat-watcher    # any path; commands below assume this
+cd ~/Apps/cat-watcher
+brew bundle                                # system tools (pixi, nvm, ffmpeg, ...)
+pixi install                               # Python + conda env
+nvm install && nvm use && npm ci           # JS lint sidecar (one-time per checkout)
+
+cp .env.example .env                       # fill in the secrets
+chmod 600 .env                             # operator-owned only
+cp config.example.toml config.toml         # set internal_root, storage_root, cameras
+
+pixi run db-upgrade                        # create / migrate cat_watcher.sqlite
+pixi run cat-watcher fetch-models          # pull yolo11n.pt into <internal_root>/models/
+pixi run install-agents                    # render plists, bootstrap into launchd
+pixi run agents-status                     # confirm all four agents are loaded
 ```
 
-`install-agents` is idempotent — re-running after an edit to `config.toml` or a
-plist template cleanly picks up the new values. The agents log to
-`<internal_root>/logs/<agent>.jsonl` (structured JSONL, 10 MB rotation, 7
-backups); tail them live with `pixi run logs`.
+### Directory layout
+
+The two roots are operator-provisioned; the agents create the subfolders on
+first run via `storage.ensure_storage_layout`.
+
+| Path                                                   | Owner       | Contents                                                       |
+| ------------------------------------------------------ | ----------- | -------------------------------------------------------------- |
+| `<internal_root>/cat_watcher.sqlite`                   | all agents  | live database (WAL mode)                                       |
+| `<internal_root>/.poller.pid`                          | poller      | exclusive lock between manual + scheduled runs                 |
+| `<internal_root>/models/yolo11n.pt`                    | poller      | YOLO weights pulled by `fetch-models`                          |
+| `<internal_root>/logs/<agent>.jsonl`                   | all agents  | structured JSONL, 10 MB rotation, 7 backups                    |
+| `<internal_root>/logs/<agent>.std{out,err}.log`        | launchd     | raw stdout/stderr (warnings + tracebacks the agent didn't log) |
+| `<storage_root>/clips/`                                | poller, web | motion clips, sized for `[retention].clip_days`                |
+| `<storage_root>/thumbs/`                               | poller, web | per-frame thumbnails + contact sheets                          |
+| `<storage_root>/backups/cat_watcher-YYYY-MM-DD.sqlite` | backup      | rolling daily backups, `[backup].keep_count` retained          |
+
+In development `internal_root == storage_root == ./data`. In production they
+should sit on separate filesystems (internal SSD + external drive) so a
+single-volume failure on either side is recoverable — the daily backup is
+specifically a cross-volume hot-copy.
+
+### Operations reference
+
+`<agent>` below is one of `poller`, `alerts`, `web`, `backup`; full LaunchAgent
+labels are `com.robgant.cat-watcher.<agent>`.
+
+| Need                               | Command                                                                                         |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Liveness probe (no auth)           | `curl -fsS http://localhost:<port>/health`                                                      |
+| System health summary              | `pixi run cat-watcher status`                                                                   |
+| LaunchAgent state                  | `pixi run agents-status`                                                                        |
+| Tail all agent logs                | `pixi run logs`                                                                                 |
+| Per-agent JSONL                    | `tail -f <internal_root>/logs/<agent>.jsonl`                                                    |
+| Kick a stuck agent                 | `launchctl kickstart -k gui/$(id -u)/com.robgant.cat-watcher.<agent>`                           |
+| Stop a single agent                | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.robgant.cat-watcher.<agent>.plist`   |
+| Start a single agent               | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.robgant.cat-watcher.<agent>.plist` |
+| Re-deploy after `config.toml` edit | `pixi run install-agents` (idempotent)                                                          |
+| Tear everything down               | `pixi run uninstall-agents`                                                                     |
+| One-off manual poll                | `pixi run cat-watcher-poller [--verbose]`                                                       |
+| Backup database now                | `pixi run cat-watcher-backup`                                                                   |
+| Send a test alert                  | `pixi run cat-watcher test-notification`                                                        |
+| Verify camera reachability         | `pixi run cat-watcher test-cameras`                                                             |
+
+### Backup and restore
+
+The `backup` agent fires daily at `[backup].cadence_hour:cadence_minute`
+(default `03:00` local time), hot-copies the SQLite DB via SQLite's online
+backup API, writes to `<storage_root>/backups/cat_watcher-<UTC-date>.sqlite`,
+and prunes to `[backup].keep_count` newest files (default `7`). The
+`BACKUP_STALE` alert (default 36 hours) catches a silently-failing backup agent
+on its own — no separate health probe needed.
+
+Restore from a backup file:
+
+```bash
+pixi run uninstall-agents                                         # graceful bootout for all four
+cp <storage_root>/backups/cat_watcher-YYYY-MM-DD.sqlite \
+   <internal_root>/cat_watcher.sqlite                             # replace the live DB
+pixi run db-upgrade                                               # no-op if migration head matches
+pixi run install-agents                                           # bootstrap all four back into launchd
+pixi run cat-watcher status                                       # confirm last_polled_at / last_clip_at
+```
+
+## Project documentation
+
+- Design spec:
+  [`docs/specs/2026-05-01-cat-watcher-design.md`](docs/specs/2026-05-01-cat-watcher-design.md)
+  — Version 1 system design plus Version 2 deferred features.
+- Implementation plan:
+  [`docs/plans/2026-05-01-cat-watcher.md`](docs/plans/2026-05-01-cat-watcher.md)
+  — task-by-task build sequence.
+- Outbound email setup:
+  [`docs/outbound-email-setup.md`](docs/outbound-email-setup.md) — Gmail
+  app-password walkthrough for the alerts agent.
+- Amcrest filename quirk:
+  [`docs/resources/amcrest-bracket-quirk.md`](docs/resources/amcrest-bracket-quirk.md)
+  — device-side filename behavior the vendor API doc doesn't cover.

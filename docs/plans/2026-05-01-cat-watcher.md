@@ -1,11 +1,11 @@
-# Cat Watcher — Phase 1 Implementation Plan
+# Cat Watcher — Version 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Phase 1 Cat Watcher system per
+**Goal:** Build the Version 1 Cat Watcher system per
 `docs/specs/2026-05-01-cat-watcher-design.md`: ingest motion clips from two
 Amcrest cameras, classify cat-vs-no-cat, browse via web UI, alert on inactivity
 / frequency / agent failures, run unattended on a Mac mini.
@@ -515,8 +515,8 @@ basedpyright 0 errors, pylint 10.00/10.
 
 **No image fixture is bundled.** Every test either mocks YOLO entirely or
 asserts only on pipeline execution, so the fixture's image content is unused.
-Phase 2's accuracy benchmark suite will use real frames extracted from operator
-footage rather than a stock photo (see Phase 2 limitations).
+Version 2's accuracy benchmark suite will use real frames extracted from
+operator footage rather than a stock photo (see Version 2 limitations).
 
 **Files:**
 
@@ -1154,10 +1154,10 @@ so `import_local` could share them as a public API (`extract_thumbnail`,
 `import_local` share the file-before-row + idempotent insert pipeline literally
 rather than structurally.
 
-**Added during planning of Phase 1 (2026-05-03)** to handle pre-existing camera
-SD-card snapshots the operator wants ingested without waiting for the poller to
-discover them. Required for Phase 4 (web UI) to render against real data on
-first install.
+**Added during planning of Version 1 (2026-05-03)** to handle pre-existing
+camera SD-card snapshots the operator wants ingested without waiting for the
+poller to discover them. Required for Phase 4 (web UI) to render against real
+data on first install.
 
 **Files:**
 
@@ -1422,7 +1422,7 @@ no config schema churn.
   Backup health is monitored via the `BACKUP_STALE` rule in Task 18 (filesystem
   mtime, not heartbeat).
 - **Out of scope for backup:** clips and thumbnails — they're large, the
-  cameras' SD cards hold the trailing 30 days, and off-host backup is phase-2
+  cameras' SD cards hold the trailing 30 days, and off-host backup is version-2
   territory.
 
 #### Test Requirements
@@ -2333,85 +2333,224 @@ logic issues before they reach the remote repository.
 
 ## Phase 7 — Final Cleanup (Task 28)
 
-**Goal**: Prune the repository of development-only artifacts and finalize
-documentation to ensure the project is ready for production handoff.
+**Goal**: Audit the tree for leftover scratch/state, fill the gaps in the
+operator-facing documentation, rebrand the v1 release marker, bump version
+metadata, and tag `v1.0.0`. Prior phases largely left the tree clean; this phase
+verifies that and produces the release artefact rather than authoring new code.
+
+**Terminology cleanup.** The design spec uses "Phase 1" to mean the v1 release
+(distinct from this plan's "Phase 1 — Foundation (Tasks 8–12)", which is a
+task-grouping). Conflating the two has caused review confusion. Task 28 rebrands
+release-meaning "Phase N" to "Version N" across both docs while leaving
+plan-internal task-phase headings (`## Phase 0..7`) untouched.
 
 ---
 
-### Task 28: Repository Hardening and Operator Documentation
+### Task 28: Repository Hygiene, Operator Documentation, and Version 1 Release
 
-#### 1. Artifact Removal Requirements
+This task has three independent checklists. Each item names a verification
+command and an expected outcome. Mark items off as you go; do not claim
+completion from memory.
 
-Clean the working tree of non-essential files generated during the development
-and testing phases.
+Files touched: `README.md`, `docs/specs/2026-05-01-cat-watcher-design.md`,
+`docs/plans/2026-05-01-cat-watcher.md` (this file — release-meaning "Phase N"
+references only), `pyproject.toml` (version field, via `pixi`), optionally
+`package.json` (version field, via `npm`), optionally `.gitignore`.
 
-- **Target Files for Deletion**:
-  - Temporary Python scripts used for ad-hoc testing.
-  - Editor-specific configuration files and workspaces (e.g., Sublime Text
-    metadata).
-  - Environment template directories.
-- **`videos/` directory:**
-  - **Removed in Task 17b's import flow, not here.** The
-    `videos/2026-04-27-camera/` snapshot is ingested via
-    `cat-watcher import-local --camera pantry`; after a successful import the
-    operator deletes the entire `videos/` directory manually. By the time Task
-    28 runs, `videos/` should already be gone. If for some reason it isn't
-    (e.g., import was deferred), Task 28 simply confirms its absence — no
-    interactive `.mp4` check needed.
-- **Verification**: Ensure `git status` reflects a clean state, tracking only
-  intentional project files and existing `.gitignore` patterns.
+**Config-file approval.** Per CLAUDE.md, modifications to `pyproject.toml`,
+`package.json`, `.gitignore`, or `LICENSES.md` need an explicit "yes" from the
+user before the agent acts. The agent must surface each proposed change and wait
+for approval, even when the change is mechanical (e.g.
+`pixi workspace
+version set 1.0.0`).
 
-#### 2. Documentation Requirements (`README.md`)
+#### 1. Repo Hygiene Audit
 
-The root documentation must be updated to transition from a developer-centric
-view to an operator-centric view.
+Each check is a verification command + expected output. Run them in order. If a
+check fails, stop and report; do not "fix and continue".
 
-- **Project Summary**: Provide a high-level overview of the `cat-watcher`
-  system's monitoring and classification capabilities.
-- **Development Quick Start**:
-  - Instruction: Document the dependency installation flow using `brew bundle`
-    and `pixi install`.
-  - Instruction: List requirements for configuration setup, including `.env`
-    secrets and `pixi run db-upgrade` for migrations.
-  - Instruction: Define the `pixi run` task surface for connectivity testing
-    (`pixi run test-cameras`, `pixi run test-notification`) and local UI
-    execution (`pixi run dev`).
-- **Production Deployment (Mac mini)**:
-  - Requirement: Detail the specific sequence for cloning and setting up the
-    environment on dedicated hardware.
-  - Requirement: Define the directory structure for both internal application
-    support and external media storage.
-  - Requirement: Document permission hardening (e.g., `chmod 600`) for sensitive
-    environment files.
-- **Operations Reference**:
-  - Requirement: Create a reference table for service management.
-  - Surfaces required: Health status checks, log inspection for individual
-    agents, service restarts via `launchctl`, and backup/restore procedures.
+- **Reference-input directory removed.** Confirm `tmp-env-template/` is gone:
+  `[ ! -e tmp-env-template ] && echo OK`. If still present, delete it and stage
+  the removal. (Already gone in the current tree — this is a verification, not
+  an action.)
+- **No stray binaries / pycaches tracked.** Run
+  `git ls-files | grep -E '\.(pt|pyc)$|__pycache__|\.DS_Store'` — expect empty.
+  `yolo11n.pt`, `__pycache__/`, and similar must live only on disk, never in the
+  index.
+- **Sublime workspace artefacts.** `cat-watcher.sublime-workspace` is per-user
+  state Sublime regenerates: must be gitignored
+  (`git check-ignore -v cat-watcher.sublime-workspace` must succeed).
+  `cat-watcher.sublime-project` is currently tracked; decide explicitly whether
+  to keep as a shared project config or untrack and gitignore. Document the
+  decision in the commit message.
+- **`.gitignore` audit.** Each of the following must produce a hit from
+  `git check-ignore -v`: `data/`, `config.toml`, `.env`, `yolo11n.pt`,
+  `__pycache__/`, `node_modules/`, `*.sublime-workspace`. Add anything missing —
+  `.gitignore` edits require explicit user approval.
+- **Untracked working-tree state.** Inspect `git status --short`. For each `??`
+  entry (e.g. `.superpowers/`, `docs/resources/tmp/`), make an explicit delete /
+  commit / gitignore decision; do not leave dangling untracked dirs.
+- **`LICENSES.md` accuracy.** Diff the runtime dependency set against the
+  attribution file: `pixi list --explicit` against the entries in `LICENSES.md`.
+  For any third-party package added through Phases 1–6 not yet attributed, add
+  an entry in the file's existing format. If unchanged, record "verified current
+  as of `YYYY-MM-DD`" in the commit message.
+- **Index has no scratch files.** As a final pass,
+  `git ls-files | grep -iE 'scratch|todo\.txt|notes\.md|\.bak$'` must be empty.
 
-#### 3. Metadata and Validation Requirements
+#### 2. Documentation Gap-Fill (`README.md`)
 
-- **Validation Suite**:
-  - Requirement: Execute the full project check-suite (linting, formatting, and
-    tests) to ensure cleanup did not disrupt functionality.
-- **Specification Update**:
-  - Instruction: Update the status field within the design specification
-    (`2026-05-01-cat-watcher-design.md`) to reflect the transition from
-    "Approved" to "Implemented (Phase 1)".
-- **Testing Criteria**:
-  - Verify all documented `README` commands execute successfully in a fresh
-    environment.
-  - Confirm no scratch files remain in the repository index.
+The current `README.md` already covers Quick Start, hot-reload runtime,
+`pixi run dev`, the manual poller surface (`--list-only`, cursor semantics, PID
+lock), and the import flows (online camera + offline SD-card snapshot). **Do not
+rewrite those sections.** Audit-and-fill against the gaps below.
 
-#### 4. Implementation Surfaces
+- **Production walkthrough (Mac mini).** Replace the existing brief "Deploying
+  to the Mac mini" section with an ordered first-boot procedure for fresh
+  hardware:
 
-- **File System**: Project root and `docs/specs/`. (`videos/` is handled in Task
-  17b's import, not here.)
-- **Documentation**: `README.md`.
-- **CLI Infrastructure**: `pixi` task runner and `git`.
+  1. Prerequisites: dedicated user account with a GUI session (LaunchAgents run
+     user-level, not LaunchDaemons); Homebrew installed.
+  2. Clone the repo into the operator's chosen application root.
+  3. `brew bundle` (system tools).
+  4. `pixi install` (Python + conda env).
+  5. `nvm install && nvm use && npm ci` (JS lint sidecar).
+  6. `cp .env.example .env`; edit secrets; `chmod 600 .env`.
+  7. `cp config.example.toml config.toml`; edit `internal_root` and the external
+     clip-storage root.
+  8. `pixi run db-upgrade` (apply migrations to `<internal_root>/db/`).
+  9. `pixi run cat-watcher fetch-models` (pull `yolo11n.pt` into
+     `<internal_root>/models/`; required before the first poll tick is
+     offline-safe).
+  10. `pixi run install-agents` (render plists, bootstrap into launchd).
+  11. `pixi run agents-status` to confirm all four agents are loaded.
+
+- **Directory layout reference.** Document the on-disk surface the operator must
+  provide / understand:
+  - `<internal_root>/db/` — SQLite + WAL files.
+  - `<internal_root>/logs/` — structured JSONL, 10 MB rotation, 7 backups per
+    agent.
+  - `<internal_root>/models/` — YOLO weights from `fetch-models`.
+  - `<internal_root>/.poller.pid` — exclusive lock between manual + scheduled
+    runs.
+  - external clip-storage root — configured separately via `[storage].clip_root`
+    in `config.toml`; sized for `retention.clip_days` of motion footage.
+
+- **Operations Reference table.** Add a new section with a table covering each
+  operational need + the exact command. At minimum:
+  - Liveness probe (`curl -fsS http://localhost:<port>/health`).
+  - Service health (`pixi run cat-watcher status`).
+  - LaunchAgent state (`pixi run agents-status`).
+  - Tail all agent logs (`pixi run logs`).
+  - Per-agent log file (`<internal_root>/logs/<agent>.jsonl`).
+  - Kick a stuck agent (`launchctl kickstart -k gui/$(id -u)/<agent-label>`).
+  - Stop / start (`launchctl bootout` / `bootstrap` `gui/$(id -u) <plist>`).
+  - Re-deploy after `config.toml` edit (`pixi run install-agents` — idempotent).
+  - One-off manual poll (`pixi run cat-watcher-poller [--verbose]`).
+  - Backup database (`pixi run cat-watcher-backup`).
+  - Restore database — see new subsection below.
+
+- **Backup-restore procedure (new section).** `cat-watcher-backup` is wired up
+  but the restore path is currently undocumented. Document:
+  - Backup output location and rotation policy (read from Task 19's
+    implementation).
+  - Restore steps: `pixi run uninstall-agents` (or per-agent
+    `launchctl bootout`) → replace `<internal_root>/db/cat-watcher.db` with the
+    restored copy → `pixi run db-upgrade` (no-op if migration head matches) →
+    `pixi run install-agents` to restart.
+  - Verification: `pixi run cat-watcher status` returns expected
+    `last_polled_at` / `last_clip_at` values.
+
+- **Cross-links.** Ensure the README links to:
+  `docs/specs/2026-05-01-cat-watcher-design.md`,
+  `docs/plans/2026-05-01-cat-watcher.md`, `docs/outbound-email-setup.md`,
+  `docs/resources/amcrest-bracket-quirk.md`. The email-setup link already
+  exists; verify the other three are present after edits.
+
+#### 3. Version 1 Release Marker
+
+- **Spec rebrand (`docs/specs/2026-05-01-cat-watcher-design.md`).** Rename
+  release-meaning "Phase N" to "Version N" throughout the spec. Six "Phase 1"
+  occurrences and four "Phase 2x" occurrences exist as of the audit (verify via
+  `grep -n "Phase [12]" docs/specs/2026-05-01-cat-watcher-design.md`).
+  Specifically:
+  - Title (line 1): `# Cat Watcher — Phase 1 Design` →
+    `# Cat Watcher —
+    Version 1 Design`.
+  - Status field: `**Status:** Approved (pending user review of this spec)\` →
+    `**Status:** Implemented (Version 1)\`. Drop the stale parenthetical.
+  - Section heading `### 1.1. Phase 1 goals` → `### 1.1. Version 1 goals`.
+  - Deferred-feature headings `### Phase 2a/2b/2c/2d` →
+    `### Version 2a/2b/2c/2d`.
+  - All inline references (e.g. "Phase 1 model:", "Phase 1 backs up...", "Phase
+    1 commits to...", "First-run model-cache strategy. Phase 1...") → "Version
+    1".
+
+- **Plan rebrand (this file).** Rename release-meaning "Phase 2" to "Version 2"
+  only — leave plan-internal task-grouping headings (`## Phase 0..7`) untouched.
+  Targets:
+  - Lines 518–519: "Phase 2's accuracy benchmark suite... Phase 2 limitations."
+  - Line 2392: `## Known limitations carried into Phase 2` →
+    `## Known limitations carried into Version 2`.
+  - Line 2418: "What Phase 2 should address" → "What Version 2 should address".
+  - The "## Phase 2 — External I/O (Tasks 13–15)" heading **stays** — that's
+    plan-internal phasing.
+  - Re-grep after the edit
+    (`grep -n "Phase 2" docs/plans/2026-05-01-cat-watcher.md`) to confirm only
+    plan-phase headings remain.
+
+- **Version metadata.**
+  - `pyproject.toml`: bump `[project] version = "0.1.0"` → `1.0.0` via
+    `pixi workspace version set 1.0.0` (verified available in the installed
+    pixi: `pixi workspace version --help` lists `set` / `get` / `major` /
+    `minor` / `patch`). Do not hand-edit. This counts as a manifest edit and
+    needs explicit user approval before invocation.
+  - `package.json`: the package is named `cat-watcher-tooling` and contains only
+    JS lint sidecars (stylelint/eslint config); it is not published and does not
+    ship the application. **Default decision:** leave at `0.0.0`, record
+    "tooling sidecar — version intentionally not bumped" in the commit message.
+    **If the operator prefers symmetry**, bump via
+    `npm version 1.0.0 --no-git-tag-version` (npm's flag avoids a side-effect
+    tag, since the v1.0.0 tag is created against the application repo, not the
+    JS sidecar). This decision must be confirmed with the user before execution.
+
+- **Validation suite.** All three must pass clean before tagging:
+  - `pixi run pytest`
+  - `pixi run lint .`
+  - `pixi run format .` (auto-fix; expect no diff after the doc rebrand pass —
+    if `dprint`/`markdownlint` rewrites anything, re-run lint).
+
+- **Commit + tag.**
+  - Suggested commit message (subject + body):
+
+    ```text
+    chore(release): tag Version 1
+
+    Finalize docs, rebrand release marker (Phase 1 → Version 1), bump
+    pyproject version to 1.0.0.
+    ```
+
+  - The commit and the signed tag must be created by the user (signed-commit
+    policy). The agent prepares the tree, surfaces the suggested commit message,
+    and tells the user to run: `git tag -s v1.0.0 -m "Version 1"` after the
+    commit lands.
+
+#### Acceptance criteria
+
+- All three checklists above produce passing verification output.
+- `git status` is clean except for the staged release commit.
+- Release-meaning "Phase N" references in `docs/specs/` and in non-Task-28 prose
+  of `docs/plans/` have been rewritten to "Version N". Plan-internal
+  task-grouping headings (`## Phase 0..7`), the `bad-plan-phase-2` sketch
+  reference, and Task 28's own self-documenting instruction body are
+  intentionally preserved (verified by manual review).
+- `pixi workspace version get` returns `1.0.0`.
+- README's Mac-mini production walkthrough, directory layout, operations table,
+  and backup-restore section are present.
 
 ---
 
-## Known limitations carried into Phase 2
+## Known limitations carried into Version 2
 
 ### Detector accuracy on top-down litter-box camera angles is unverified
 
@@ -2424,7 +2563,7 @@ frames against `yolo11n.pt` shows the model sometimes confidently misclassifies
 a cat as a dog (COCO class 16). Real production accuracy on these specific
 camera angles is unmeasured.
 
-What this means for Phase 1:
+What this means for Version 1:
 
 - The `INACTIVITY` and `FREQUENCY` alert rules use the same
   `COALESCE(manual_has_cat, has_cat)` projection. The `manual_has_cat` column is
@@ -2437,7 +2576,7 @@ What this means for Phase 1:
   operators can lower it via `config.toml` once they have a feel for the
   false-negative rate on their specific camera placement.
 
-What Phase 2 should address:
+What Version 2 should address:
 
 - **Accuracy benchmark suite.** Once `manual_has_cat` has been populated for
   ~100 clips across both cameras, those become a real ground-truth set for
