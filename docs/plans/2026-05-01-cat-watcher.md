@@ -148,7 +148,7 @@ Files created across the plan, grouped by responsibility:
 
 **CI (`.github/workflows/`):**
 
-- `ci.yml`, `lint-actions.yml`
+- `ci.yml`
 
 ---
 
@@ -1917,7 +1917,7 @@ passing GitHub Action lints, and active local git hooks.
 
 ---
 
-### Task 26: LaunchAgent Infrastructure & Lifecycle Scripts
+### Task 26: LaunchAgent Infrastructure & Lifecycle Scripts — DONE
 
 **Files:**
 
@@ -1994,7 +1994,7 @@ directory.
 
 ---
 
-### Task 26b: Structured Logging + `cat-watcher logs` Viewer
+### Task 26b: Structured Logging + `cat-watcher logs` Viewer — DONE
 
 **Goal:** Replace each agent's ad-hoc `logging.basicConfig(...)` baseline with a
 structured JSONL-on-disk logger and ship a small viewer sub-command so the
@@ -2274,12 +2274,11 @@ exits cleanly.
 
 ---
 
-### Task 27: CI Workflows & Pre-commit Integration
+### Task 27: CI Workflows & Pre-commit Integration — DONE
 
 **Files:**
 
 - `.github/workflows/ci.yml`
-- `.github/workflows/lint-actions.yml`
 - `.pre-commit-config.yaml`
 - `.secrets.baseline`
 
@@ -2298,13 +2297,11 @@ prevent regressions.
   - **Static Analysis:** Run the full suite of Python linters via
     `pixi run lint` (which composes `ruff`, `basedpyright`, `mypy`, `pylint`,
     `shellcheck`, `actionlint`, `zizmor` per `pyproject.toml`'s
-    `[tool.pixi.tasks]`).
+    `[tool.pixi.tasks]`). The single `pixi run lint` invocation also covers
+    GitHub Actions linting (`actionlint` + `zizmor` against
+    `.github/workflows/`); no separate workflow is required.
   - **Testing:** Execute `pixi run test` with coverage reporting to ensure logic
     remains sound. `coverage.fail_under = 90` per spec §9.5.
-- **Action Linting:**
-  - Implement a dedicated workflow to lint GitHub Action files themselves using
-    `actionlint` and `zizmor` to find security vulnerabilities or deprecated
-    syntax.
 
 #### 2. Pre-commit Hook Configuration
 

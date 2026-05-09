@@ -1254,8 +1254,7 @@ cat-watcher/
 ├── .gitattributes
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                # ruff/typecheckers/pytest on Linux
-│       └── lint-actions.yml      # actionlint + zizmor
+│       └── ci.yml                # ruff/typecheckers/pytest + actionlint/zizmor on Linux
 ├── .gitignore
 ├── .markdownlint.jsonc
 ├── .markdownlintignore

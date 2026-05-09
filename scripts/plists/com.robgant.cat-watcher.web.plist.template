@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.robgant.cat-watcher.web</string>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>__REPO_DIR__/.pixi/envs/default/bin/cat-watcher-web</string>
+    </array>
+
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__INTERNAL_ROOT__/logs/web.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__INTERNAL_ROOT__/logs/web.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>CAT_WATCHER_CONFIG</key>
+      <string>__REPO_DIR__/config.toml</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+  </dict>
+</plist>

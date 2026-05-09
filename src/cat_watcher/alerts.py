@@ -57,6 +57,7 @@ from cat_watcher.db import (
     create_engine,
     get_session,
 )
+from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.notifier import EmailResult, NotifResult, send_email, send_macos_notification
 from cat_watcher.storage import ensure_storage_layout, storage_available
 
@@ -679,7 +680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = _parse_args(argv)
     config = load_config(args.config)
-    logging.basicConfig(level=config.log_level, format="%(levelname)s %(name)s: %(message)s")
+    setup_agent_logging(agent_name="alerts", config=config)
     # The internal root must exist (DB + logs); the storage_root may not (drive offline). We
     # don't call ensure_storage_layout here because that requires storage_root to be a directory;
     # the alerts agent specifically tolerates an unmounted drive.

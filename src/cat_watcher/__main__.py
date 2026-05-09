@@ -51,6 +51,10 @@ from cat_watcher.config import CameraConfig, load_config
 from cat_watcher.db import AgentStart, AlertSent, Camera, Clip, ClipFrame, Heartbeat, create_engine, get_session
 from cat_watcher.detector import Detector
 from cat_watcher.import_local import import_local
+from cat_watcher.logging_setup import setup_logging
+from cat_watcher.logs_viewer import LogsNamespace, configure_logs_parser
+from cat_watcher.logs_viewer import RunArgs as LogsRunArgs
+from cat_watcher.logs_viewer import run as run_logs
 from cat_watcher.notifier import send_email, send_macos_notification
 from cat_watcher.poller import DetectionFields, PollerLockedError, detection_for, write_per_frame_thumbs
 from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
@@ -105,19 +109,24 @@ _EXIT_UNREACHABLE = 4
 _EXIT_MISSING_DEPENDENCY = 5
 
 
-class _ParsedArgs(argparse.Namespace):
+class _ParsedArgs(LogsNamespace):
     """Typed view over the umbrella's argparse output. Each handler reads only the fields it sets.
 
     Defaults are documented as class attributes so a handler that reads a flag the user didn't pass
     sees a known sentinel instead of ``AttributeError``. argparse only sets attributes when the
     sub-parser actually defines the option, so multi-handler dispatch via this namespace would
     otherwise need defensive ``hasattr`` checks at every read site.
+
+    Inherits the ``logs`` sub-command fields (``agent``, ``follow``, ``since``, ``level``,
+    ``camera_filter``, ``grep``, ``json``) from :class:`cat_watcher.logs_viewer.LogsNamespace`.
     """
 
     command: str = ""
     config: Path | None = None
     verbose: bool = False
-    # import-local
+    # import-local + reanalyze. ``camera`` is required for ``import-local --camera``; the
+    # ``logs`` sub-command's ``--camera`` flag uses ``dest="camera_filter"`` (inherited from
+    # ``LogsNamespace``) to avoid collision with this typed-as-``str`` field.
     camera: str = ""
     no_detect: bool = False
     limit: int | None = None
@@ -170,6 +179,9 @@ def _build_parser() -> argparse.ArgumentParser:
     restore = subparsers.add_parser("restore-backup", parents=[common], help="Copy a dated backup over the live SQLite")
     _ = restore.add_argument("backup_date", help="Backup date (YYYY-MM-DD) matching backups/cat_watcher-<date>.sqlite")
 
+    logs = subparsers.add_parser("logs", parents=[common], help="Tail/filter structured JSONL logs from cat-watcher agents")
+    configure_logs_parser(logs)
+
     return parser
 
 
@@ -177,8 +189,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv, namespace=_ParsedArgs())
-    level = logging.INFO if args.verbose else logging.WARNING
-    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
+    config = load_config(args.config)
+    setup_logging(
+        agent_name="cli",
+        internal_root=config.internal_root,
+        level=logging.INFO if args.verbose else logging.WARNING,
+    )
+
+    if args.command == "logs":
+        return run_logs(LogsRunArgs.from_namespace(args), internal_root=config.internal_root)
 
     handlers = {
         "import-local": _run_import_local,

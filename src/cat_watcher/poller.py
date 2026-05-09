@@ -43,6 +43,7 @@ from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuth
 from cat_watcher.config import Config, load_config
 from cat_watcher.db import AgentStart, AlertType, Camera, Clip, ClipFrame, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import Detector, DetectorError
+from cat_watcher.logging_setup import setup_logging
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 
 if TYPE_CHECKING:
@@ -854,9 +855,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     (Task 26b in the plan) replaces this when it lands.
     """
     args = _parse_args(argv)
-    log_level = logging.INFO if args.verbose else logging.WARNING
-    logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
     config = load_config(args.config_path)
+    setup_logging(
+        agent_name="poller",
+        internal_root=config.internal_root,
+        level=logging.INFO if args.verbose else logging.WARNING,
+    )
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
 
     try:

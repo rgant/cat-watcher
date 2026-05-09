@@ -1,0 +1,170 @@
+# Pre-commit hooks for cat-watcher.
+#
+# Install with:
+#     pixi run pre-commit install
+#
+# Run against all files (e.g. before opening a PR):
+#     pixi run pre-commit run --all-files
+#
+# All Python tooling delegates to ``pixi run ...`` so the same versions pin both pre-commit and
+# CI. The ``forbid-binary-outside-fixtures`` hook keeps repo size bounded by only allowing media
+# blobs under tests/fixtures/.
+#
+# Hook order (top → bottom):
+#   1. Pre-flight cheap checks that cause a commit-time abort (file size, merge markers, broken
+#      yaml/toml). These are read-only and run first so a malformed working tree fails before any
+#      formatter touches it.
+#   2. Auto-fixers — every hook that can rewrite the working tree (whitespace, language formatters,
+#      ruff --fix). Running these together means a single re-stage gets the user back to a
+#      consistent state.
+#   3. Validators — read-only checkers (typecheckers, linters, security scanners). They see the
+#      post-formatter state, so they don't flag issues a later fixer would have resolved.
+
+default_install_hook_types: [pre-commit]
+fail_fast: false
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # --- 1. pre-flight checks (cheap, fail-early) ----------------------------------------------
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+
+      # --- 2a. auto-fixers (general whitespace) --------------------------------------------------
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      # --- 2b. auto-fixers (language-specific) ---------------------------------------------------
+      - id: pyproject-fmt
+        name: pyproject-fmt
+        entry: pixi run pyproject-fmt --no-print-diff
+        language: system
+        files: ^pyproject\.toml$
+
+      - id: dprint-fmt
+        name: dprint fmt (markdown/json/yaml/toml)
+        entry: dprint fmt
+        language: system
+        types_or: [markdown, json, yaml, toml]
+
+      - id: markdownlint
+        name: markdownlint --fix
+        entry: markdownlint --fix
+        language: system
+        types: [markdown]
+
+      - id: shfmt
+        name: shfmt --write
+        entry: shfmt --write
+        language: system
+        types: [shell]
+
+      - id: ruff-check
+        name: ruff check --fix
+        entry: pixi run ruff check --fix --silent
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: pixi run ruff format
+        language: system
+        types: [python]
+
+  # --- 3. validators (read-only checkers) ------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: ^\.secrets\.baseline$
+
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        pass_filenames: false
+
+      - id: zizmor
+        name: zizmor
+        entry: zizmor
+        language: system
+        args: [".github/workflows"]
+        pass_filenames: false
+        files: ^\.github/workflows/
+
+      - id: djlint-check
+        name: djlint --check (templates)
+        entry: pixi run djlint
+        args: ["--check"]
+        language: system
+        files: ^src/cat_watcher/web/templates/.*\.jinja$
+
+      - id: basedpyright
+        name: basedpyright
+        entry: pixi run basedpyright
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: mypy
+        name: mypy
+        entry: pixi run mypy
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: pylint
+        # Run on the whole tree (``pass_filenames: false``) so pylint resolves
+        # ``from cli_test_helpers import ...`` via the project's pythonpath setting. Per-file
+        # invocation breaks that import resolution and produces spurious E0401 errors.
+        name: pylint
+        entry: pixi run pylint .
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: deptry
+        # Project-wide check; runs once regardless of which files changed.
+        name: deptry
+        entry: pixi run deptry .
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: stylelint
+        name: stylelint
+        entry: npx --no-install stylelint
+        language: system
+        files: ^src/cat_watcher/web/static/.*\.css$
+
+      - id: eslint
+        name: eslint
+        entry: npx --no-install eslint
+        language: system
+        files: ^src/cat_watcher/web/static/.*\.js$
+
+      - id: forbid-binary-outside-fixtures
+        # Block accidental commits of media/model blobs anywhere except tests/fixtures/. The repo
+        # is text-only outside that one directory; binary blobs belong on the external storage
+        # drive, not in git. The entry script lives in scripts/ so YAML doesn't have to escape
+        # shell quoting.
+        name: forbid binary files outside tests/fixtures/
+        entry: bash scripts/forbid_binary_outside_fixtures.sh
+        language: system
+        files: '\.(mp4|dav|jpg|jpeg|png|pt|onnx|gif|webp|mov|mkv)$'

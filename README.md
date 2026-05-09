@@ -10,11 +10,12 @@ Prerequisites: [Homebrew](https://brew.sh/), [pixi](https://pixi.sh/), and
 version is pinned via `.nvmrc` (currently 24).
 
 ```bash
-brew bundle           # system tools: pixi, dprint, markdownlint, shellcheck, ffmpeg, ...
+brew bundle           # system tools: pixi, nvm, shfmt, ffmpeg, git
 pixi install          # Python + conda env (FastAPI, SQLAlchemy, ultralytics, ...)
 nvm install           # install the Node version pinned in .nvmrc (one-time)
 nvm use               # switch this shell to that Node version
 npm ci                # stylelint + stylelint-config-standard, exact versions from package-lock.json
+pixi run pre-commit install   # wire format/lint hooks into git (one-time per checkout)
 cp config.example.toml config.toml
 cp .env.example .env  # fill in real secrets
 mkdir data
@@ -46,6 +47,7 @@ pixi run cat-watcher status              # show service health
 pixi run cat-watcher test-cameras        # verify camera connectivity
 pixi run cat-watcher test-notification   # send a test alert
 pixi run cat-watcher-backup              # back up the database
+pixi run logs                            # tail structured JSONL logs from all agents
 pixi run markdownlint --fix .            # lint / auto-fix Markdown
 pixi tree                                # dependency tree
 ```
@@ -56,8 +58,8 @@ pixi tree                                # dependency tree
 `[web].host:[web].port` from `config.toml` (defaults: `0.0.0.0:8000`). After it
 prints `Application startup complete.`, open:
 
-- <http://localhost:8000/> — landing page (timeline view; renders an empty SVG
-  until Task 23 lands the real timeline UI).
+- <http://localhost:8000/> — landing page with the per-camera SVG timeline +
+  range presets.
 - <http://localhost:8000/clips> — clip list with camera / has-cat / date
   filters.
 - <http://localhost:8000/health> — JSON liveness probe; **no auth required**,
@@ -161,10 +163,10 @@ out of the box). Override with `--since <ISO-8601-timestamp>` for a wider or
 narrower window, or pass `--list-only` for a dry run that prints filenames
 without ingesting.
 
-`--no-detect` is required until `yolo11n.pt` has been downloaded — the
-`fetch-models` sub-command (Task 25) isn't built yet, so the detector cannot
-load. Clips ingested this way land with `analysis_error="skipped: --no-detect"`
-and are ready for a re-detection pass once the weights exist.
+`--no-detect` is required until `yolo11n.pt` has been downloaded into
+`<internal_root>/models/`. Run `pixi run cat-watcher fetch-models` once to pull
+the configured weights, then re-detect previously-skipped clips with
+`pixi run cat-watcher reanalyze`.
 
 The poller's PID lock cooperates with the LaunchAgent: if the agent fires
 mid-run the manual command exits 0 and the next agent tick picks up where it
@@ -186,3 +188,20 @@ Same `--no-detect` rationale as above. The source tree must match the camera's
 native SD-card layout (`<root>/<YYYY-MM-DD>/<NNN>/dav/<HH>/<HH>.<MM>.<SS>-...`);
 orphan files at the root are skipped with a WARNING. The snapshot directory is
 transient — delete it once the import reports `errors=0`.
+
+## Deploying to the Mac mini
+
+Production runs four LaunchAgents (`poller`, `alerts`, `web`, `backup`) under
+the operator's GUI session. The plist templates live under `scripts/plists/` and
+are rendered at install time from `config.toml`'s cadence values:
+
+```bash
+pixi run install-agents     # render templates, bootout any old versions, bootstrap each agent
+pixi run agents-status      # `launchctl list | grep cat-watcher` — quick health check
+pixi run uninstall-agents   # graceful bootout + remove plists from ~/Library/LaunchAgents
+```
+
+`install-agents` is idempotent — re-running after an edit to `config.toml` or a
+plist template cleanly picks up the new values. The agents log to
+`<internal_root>/logs/<agent>.jsonl` (structured JSONL, 10 MB rotation, 7
+backups); tail them live with `pixi run logs`.

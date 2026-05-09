@@ -89,7 +89,7 @@ def cfg(make_config: Callable[..., Config], tmp_path: Path) -> Config:
     return _channels_disabled(make_config(tmp_path, tmp_path))
 
 
-def _dispatch_env(cfg: Config, session: Session, *, now: datetime) -> DispatchEnv:
+def _dispatch_env(cfg: Config, session: Session, *, now: datetime) -> DispatchEnv:  # pylint: disable=redefined-outer-name
     """Build a ``DispatchEnv`` for tests that hand the dispatcher a live session."""
     return DispatchEnv(secrets=cfg.email, rules=cfg.alerts, session=session, now=now)
 

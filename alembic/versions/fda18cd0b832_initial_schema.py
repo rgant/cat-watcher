@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 # revision identifiers, used by Alembic.
-revision: str = "fda18cd0b832"
+revision: str = "fda18cd0b832"  # pragma: allowlist secret
 down_revision: str | Sequence[str] | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

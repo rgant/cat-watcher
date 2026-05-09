@@ -14,9 +14,9 @@ ${imports if imports else ""}
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-# revision identifiers, used by Alembic.
-revision: str = ${repr(up_revision)}
-down_revision: str | Sequence[str] | None = ${repr(down_revision)}
+# revision identifiers, used by Alembic; pragmas silence detect-secrets on the IDs.
+revision: str = ${repr(up_revision)}  # pragma: allowlist secret
+down_revision: str | Sequence[str] | None = ${repr(down_revision)}  # pragma: allowlist secret
 branch_labels: str | Sequence[str] | None = ${repr(branch_labels)}
 depends_on: str | Sequence[str] | None = ${repr(depends_on)}
 

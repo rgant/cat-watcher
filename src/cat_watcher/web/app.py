@@ -36,6 +36,7 @@ from starlette.routing import WebSocketRoute
 
 from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
+from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.web.auth import BasicAuthMiddleware
 from cat_watcher.web.routes import (
     alerts_router,
@@ -200,7 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = _parse_args(argv)
     config = load_config(args.config)
-    logging.basicConfig(level=config.log_level, format="%(levelname)s %(name)s: %(message)s")
+    setup_agent_logging(agent_name="web", config=config)
     if args.reload:
         uvicorn.run(
             "cat_watcher.web.app:reload_app",

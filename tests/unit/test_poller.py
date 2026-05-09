@@ -604,18 +604,11 @@ def test_parse_args_defaults_are_empty() -> None:
 def test_parse_iso_datetime_naive_treated_as_os_local() -> None:
     """Naive ISO 8601 input is interpreted as OS-local time and converted to UTC.
 
-    This is what ``_parse_iso_datetime`` documents — it relies on ``datetime.astimezone()`` treating
-    naive values as system-local. The test pins the system timezone via the ``TZ`` env var +
-    ``time.tzset()`` so the round-trip is deterministic regardless of the host's actual zone (the
-    alternative — OS-dependent expected values — would be flaky).
+    Pinning the system tz makes the round-trip deterministic regardless of the host's actual zone.
     """
-    import os
-    import time
+    from tz_helpers import pinned_tz
 
-    original_tz = os.environ.get("TZ")
-    os.environ["TZ"] = "America/New_York"  # EDT in May = UTC-04:00
-    time.tzset()
-    try:
+    with pinned_tz("America/New_York"):  # EDT in May = UTC-04:00
         # Naive: "May 4 midnight in New York" → "May 4 04:00 UTC"
         naive_result = _parse_iso_datetime("2026-05-04T00:00:00")
         assert naive_result == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)
@@ -625,12 +618,6 @@ def test_parse_iso_datetime_naive_treated_as_os_local() -> None:
         # Explicit non-UTC offset: converted.
         offset_result = _parse_iso_datetime("2026-05-04T00:00:00-04:00")
         assert offset_result == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)
-    finally:
-        if original_tz is None:
-            del os.environ["TZ"]
-        else:
-            os.environ["TZ"] = original_tz
-        time.tzset()
 
 
 # --- _limited ------------------------------------------------------------------------------------

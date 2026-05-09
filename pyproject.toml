@@ -35,8 +35,10 @@ dev = [
   "arel>=0.4.0,<0.5",
   "basedpyright>=1.39.3,<2",
   "deptry>=0.25.1,<0.26",
+  "detect-secrets>=1.5.0,<2",
   "djlint>=1.36.4,<2",
   "mypy>=1.20.2,<2",
+  "pre-commit>=4.6.0,<5",
   "pylint>=4.0.5,<5",
   "pylint-per-file-ignores>=3.2.1,<4",
   "pylint-pytest>=2.0.0a1",
@@ -51,12 +53,17 @@ dev = [
 
 [tool.pixi.dependencies]
 python = "3.14.*"
+actionlint = ">=1.7.12,<2"
+dprint = ">=0.50.0,<0.51"
 ffmpeg = ">=8.1.1,<9"
+markdownlint-cli = ">=0.48.0,<0.49"
 numpy = ">=2.4.3,<3"
 opencv = ">=4.13.0,<5"
 pytorch = ">=2.10.0,<3"
+shellcheck = ">=0.11.0,<0.12"
 torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
 ultralytics = ">=8.4.47,<9"
+zizmor = ">=1.24.1,<2"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
 [tool.pixi.pypi-dependencies]
@@ -153,24 +160,18 @@ cmd = """\
   npx --no-install stylelint "src/cat_watcher/web/static/**/*.css" || e=$?
   npx --no-install eslint "src/cat_watcher/web/static/**/*.js" || e=$?
   find scripts tests/fixtures -name "*.sh" -type f -exec shellcheck "{}" + || e=$?
-  # Uncomment when we have GitHub Actions
-  # actionlint || e=$?
-  # zizmor .github/workflows || e=$?
+  actionlint || e=$?
+  zizmor .github/workflows || e=$?
   exit $e' _ {{ paths }}\
   """
 args = [ { arg = "paths", default = "." } ]
 description = "Run all linters; pass a path to scope the Python linters"
-[tool.pixi.tasks.lint-actions]
-cmd = """\
-  bash -c 'e=0
-  actionlint || e=$?
-  zizmor .github/workflows || e=$?
-  exit $e'\
-  """
-description = "Lint GitHub Actions workflows (actionlint + zizmor)"
 [tool.pixi.tasks.lint-sh]
 cmd = "bash -c \"find scripts tests/fixtures -name '*.sh' -type f -exec shellcheck '{}' +\""
 description = "Lint shell scripts with shellcheck (across scripts/ and tests/fixtures/)"
+[tool.pixi.tasks.logs]
+cmd = "cat-watcher logs --follow"
+description = "Tail structured logs from all agents (live)"
 [tool.pixi.tasks.outdated]
 cmd = "pixi update --dry-run"
 description = "Show what would be updated"
@@ -508,7 +509,7 @@ enable = [ "c-extension-no-member", "useless-suppression" ]
 # Test files routinely access private members and use late imports for patching.
 # redefined-outer-name: pytest fixtures shadow module-scope definitions by design.
 per-file-ignores = [
-  "**/tests/**/*.py:protected-access,import-outside-toplevel,redefined-outer-name",
+  "**/tests/**/*.py:import-outside-toplevel,protected-access,too-many-lines",
 ]
 [tool.pylint.method_args]
 timeout-methods = [

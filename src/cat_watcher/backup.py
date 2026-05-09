@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, create_engine, get_session
+from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
 
 if TYPE_CHECKING:
@@ -119,10 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     args = _parse_args(argv)
     config = load_config(args.config)
-    # Backups run once a day under a LaunchAgent; ``%(asctime)s`` makes it possible to read
-    # ``backup.stderr.log`` after the fact and tell when a particular tick fired without
-    # cross-referencing launchd's calendar interval.
-    logging.basicConfig(level=config.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_agent_logging(agent_name="backup", config=config)
     logger.info("backup agent starting; storage_root=%s keep_count=%d", config.storage_root, config.backup.keep_count)
     try:
         wait_for_storage_using_config(config)
