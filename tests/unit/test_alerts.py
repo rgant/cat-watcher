@@ -38,6 +38,7 @@ from cat_watcher.alerts import (
     evaluate_frequency,
     evaluate_heartbeat_watchdog,
     evaluate_inactivity,
+    evaluate_inactivity_no_cats_global,
     evaluate_storage,
     evaluate_web_flapping,
     run_alerts_tick,
@@ -136,8 +137,14 @@ def test_inactivity_fires_when_no_clips_for_inactivity_window(db_engine: Engine,
     assert "no clips received" in cand.content.body
 
 
-def test_inactivity_fires_when_no_cats_for_inactivity_window(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """``last_cat_seen_at`` older than threshold + ``last_clip_at`` recent → ``no cats seen`` branch."""
+def test_inactivity_per_camera_ignores_stale_last_cat_seen_at(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+    """A stale ``last_cat_seen_at`` alone does NOT fire per-camera INACTIVITY.
+
+    The fleet-wide no-cats branch lives in :func:`evaluate_inactivity_no_cats_global`. The per-
+    camera evaluator only handles unreachable + no-clips; a camera with recent clips but stale
+    cat sightings must not fire its own per-camera INACTIVITY (otherwise a cat using only one box
+    today would alert on the other box).
+    """
     cam_id = seed_camera(
         db_engine,
         last_polled_at=_NOW - timedelta(minutes=2),
@@ -150,8 +157,7 @@ def test_inactivity_fires_when_no_cats_for_inactivity_window(db_engine: Engine, 
         assert cam is not None
         cand = evaluate_inactivity(cam, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
 
-    assert cand is not None
-    assert "no cats seen" in cand.content.body
+    assert cand is None
 
 
 def test_inactivity_does_not_fire_without_baseline(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
@@ -177,6 +183,118 @@ def test_inactivity_does_not_fire_within_threshold(db_engine: Engine, seed_camer
         assert cam is not None
         cand = evaluate_inactivity(cam, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
     assert cand is None
+
+
+def test_inactivity_global_no_cats_fires_when_max_last_cat_seen_at_stale(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+) -> None:
+    """Two cameras with both ``last_cat_seen_at`` older than the threshold → global candidate fires."""
+    _ = seed_camera(db_engine, name="pantry", display_name="Pantry", last_cat_seen_at=_NOW - timedelta(hours=14))
+    _ = seed_camera(
+        db_engine,
+        name="bathroom",
+        display_name="Bathroom",
+        host="cam2.example.com",
+        last_cat_seen_at=_NOW - timedelta(hours=13),
+    )
+
+    with get_session(db_engine) as session:
+        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is not None
+    assert cand.alert_type == AlertType.INACTIVITY
+    assert cand.camera_id is None
+    assert "no cats seen on any camera" in cand.content.body
+    # The renderer identifies the most-recent camera (Bathroom at -13h, more recent than Pantry at -14h).
+    assert "(Bathroom)" in cand.content.body
+
+
+def test_inactivity_global_no_cats_does_not_fire_when_one_camera_recent(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+) -> None:
+    """Any camera with a recent ``last_cat_seen_at`` keeps the fleet-wide branch silent."""
+    _ = seed_camera(db_engine, name="pantry", display_name="Pantry", last_cat_seen_at=_NOW - timedelta(hours=1))
+    _ = seed_camera(
+        db_engine,
+        name="bathroom",
+        display_name="Bathroom",
+        host="cam2.example.com",
+        last_cat_seen_at=_NOW - timedelta(hours=13),
+    )
+
+    with get_session(db_engine) as session:
+        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is None
+
+
+def test_inactivity_global_no_cats_does_not_fire_without_baseline(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+) -> None:
+    """No camera has ever seen a cat (fresh install before backfill) → no fire."""
+    _ = seed_camera(db_engine, name="pantry", display_name="Pantry")
+    _ = seed_camera(db_engine, name="bathroom", display_name="Bathroom", host="cam2.example.com")
+
+    with get_session(db_engine) as session:
+        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is None
+
+
+def test_inactivity_global_no_cats_single_camera_still_fires(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+) -> None:
+    """Single-camera deployments keep the same semantics: stale cat sightings fire the global branch."""
+    _ = seed_camera(db_engine, last_cat_seen_at=_NOW - timedelta(hours=13))
+
+    with get_session(db_engine) as session:
+        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is not None
+    assert cand.camera_id is None
+
+
+def test_inactivity_no_cats_does_not_fire_for_silent_camera_when_other_camera_active(
+    db_engine: Engine,
+    cfg: Config,
+    seed_camera: Callable[..., int],
+) -> None:
+    """Two cameras: cat used box A in the last hour but skipped box B today.
+
+    Cats don't use both litter boxes every day, so a stale ``last_cat_seen_at`` on the silent camera
+    must not fire INACTIVITY when the other camera saw a cat within the threshold. The
+    ``no cats seen`` check is fleet-wide, not per-camera.
+    """
+    active_cam = seed_camera(
+        db_engine,
+        name="pantry",
+        display_name="Pantry",
+        last_polled_at=_NOW - timedelta(minutes=2),
+        last_clip_at=_NOW - timedelta(hours=1),
+        last_cat_seen_at=_NOW - timedelta(hours=1),
+    )
+    silent_cam = seed_camera(
+        db_engine,
+        name="bathroom",
+        display_name="Bathroom",
+        host="cam2.example.com",
+        last_polled_at=_NOW - timedelta(minutes=2),
+        last_clip_at=_NOW - timedelta(hours=1),
+        last_cat_seen_at=_NOW - timedelta(hours=13),
+    )
+
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.INACTIVITY).all()
+    assert rows == [], (
+        f"INACTIVITY must not fire when any camera saw a cat within the threshold; "
+        f"got {[(r.camera_id, r.subject) for r in rows]} (active_cam={active_cam}, silent_cam={silent_cam})"
+    )
 
 
 # --- FREQUENCY -----------------------------------------------------------------------------------

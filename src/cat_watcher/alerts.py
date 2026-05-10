@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING
 from sqlalchemy import func, select
 
 from cat_watcher.alert_templates import (
-    INACTIVITY_BRANCH_NO_CATS,
     INACTIVITY_BRANCH_NO_CLIPS,
     AlertContent,
     inactivity_branch_unreachable,
@@ -42,6 +41,7 @@ from cat_watcher.alert_templates import (
     render_frequency,
     render_heartbeat_watchdog,
     render_inactivity,
+    render_inactivity_no_cats_global,
     render_storage_unavailable,
     render_web_flapping,
 )
@@ -236,18 +236,20 @@ def evaluate_inactivity(
     tz_name: str,
     now: datetime,
 ) -> AlertCandidate | None:
-    """Evaluate the ``INACTIVITY`` rule per spec §4.5.
+    """Evaluate the per-camera ``INACTIVITY`` branches per spec §4.5.
 
     Branch order (first match wins):
 
     1. ``poll_status != ok`` — fires immediately, no time threshold; cool-down still applies.
     2. ``last_clip_at`` set and older than ``inactivity_hours`` — camera producing nothing.
-    3. ``last_cat_seen_at`` set and older than ``inactivity_hours`` — camera works, no cats.
 
-    Returns ``None`` when no branch fires. If both ``last_cat_seen_at`` and ``last_clip_at`` are
-    NULL the rule does not fire (no baseline yet — covered by the first poll's 30-day backfill).
-    The ``poll_status_since`` value embeds in the unreachable branch label so the body distinguishes
-    *which* branch fired (operator looks at cat / camera / network accordingly).
+    The fleet-wide "no cats seen on any camera" branch lives in
+    :func:`evaluate_inactivity_no_cats_global` because cats don't necessarily use every litter box
+    every day; activity on either camera satisfies the watchdog.
+
+    Returns ``None`` when no branch fires. The ``poll_status_since`` value embeds in the unreachable
+    branch label so the body distinguishes *which* branch fired (operator looks at camera or
+    network accordingly).
     """
     threshold = timedelta(hours=inactivity_hours)
     branch: str | None = None
@@ -256,8 +258,6 @@ def evaluate_inactivity(
         branch = inactivity_branch_unreachable(since, tz_name)
     elif cam.last_clip_at is not None and (now - cam.last_clip_at) > threshold:
         branch = INACTIVITY_BRANCH_NO_CLIPS
-    elif cam.last_cat_seen_at is not None and (now - cam.last_cat_seen_at) > threshold:
-        branch = INACTIVITY_BRANCH_NO_CATS
 
     if branch is None:
         return None
@@ -274,6 +274,45 @@ def evaluate_inactivity(
         now=now,
     )
     return AlertCandidate(alert_type=AlertType.INACTIVITY, camera_id=cam.id, content=content)
+
+
+def evaluate_inactivity_no_cats_global(
+    session: Session,
+    *,
+    inactivity_hours: int,
+    public_url: str,
+    tz_name: str,
+    now: datetime,
+) -> AlertCandidate | None:
+    """Evaluate the fleet-wide ``no cats seen on any camera`` INACTIVITY branch per spec §4.5.
+
+    Reads the camera with the most-recent ``last_cat_seen_at`` (NULL values excluded) and fires once
+    with ``camera_id=None`` if that timestamp is older than ``inactivity_hours``. Returns ``None``
+    when no camera has ever seen a cat (fresh install before backfill) or when the fleet-wide most-
+    recent sighting is within the threshold.
+
+    The cool-down key is ``(NULL, INACTIVITY)``, distinct from per-camera INACTIVITY cool-downs, so
+    a fleet-wide no-cats alert and a per-camera unreachable alert can coexist on the same tick.
+    """
+    cam = session.scalar(
+        select(Camera)  # dprint-ignore
+        .where(Camera.last_cat_seen_at.is_not(None))
+        .order_by(Camera.last_cat_seen_at.desc())
+        .limit(1),
+    )
+    if cam is None or cam.last_cat_seen_at is None:
+        return None
+    if (now - cam.last_cat_seen_at) <= timedelta(hours=inactivity_hours):
+        return None
+    content = render_inactivity_no_cats_global(
+        last_cat_seen_at=cam.last_cat_seen_at,
+        last_cat_seen_camera_name=cam.display_name,
+        inactivity_hours=inactivity_hours,
+        public_url=public_url,
+        tz_name=tz_name,
+        now=now,
+    )
+    return AlertCandidate(alert_type=AlertType.INACTIVITY, camera_id=None, content=content)
 
 
 def evaluate_frequency(  # noqa: PLR0913  # rule reads camera clips against 4 thresholds, formats output with tz + clock
@@ -636,6 +675,15 @@ def run_alerts_tick(*, config: Config, engine: Engine, now: datetime) -> None:
     with get_session(engine) as session:
         for cam in session.scalars(select(Camera)).all():
             pre_storage.extend(_camera_candidates(session, cam, config=config, now=now))
+        global_no_cats = evaluate_inactivity_no_cats_global(
+            session,
+            inactivity_hours=config.alerts.inactivity_hours,
+            public_url=config.web.public_url,
+            tz_name=config.web.display_timezone,
+            now=now,
+        )
+        if global_no_cats is not None:
+            pre_storage.append(global_no_cats)
         pre_storage.extend(_watchdog_candidates(session, config=config, now=now))
     _dispatch_each(pre_storage, config=config, engine=engine, now=now)
 

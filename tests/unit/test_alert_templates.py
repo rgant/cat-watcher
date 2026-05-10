@@ -21,6 +21,7 @@ from cat_watcher.alert_templates import (
     render_frequency,
     render_heartbeat_watchdog,
     render_inactivity,
+    render_inactivity_no_cats_global,
     render_storage_unavailable,
     render_web_flapping,
 )
@@ -100,6 +101,29 @@ def test_inactivity_unreachable_branch_includes_since_timestamp() -> None:
     assert "Last clip:      never\n" in content.body
     assert "Last cat seen:  never\n" in content.body
     assert "Poll status:    unreachable\n" in content.body
+
+
+def test_inactivity_no_cats_global_renders_full_body() -> None:
+    """Fleet-wide no-cats branch identifies the most-recent camera and the threshold."""
+    last_cat = datetime(2026, 5, 1, 1, 24, 0, tzinfo=UTC)  # 21:24:00 (prev day) EDT — 12h 18m ago
+
+    content = render_inactivity_no_cats_global(
+        last_cat_seen_at=last_cat,
+        last_cat_seen_camera_name="Pantry Litter Box Camera",
+        inactivity_hours=12,
+        public_url=_PUBLIC_URL,
+        tz_name=_TZ_NY,
+        now=_NOW,
+    )
+
+    assert content.subject == "[cat-watcher] INACTIVITY: no cats seen on any camera"
+    assert content.body == (
+        "Branch:         no cats seen on any camera\n"
+        "Last cat seen:  2026-04-30 21:24:00 EDT (-04:00) — 12h 18m ago (Pantry Litter Box Camera)\n"
+        "Threshold:      12h\n"
+        f"Web UI:         {_PUBLIC_URL}\n"
+    )
+    assert content.macos_summary == "no cats seen on any camera in 12h 18m"
 
 
 def test_frequency_renders_count_and_window_in_subject() -> None:
@@ -266,6 +290,14 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
             tz_name=_TZ_NY,
             now=_NOW,
         ),
+        render_inactivity_no_cats_global(
+            last_cat_seen_at=_NOW - timedelta(hours=14, minutes=18),
+            last_cat_seen_camera_name="C" * 200,
+            inactivity_hours=12,
+            public_url=_PUBLIC_URL,
+            tz_name=_TZ_NY,
+            now=_NOW,
+        ),
         render_frequency(
             camera_display_name="B" * 200,
             count=99,
@@ -317,6 +349,7 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
     ],
     ids=[
         "inactivity",
+        "inactivity_no_cats_global",
         "frequency",
         "heartbeat",
         "web_flapping",

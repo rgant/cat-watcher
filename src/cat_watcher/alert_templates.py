@@ -133,6 +133,33 @@ def render_inactivity(  # noqa: PLR0913  # spec §4.14 INACTIVITY body has 9 dis
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
+def render_inactivity_no_cats_global(  # noqa: PLR0913  # spec §4.14 INACTIVITY (no-cats global) body has 4 distinct fields plus tz + clock
+    *,
+    last_cat_seen_at: datetime,
+    last_cat_seen_camera_name: str,
+    inactivity_hours: int,
+    public_url: str,
+    tz_name: str,
+    now: datetime,
+) -> AlertContent:
+    """Render the fleet-wide ``no cats seen on any camera`` INACTIVITY alert per spec §4.14.
+
+    Distinct from :func:`render_inactivity` because the per-camera fields (``Last poll``,
+    ``Last clip``, ``Poll status``) don't apply to a fleet-wide check. The ``last_cat_seen_at`` line
+    identifies which camera was the most recent to see a cat, so the operator knows where to start
+    looking when activity resumes.
+    """
+    subject = "[cat-watcher] INACTIVITY: no cats seen on any camera"
+    body = (
+        "Branch:         no cats seen on any camera\n"
+        f"Last cat seen:  {_fmt_with_relative(last_cat_seen_at, tz_name, now)} ({last_cat_seen_camera_name})\n"
+        f"Threshold:      {inactivity_hours}h\n"
+        f"Web UI:         {public_url}\n"
+    )
+    summary = _capped_summary(f"no cats seen on any camera in {_ago(last_cat_seen_at, now).removesuffix(' ago')}")
+    return AlertContent(subject=subject, body=body, macos_summary=summary)
+
+
 def render_frequency(  # noqa: PLR0913  # spec §4.14 FREQUENCY body has 8 distinct fields
     *,
     camera_display_name: str,

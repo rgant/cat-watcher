@@ -1296,20 +1296,31 @@ no config schema churn.
   so it must run even when the external drive is offline (so it can fire
   `STORAGE_UNAVAILABLE`). Each tick performs its own one-shot probe of
   `storage_root` instead.
-- **Per-camera rules:**
-  - **`INACTIVITY`** — fires if any branch is true:
-    - `last_cat_seen_at` not NULL and
-      `now - last_cat_seen_at > inactivity_hours` (default 12h). Note
-      `last_cat_seen_at` updates from the `COALESCE(manual_has_cat, has_cat)`
-      projection so manual labels feed back in.
-    - `last_clip_at` not NULL and `now - last_clip_at > inactivity_hours`
-      (camera producing nothing — silent-SD-failure case).
-    - `poll_status != 'ok'` — fires immediately, no time threshold; cool-down
-      still applies.
-    - The alert body distinguishes which branch fired (no cats / no clips /
-      camera unreachable since `poll_status_since`).
-    - If both `last_cat_seen_at` and `last_clip_at` are NULL the rule does not
-      fire (no baseline yet — backfill on first poll covers this).
+- **`INACTIVITY` — per-camera branches** (one candidate per camera, fires with
+  the camera's `id`; rule does not fire if `last_clip_at` is NULL on that camera
+  and the per-camera condition would otherwise apply — no baseline yet, backfill
+  on first poll covers this):
+  - `last_clip_at` not NULL and `now - last_clip_at > inactivity_hours` (default
+    12h; camera producing nothing — silent-SD-failure case).
+  - `poll_status != 'ok'` — fires immediately, no time threshold; cool-down
+    still applies.
+  - The alert body distinguishes which branch fired (no clips / camera
+    unreachable since `poll_status_since`).
+- **`INACTIVITY` — fleet-wide no-cats branch** (one candidate per tick, fires
+  with `camera_id=NULL`):
+  - `MAX(cameras.last_cat_seen_at) IS NOT NULL AND
+    now - MAX(cameras.last_cat_seen_at) > inactivity_hours`
+    (default 12h). `last_cat_seen_at` updates from the
+    `COALESCE(manual_has_cat, has_cat)` projection so manual labels feed back
+    in. Fleet-wide because cats don't necessarily use every litter box every
+    day; activity on either camera satisfies the watchdog.
+  - The alert body identifies which camera was the most recent to see a cat (so
+    the operator knows where to start looking when activity resumes).
+  - Cool-down key is `(NULL, INACTIVITY)`, distinct from per-camera INACTIVITY
+    cool-downs.
+  - Does not fire when `MAX(last_cat_seen_at) IS NULL` (no camera has ever seen
+    a cat — fresh install before backfill).
+- **Per-camera rules (continued):**
   - **`FREQUENCY`** — fires when
     `count(clips where camera_id=cam AND COALESCE(manual_has_cat, has_cat)=true
     AND start_ts > now - frequency_window_hours) >= frequency_threshold_count`
@@ -1356,6 +1367,11 @@ no config schema churn.
   states to confirm trigger and non-trigger thresholds.
 - **`poll_status != ok` immediate-fire:** verify `INACTIVITY` fires on the same
   tick the camera goes unreachable, no time threshold required.
+- **Fleet-wide no-cats branch:** verify the global `INACTIVITY` branch fires
+  with `camera_id=NULL` when `MAX(last_cat_seen_at)` across all cameras exceeds
+  `inactivity_hours`; verify it suppresses when any single camera has a recent
+  `last_cat_seen_at`; verify it does not fire when every camera's
+  `last_cat_seen_at` is NULL (no baseline).
 - **Configurable thresholds:** override `[alerts].poller_stuck_minutes = 1` and
   verify `POLLER_STUCK` fires after a 90-second-stale heartbeat (and not
   before).

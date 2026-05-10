@@ -210,12 +210,13 @@ git clone <repo-url> ~/Apps/cat-watcher    # any path; commands below assume thi
 cd ~/Apps/cat-watcher
 brew bundle                                # system tools (pixi, nvm, ffmpeg, ...)
 pixi install                               # Python + conda env
-nvm install && nvm use && npm ci           # JS lint sidecar (one-time per checkout)
 
 cp .env.example .env                       # fill in the secrets
 chmod 600 .env                             # operator-owned only
 cp config.example.toml config.toml         # set internal_root, storage_root, cameras
 
+mkdir data                                 # whatever you set internal_root to in config.toml
+mkdir /Volumes/Data/cat-watcher            # whatever you set storage_root to in config.toml
 pixi run db-upgrade                        # create / migrate cat_watcher.sqlite
 pixi run cat-watcher fetch-models          # pull yolo11n.pt into <internal_root>/models/
 pixi run install-agents                    # render plists, bootstrap into launchd

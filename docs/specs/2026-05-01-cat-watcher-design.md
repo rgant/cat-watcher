@@ -26,8 +26,8 @@ MacBook.
 3. Web UI to browse and play recent clips, filterable by camera, date, and "has
    cat / no cat detected".
 4. Two alert types delivered by email and macOS notification:
-   - **Inactivity** — no cat-positive activity in the last 12 hours, or poller
-     cannot reach a camera, or camera is recording nothing.
+   - **Inactivity** — no cat-positive activity on **any** camera in the last 12
+     hours, or poller cannot reach a camera, or a camera is recording nothing.
    - **High frequency** — at least N cat-positive clips on a camera within a
      6-hour rolling window (default N=8, configurable).
 5. 30-day rolling retention matching the cameras' own retention.
@@ -264,24 +264,35 @@ DB-recorded alert instead of via a marker file.
 
 On each tick, evaluates per camera:
 
-**Inactivity rule** — fires if any of:
+**Inactivity rule** — two per-camera branches plus one fleet-wide branch.
 
-- `cameras.last_cat_seen_at IS NOT NULL AND now - cameras.last_cat_seen_at > 12h`
-  (cameras working, no cats seen for 12h+; `last_cat_seen_at` is updated
-  whenever a clip with `COALESCE(manual_has_cat, has_cat)=true` is observed, so
-  manual labels feed back into the watchdog)
-- `cameras.last_clip_at IS NOT NULL AND now - cameras.last_clip_at > 12h`
-  (cameras producing nothing — likely the silent-SD-failure case)
-- `cameras.poll_status != 'ok'` (poller cannot reach camera — **fires
+Per-camera branches (evaluated for every camera, fire with the camera's `id`):
+
+- `cameras.last_clip_at IS NOT NULL AND now - cameras.last_clip_at > 12h` (this
+  camera is producing nothing — likely the silent-SD-failure case)
+- `cameras.poll_status != 'ok'` (poller cannot reach this camera — **fires
   immediately**, no time threshold; cool-down still applies so a sustained
   outage emails every 6h, not on every 15-min tick)
 
-If `last_cat_seen_at` or `last_clip_at` is NULL the corresponding branch does
-not fire — there is no baseline. The first successful poll backfills the
-trailing 30 days of camera SD recordings and populates both columns; the NULL
-state is therefore confined to the brief window between install and first poll.
-A never-had-data anomaly past that window is caught by direct inspection of the
-web UI at install time, not by an automated alert.
+Fleet-wide branch (evaluated once per tick, fires with `camera_id=NULL`):
+
+- `MAX(cameras.last_cat_seen_at) IS NOT NULL AND
+  now - MAX(cameras.last_cat_seen_at) > 12h`
+  (no cats seen on **any** camera for 12h+; `last_cat_seen_at` is updated
+  whenever a clip with `COALESCE(manual_has_cat, has_cat)=true` is observed, so
+  manual labels feed back into the watchdog). This branch is fleet-wide because
+  cats don't necessarily use every litter box every day; activity on either
+  camera satisfies the watchdog. The cool-down key is `(NULL, INACTIVITY)`,
+  distinct from per-camera INACTIVITY cool-downs.
+
+If `last_clip_at` is NULL on a camera the no-clips branch does not fire for that
+camera. If `MAX(last_cat_seen_at) IS NULL` (no camera has ever seen a cat) the
+fleet-wide no-cats branch does not fire — there is no baseline. The first
+successful poll on each camera backfills the trailing 30 days of SD recordings
+and populates both columns; the NULL state is therefore confined to the brief
+window between install and first poll. A never-had-data anomaly past that window
+is caught by direct inspection of the web UI at install time, not by an
+automated alert.
 
 Restart-after-outage requires no special handling: the first poll after a gap
 backfills whatever the SD card recorded during the downtime, and the rule judges
@@ -653,7 +664,7 @@ timestamps render in `web.display_timezone` (default `America/New_York`) with
 the UTC offset noted parenthetically; relative times ("14m ago") are computed at
 render time.
 
-#### INACTIVITY
+#### INACTIVITY (per-camera branches)
 
 ```text
 Subject: [cat-watcher] INACTIVITY: Pantry Litter Box Camera
@@ -666,10 +677,25 @@ Poll status:    ok
 Web UI:         {web.public_url}
 ```
 
-The "Branch" line names which inactivity sub-condition tripped: `no cats
-seen`,
-`no clips received`, or `camera unreachable since {timestamp}` (using
+The "Branch" line names which per-camera inactivity sub-condition tripped:
+`no clips received` or `camera unreachable since {timestamp}` (using
 `poll_status_since` for the unreachable-since timestamp).
+
+#### INACTIVITY (fleet-wide no-cats branch)
+
+```text
+Subject: [cat-watcher] INACTIVITY: no cats seen on any camera
+
+Branch:         no cats seen on any camera
+Last cat seen:  2026-04-30 21:33:08 EDT (-04:00) — 14h 18m ago (Pantry Litter Box Camera)
+Threshold:      12h
+Web UI:         {web.public_url}
+```
+
+The fleet-wide branch fires once with `camera_id=NULL` when no camera has
+recorded a cat-positive clip within the threshold. The "Last cat seen" line
+identifies which camera was the most recent to see one (so the operator knows
+where to start looking when activity resumes).
 
 #### FREQUENCY
 
@@ -775,8 +801,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  start([alerts tick]) --> per_camera["For each camera:<br/>• inactivity check (3 branches; see §4.5)<br/>• frequency check (≥8 cat-clips in 6h window)"]
-  per_camera --> watchdog["Watchdog checks:<br/>• poller heartbeat stale &gt; 15 min → POLLER_STUCK<br/>• web heartbeat stale &gt; 5 min → WEB_DOWN<br/>• agent_starts rows ≥ 5/30min for web → WEB_FLAPPING"]
+  start([alerts tick]) --> per_camera["For each camera:<br/>• inactivity per-camera branches (no clips, unreachable; see §4.5)<br/>• frequency check (≥8 cat-clips in 6h window)"]
+  per_camera --> fleet_inactivity["Fleet-wide:<br/>• MAX(last_cat_seen_at) older than 12h → INACTIVITY (no cats on any camera)"]
+  fleet_inactivity --> watchdog["Watchdog checks:<br/>• poller heartbeat stale &gt; 15 min → POLLER_STUCK<br/>• web heartbeat stale &gt; 5 min → WEB_DOWN<br/>• agent_starts rows ≥ 5/30min for web → WEB_FLAPPING"]
   watchdog --> storage["Storage checks (every tick):<br/>• write probe to storage_root fails → STORAGE_UNAVAILABLE<br/>• shutil.disk_usage().free/total &lt; 0.10 → DISK_LOW (skip if storage offline)<br/>• newest backups/*.sqlite mtime older than 36h → BACKUP_STALE (skip if STORAGE_UNAVAILABLE in cool-down)"]
   storage --> per_alert{For each<br/>candidate alert}
   per_alert -->|cool-down active| skip[skip]
