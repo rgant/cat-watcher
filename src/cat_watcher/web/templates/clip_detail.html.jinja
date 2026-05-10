@@ -2,6 +2,9 @@
 {% block title %}
   Clip {{ clip.id }} · Cat Watcher
 {% endblock title %}
+{% block body_attrs %}
+  data-no-auto-refresh
+{% endblock body_attrs %}
 {% block content %}
   <nav class="clip-nav" aria-label="Clip navigation">
     {% if prev_clip_id %}
