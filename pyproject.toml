@@ -98,7 +98,7 @@ description = "Apply pending alembic migrations to head"
 [tool.pixi.tasks.deploy-update]
 cmd = """\
   git pull && pixi install && pixi run alembic upgrade head && pixi run install-agents && pixi run agents-status && \
-  curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health\
+  curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health -w '\n'\
   """
 description = "Pull, install, migrate, reload all agents (re-renders plists), and verify web /health."
 [tool.pixi.tasks.dev]
