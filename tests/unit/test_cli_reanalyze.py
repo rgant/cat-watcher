@@ -1,10 +1,9 @@
-"""Tests for ``cat-watcher reanalyze`` (Task 25).
+"""Tests for ``cat-watcher reanalyze``.
 
 Reanalyze re-scores clips whose detection failed (default filter ``analysis_error IS NOT NULL``) or
 every clip (``--all``). Each test patches the detector + the ``detection_for`` helper so the
 CPU-heavy YOLO path is never touched; what's exercised here is the row-update logic, the filter
-rules, the ``--limit`` / ``--camera`` flags, and the preserve-``manual_has_cat`` invariant. Lives
-in its own module to keep ``test_cli.py`` under pylint's ``too-many-lines`` cap.
+rules, the ``--limit`` / ``--camera`` flags, and the preserve-``manual_has_cat`` invariant.
 """
 
 from collections.abc import Callable  # noqa: TC003  # runtime: pytest evaluates fixture annotations during collection
@@ -73,8 +72,8 @@ def _set_weights_present(config: Config) -> None:
     """Drop a non-empty file at ``<internal_root>/models/<detector.model>``.
 
     The reanalyze handler refuses to start if the weights file is absent. Several tests don't care
-    about the actual model — they patch ``Detector.from_weights`` and ``detection_for`` —
-    but the existence-check still has to pass first.
+    about the actual model — they patch ``Detector.from_weights`` and ``detection_for`` — but the
+    existence-check still has to pass first.
     """
     models_dir = config.internal_root / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -233,9 +232,7 @@ def test_reanalyze_skips_missing_files_with_warning(tmp_path: Path, make_config:
     ):
         exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     assert exit_code == 0
-    # Present clip was rescored.
     assert read_clip(config, present_id).analysis_error is None
-    # Missing clip retained its skip marker.
     assert read_clip(config, missing_id).analysis_error == "skipped: --no-detect"
 
 
@@ -264,7 +261,6 @@ def test_reanalyze_limit_caps_count_in_start_ts_order(tmp_path: Path, make_confi
         patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(), ())),
     ):
         _ = _run_reanalyze(make_handler_args(camera="", limit=2, all=False))
-    # Earliest two get cleared; the latest still carries its skip marker.
     assert read_clip(config, clip_ids[0]).analysis_error is None
     assert read_clip(config, clip_ids[1]).analysis_error is None
     assert read_clip(config, clip_ids[2]).analysis_error == "skipped: --no-detect"
@@ -288,7 +284,7 @@ def test_reanalyze_camera_filter_restricts_scope(tmp_path: Path, make_config: Ca
     ):
         _ = _run_reanalyze(make_handler_args(camera="pantry", limit=None, all=False))
     assert read_clip(config, pantry_clip).analysis_error is None
-    assert read_clip(config, bath_clip).analysis_error == "skipped: --no-detect"  # untouched
+    assert read_clip(config, bath_clip).analysis_error == "skipped: --no-detect"
 
 
 def test_reanalyze_emits_one_summary_line_per_camera(
@@ -296,12 +292,7 @@ def test_reanalyze_emits_one_summary_line_per_camera(
     make_config: Callable[..., Config],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Two cameras with qualifying clips produce two ``reanalyze [<display_name>]:`` lines.
-
-    Pins the per-camera output contract: a regression that reverts to a single rolled-up summary
-    line would silently break the operator-facing breakdown that distinguishes "which camera had
-    errors" from total counts.
-    """
+    """Two cameras with qualifying clips produce two ``reanalyze [<display_name>]:`` lines."""
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
     _set_weights_present(config)
@@ -328,8 +319,7 @@ def test_reanalyze_returns_one_when_any_clip_errors(
 ) -> None:
     """A detection error during the run flips exit code to 1 and lands in the ``errored`` bucket only.
 
-    Pins both the disjoint-counter contract (errored does NOT also bump rescored) and the failure-
-    branch exit code that was previously dead from a test standpoint.
+    Disjoint-counter contract: errored does NOT also bump rescored.
     """
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
@@ -359,7 +349,7 @@ def test_reanalyze_no_qualifying_clips_prints_message_and_exits_zero(
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
     _set_weights_present(config)
-    _ = seed_camera(config)  # no clips seeded
+    _ = seed_camera(config)
 
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
@@ -379,9 +369,9 @@ def _build_scored_frames(scores: tuple[float, ...]) -> tuple[ScoredFrame, ...]:
 def test_reanalyze_all_backfills_clip_frames(tmp_path: Path, make_config: Callable[..., Config]) -> None:
     """``--all`` over a clip with no per-frame thumbs encodes them, replaces the row, repoints thumb_path.
 
-    Pins the backfill contract: pre-existing clips ingested before the per-frame work get a fresh
-    set of ``clip_frames`` rows + a per-frame ``thumb_path``, and the legacy single-file thumb is
-    cleaned up so ``thumbs/`` doesn't accumulate orphans.
+    Clips ingested without per-frame thumbs get a fresh set of ``clip_frames`` rows + a per-frame
+    ``thumb_path``, and the legacy single-file thumb is cleaned up so ``thumbs/`` doesn't accumulate
+    orphans.
     """
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)

@@ -1,14 +1,9 @@
 """JPEG encoding and per-frame storage-path helpers for detector-sampled clip frames.
 
-The detector produces one ndarray per sampled frame plus a YOLO max-cat score; this module
-turns each ndarray into a downsized JPEG thumbnail on disk and emits parallel
-:class:`FrameRecord` entries that the caller persists as ``ClipFrame`` rows. ``Clip.thumb_path``
-is then set to whichever frame wins :func:`best_frame_relpath`.
-
-The ``from PIL import Image`` import is intentionally module-level: both :func:`encode_frame`
-and :func:`write_clip_frames` need it, and Pillow has no heavy-payload concern (unlike
-``ultralytics`` in :mod:`cat_watcher.detector`, which is lazily imported to keep torch off
-agents that don't run inference).
+The detector produces one ndarray per sampled frame plus a YOLO max-cat score; this module turns
+each ndarray into a downsized JPEG thumbnail on disk and emits parallel :class:`FrameRecord` entries
+that the caller persists as ``ClipFrame`` rows. ``Clip.thumb_path`` is then set to whichever frame
+wins :func:`best_frame_relpath`.
 """
 
 import os
@@ -63,14 +58,11 @@ def encode_frame(
 ) -> None:
     """Encode an RGB24 ndarray to a JPEG at ``dest``, fsynced before return.
 
-    Resizes so the long edge equals ``max_width`` (preserving aspect ratio); never upscales.
-    The fsync mirrors :func:`cat_watcher.poller.extract_thumbnail` so a later DB row pointing
-    at this file never references partial bytes after a crash. Caller must have created
-    ``dest.parent``.
+    Resizes so the long edge equals ``max_width``, preserving aspect ratio; never upscales. The
+    fsync ensures a later DB row pointing here never references partial bytes after a crash.
+    Caller must have created ``dest.parent``.
     """
     img = Image.fromarray(frame, mode="RGB")
-    # ``Image.thumbnail`` is in-place, preserves aspect ratio, and is a no-op when the source
-    # is already smaller than the box — exactly the contract we want.
     img.thumbnail((max_width, max_width))
     img.save(str(dest), format="JPEG", quality=quality, optimize=False)
     fd = os.open(dest, os.O_RDONLY)
@@ -121,5 +113,5 @@ def _scored_frame_ordinal(scored: ScoredFrame) -> int:
 
 
 def _score_then_neg_ordinal(record: FrameRecord) -> tuple[float, int]:
-    # Higher score wins; on ties, the negation flips ``max`` into preferring the smaller ordinal.
+    # On ties, the negation flips ``max`` into preferring the smaller ordinal.
     return (record.score, -record.ordinal)

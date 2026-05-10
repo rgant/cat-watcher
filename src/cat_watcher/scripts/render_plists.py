@@ -41,7 +41,6 @@ _AGENT_NAMES: tuple[str, ...] = ("poller", "alerts", "web", "backup")
 
 def _repo_dir() -> Path:
     """Repo root, derived from this file's path so the helper works from any CWD."""
-    # src/cat_watcher/scripts/render_plists.py -> repo root is parents[3].
     return Path(__file__).resolve().parents[3]
 
 
@@ -65,9 +64,8 @@ def _substitutions_for(agent: str, *, config: Config, repo_dir: Path) -> dict[st
     raise ValueError(msg)
 
 
-# Catches the ``__FOO__`` shape used by every placeholder in this module. Re-evaluating the rendered
-# output against this regex catches typo'd substitution keys before launchctl tries to load a
-# half-rendered plist.
+# Re-evaluating the rendered output against this regex catches typo'd substitution keys before
+# launchctl tries to load a half-rendered plist.
 _PLACEHOLDER_RE = re.compile(r"__[A-Z][A-Z0-9_]*__")
 
 
@@ -86,7 +84,7 @@ def _render_one(agent: str, *, template_dir: Path, output_dir: Path, subs: dict[
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Argparse + driver for the ``python -m cat_watcher.scripts.render_plists`` entry point."""
+    """Render plist templates for every configured agent into ``--output``; non-zero exit on missing config or unrendered placeholder."""
     parser = argparse.ArgumentParser(
         prog="python -m cat_watcher.scripts.render_plists",
         description="Render cat-watcher LaunchAgent plist templates from config.toml.",
@@ -113,7 +111,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     # Ensure the LaunchAgent log directory exists so launchctl's StandardOut/Err redirects succeed
-    # on first start; matches the contract of ``ensure_storage_layout`` for other dirs.
+    # on first start.
     (config.internal_root / "logs").mkdir(parents=True, exist_ok=True)
 
     for agent in _AGENT_NAMES:

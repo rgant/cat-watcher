@@ -85,13 +85,7 @@ def _fmt_with_relative_or_never(dt: datetime | None, tz_name: str, now: datetime
 
 
 def _capped_summary(text: str) -> str:
-    """Truncate ``text`` to :data:`_MACOS_SUMMARY_MAX` chars (with an ellipsis if it overflows).
-
-    The spec mandates a 120-char ceiling on the macOS notification message; long camera display
-    names or long ``storage_root`` paths could blow past it without an explicit cap. The truncation
-    is intentionally conservative (uses ``…`` to make the cut visible) rather than silently
-    dropping the tail.
-    """
+    """Truncate ``text`` to :data:`_MACOS_SUMMARY_MAX` chars; appends ``…`` when it overflows."""
     if len(text) <= _MACOS_SUMMARY_MAX:
         return text
     return text[: _MACOS_SUMMARY_MAX - 1] + "…"

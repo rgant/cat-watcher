@@ -1,10 +1,5 @@
-// Hover preview, keyboard preview, and HTMX error toast for the timeline page.
-//
-// The tooltip itself is styled in style.css (.timeline-tooltip); this module just toggles its
-// display, sets its left/top, and chooses its text. Keyboard users reach the same tooltip via
-// focusin/focusout events. HTMX errors surface as a small dismissible toast above the timeline
-// region. All listeners are bound on document.body via event delegation so they survive the
-// outerHTML swap that range-preset clicks perform on #timeline-region.
+// Listeners are bound on document.body via event delegation so they survive the outerHTML swap that
+// range-preset clicks perform on #timeline-region.
 (function () {
   'use strict';
 
@@ -43,8 +38,7 @@
     tooltip.style.display = 'none';
   }
 
-  // Mouse handlers — delegated on document.body so they survive HTMX swaps. Gated on hover-capable
-  // pointers so touch devices don't get stuck-tooltip behavior.
+  // Gated on hover-capable pointers so touch devices don't get stuck-tooltip behavior.
   if (window.matchMedia('(hover: hover)').matches) {
     document.body.addEventListener('mouseover', function (ev) {
       const target = ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket');
@@ -71,8 +65,6 @@
     });
   }
 
-  // Keyboard handlers — fire on every device. Position the tooltip at the focused element's
-  // bounding rect rather than the cursor. Delegated like the mouse handlers.
   document.body.addEventListener('focusin', function (ev) {
     const target = ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket');
     if (target !== null) {
@@ -87,8 +79,7 @@
     }
   });
 
-  // HTMX error toast — htmx:responseError and htmx:sendError bubble, so we can listen on body.
-  // The toast is appended to whichever #timeline-region is currently in the DOM at error time.
+  // Append to whichever #timeline-region is in the DOM at error time (HTMX swaps replace it).
   function showErrorToast() {
     const region = document.getElementById('timeline-region');
     if (region === null) {

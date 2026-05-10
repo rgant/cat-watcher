@@ -11,19 +11,15 @@ Sub-commands:
   beyond 5 minutes prints a loud failure marker but the loop completes for the rest.
 * ``test-notification`` — trigger ``send_email`` + ``send_macos_notification`` so the macOS
   permission prompt fires at install time, not on the first real alert.
-* ``fetch-models`` — pull configured detector weights into ``<internal_root>/models/``. Idempotent;
-  re-running with the file present is a no-op.
+* ``fetch-models`` — pull configured detector weights into ``<internal_root>/models/``. Idempotent
+  on filename: a no-op if the target file already exists. To refresh, point ``detector.model`` at a
+  new filename or delete the existing file — there's no in-place update or checksum verification.
 * ``reanalyze [--camera N] [--limit N] [--all]`` — re-score clips whose detection failed (default
   filter: ``analysis_error IS NOT NULL``) or every clip (``--all``, e.g. after a model upgrade).
   Preserves ``manual_has_cat`` exactly.
 * ``backup`` — proxy to :func:`cat_watcher.backup.run_backup` (same code path the LaunchAgent uses).
 * ``restore-backup <date>`` — copy a dated backup file onto ``<internal_root>/cat_watcher.sqlite``.
   Refuses while any cat-watcher LaunchAgent is loaded; operator must ``launchctl bootout`` first.
-
-Logging: ``main()`` uses :func:`logging.basicConfig` for now. Task 26b will retrofit
-``setup_logging`` (structured JSON to ``logs/cli.jsonl`` + WARNING-on-stderr fallback) without
-changing handler signatures. ``--verbose`` / ``-v`` at the umbrella level flips the level from
-WARNING (default) to INFO, mirroring the poller's flag.
 """
 # ruff: noqa: T201  # Command line tools print to stdout
 
@@ -83,8 +79,8 @@ _AGENT_NAMES_ALL: tuple[str, ...] = ("poller", "alerts", "web", "backup")
 _CLOCK_DRIFT_WARN_SECONDS = 60
 _CLOCK_DRIFT_LOUD_FAIL_SECONDS = 5 * 60
 _RECENT_ALERTS_PER_TYPE = 5
-# Backstop on the status query's recent-alerts fetch. Big enough that 5 alerts/type fits even
-# under a worst-case mix of all 9 AlertType values; small enough that one tick scans bounded I/O.
+# Backstop on the status query's recent-alerts fetch. Big enough that 5 alerts/type fits even under
+# a worst-case mix of all 9 AlertType values; small enough that one tick scans bounded I/O.
 _RECENT_ALERTS_QUERY_LIMIT = 500
 _RECENT_ALERTS_WINDOW_DAYS = 30
 _AGENT_STARTS_WINDOW_HOURS = 24
@@ -97,10 +93,9 @@ _DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _TEST_NOTIFICATION_SUBJECT = "cat-watcher test notification"
 _TEST_NOTIFICATION_BODY = "If you can read this, cat-watcher's notification chain is wired correctly."
 
-# Exit codes. ``_EXIT_LOCKED == 2`` covers any "preconditions not met; operator must take action and
-# retry" scenario — poller PID lock held, LaunchAgents loaded during restore-backup, storage drive
-# offline during backup. They share a value because the operator response is the same shape
-# (resolve the precondition, re-run); naming each scenario distinctly would be ceremony.
+# ``_EXIT_LOCKED == 2`` is shared across "preconditions not met; resolve and re-run" scenarios:
+# poller PID lock held, LaunchAgents loaded during restore-backup, storage drive offline during
+# backup. The operator response is identical in every case.
 _EXIT_OK = 0
 _EXIT_GENERIC_FAILURE = 1
 _EXIT_LOCKED = 2
@@ -110,32 +105,25 @@ _EXIT_MISSING_DEPENDENCY = 5
 
 
 class _ParsedArgs(LogsNamespace):
-    """Typed view over the umbrella's argparse output. Each handler reads only the fields it sets.
+    """Typed view over the umbrella's argparse output.
 
     Defaults are documented as class attributes so a handler that reads a flag the user didn't pass
     sees a known sentinel instead of ``AttributeError``. argparse only sets attributes when the
     sub-parser actually defines the option, so multi-handler dispatch via this namespace would
     otherwise need defensive ``hasattr`` checks at every read site.
-
-    Inherits the ``logs`` sub-command fields (``agent``, ``follow``, ``since``, ``level``,
-    ``camera_filter``, ``grep``, ``json``) from :class:`cat_watcher.logs_viewer.LogsNamespace`.
     """
 
     command: str = ""
     config: Path | None = None
     verbose: bool = False
-    # import-local + reanalyze. ``camera`` is required for ``import-local --camera``; the
-    # ``logs`` sub-command's ``--camera`` flag uses ``dest="camera_filter"`` (inherited from
-    # ``LogsNamespace``) to avoid collision with this typed-as-``str`` field.
+    # ``camera`` is required for ``import-local --camera``; the ``logs`` sub-command's ``--camera``
+    # uses ``dest="camera_filter"`` (inherited from ``LogsNamespace``) to avoid collision.
     camera: str = ""
     no_detect: bool = False
     limit: int | None = None
     source_dir: Path = Path()
-    # inspect
     clip_id: int = 0
-    # reanalyze
     all: bool = False
-    # restore-backup
     backup_date: str = ""
 
 
@@ -167,7 +155,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _ = subparsers.add_parser("test-cameras", parents=[common], help="Probe each configured camera; report drift")
     _ = subparsers.add_parser("test-notification", parents=[common], help="Send a test alert via configured channels")
-    _ = subparsers.add_parser("fetch-models", parents=[common], help="Download detector weights into <internal_root>/models")
+    _ = subparsers.add_parser(
+        "fetch-models",
+        parents=[common],
+        help="Download detector weights into <internal_root>/models; delete file or change detector.model to refresh",
+    )
 
     reanalyze = subparsers.add_parser("reanalyze", parents=[common], help="Re-score clips whose analysis failed (or all)")
     _ = reanalyze.add_argument("--camera", default="", help="Restrict to clips from one camera (by name)")
@@ -212,9 +204,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     handler = handlers.get(args.command)
     if handler is None:
-        # ``required=True`` on add_subparsers makes this branch unreachable in practice, but ruff
-        # RET503 needs an explicit terminator and the explicit error message is friendlier than
-        # argparse's default "invalid choice" if the dispatch table ever drifts from the parser.
+        # Unreachable while ``required=True`` on add_subparsers holds; explicit message catches any
+        # future drift between the dispatch table and the parser.
         raise SystemExit(parser.error(f"unknown command: {args.command!r}"))
     return handler(args)
 
@@ -223,7 +214,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _open_engine(config: Config) -> Engine:
-    """Materialize the SQLAlchemy engine for the live SQLite DB at ``config.internal_root``."""
     return create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
 
 
@@ -231,7 +221,6 @@ def _open_engine(config: Config) -> Engine:
 
 
 def _run_import_local(args: _ParsedArgs) -> int:
-    """Handler for ``cat-watcher import-local``. Returns process exit code."""
     config = load_config(args.config)
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
     engine = _open_engine(config)
@@ -279,7 +268,7 @@ def _run_import_local(args: _ParsedArgs) -> int:
 
 
 def _run_status(args: _ParsedArgs) -> int:
-    """Handler for ``cat-watcher status``. Read-only DB digest; always exits 0 unless config fails."""
+    """Read-only DB digest; always exits 0 unless config fails."""
     config = load_config(args.config)
     engine = _open_engine(config)
     now = datetime.now(UTC)
@@ -380,12 +369,12 @@ def _print_backup_status(backups_dir: Path, *, now: datetime) -> None:
 
 
 def _fmt(value: datetime | None) -> str:
-    """Render a nullable UTC datetime as ISO-8601, or ``—`` for ``None``. Status output only."""
+    """Render a nullable UTC datetime as ISO-8601, or ``—`` for ``None``."""
     return value.isoformat() if value is not None else "—"
 
 
 def _fmt_delta(delta: timedelta) -> str:
-    """Render a positive timedelta as ``HH:MM:SS`` (negative becomes ``-HH:MM:SS``)."""
+    """Render a timedelta as ``[-]HH:MM:SS``."""
     sign = "-" if delta.total_seconds() < 0 else ""
     abs_delta = abs(delta)
     total_seconds = int(abs_delta.total_seconds())
@@ -398,7 +387,7 @@ def _fmt_delta(delta: timedelta) -> str:
 
 
 def _run_inspect(args: _ParsedArgs) -> int:
-    """Handler for ``cat-watcher inspect <clip_id>``. Returns 0 / 3 (not found)."""
+    """Returns 0 / 3 (not found)."""
     config = load_config(args.config)
     engine = _open_engine(config)
     try:
@@ -478,7 +467,6 @@ def _probe_camera(cam_cfg: CameraConfig, *, config: Config, host_now: datetime) 
                 _check_clock_drift(client, host_now=host_now)
                 _check_timezone_drift(client, expected=tz_name)
     except CameraError as exc:
-        # ``with client:`` only fails through ``close``; surface anything that escapes.
         print(f"  connectivity: FAIL during teardown ({exc.__class__.__name__}: {exc})")
     return reachable
 
@@ -525,7 +513,7 @@ def _check_timezone_drift(client: AmcrestClient, *, expected: str) -> None:
 
 
 def _run_test_notification(args: _ParsedArgs) -> int:
-    """Send the dry-run alert via every enabled channel. Returns 0 if all enabled channels deliver."""
+    """Send a dry-run alert via every enabled channel. Returns 0 iff all enabled channels deliver."""
     config = load_config(args.config)
     print("test-notification:")
     email_result = send_email(
@@ -552,9 +540,10 @@ def _run_test_notification(args: _ParsedArgs) -> int:
 def _run_fetch_models(args: _ParsedArgs) -> int:
     """Download configured detector weights to ``<internal_root>/models/<detector.model>``.
 
-    Idempotent: if the file already exists with the expected size (or any size, when no checksum is
-    on file), the call is a no-op. The url scheme matches Ultralytics' assets release CDN, which is
-    where YOLO's auto-downloader pulls from when run for the first time.
+    Idempotent on filename: a no-op when the target file already exists with non-zero size. There's
+    no in-place update or checksum verification — to refresh, point ``detector.model`` at a new
+    filename or delete the existing file. The URL targets the Ultralytics assets release CDN — same
+    source YOLO's auto-downloader uses.
     """
     config = load_config(args.config)
     models_dir = config.internal_root / _MODELS_SUBDIR
@@ -584,7 +573,7 @@ def _run_fetch_models(args: _ParsedArgs) -> int:
 
 
 def _download_to(url: str, dest: Path) -> None:
-    """Stream ``url`` to ``dest``. Stdlib over ``httpxyz`` so fetch-models doesn't pull async deps."""
+    """Stream ``url`` to ``dest`` via stdlib so fetch-models doesn't pull the async stack."""
     req = urllib.request.Request(url, headers={"User-Agent": "cat-watcher/fetch-models"})  # noqa: S310  # static https URL, not user-controlled
     response = cast("IO[bytes]", urllib.request.urlopen(req))  # noqa: S310  # same: scheme is constant https
     with response, dest.open("wb") as fh:
@@ -606,14 +595,14 @@ def _sha256_of(path: Path) -> str:
 # --- reanalyze -----------------------------------------------------------------------------------
 
 # ORM streaming batch size for ``reanalyze --all``. Bounds memory at ~N rows in flight while a
-# server-side cursor drains the rest. Detection itself is the throughput floor; this size only
-# needs to be large enough to amortize cursor round-trips.
+# server-side cursor drains the rest. Detection itself is the throughput floor; this size only needs
+# to be large enough to amortize cursor round-trips.
 _REANALYZE_BATCH_SIZE = 100
 
 
 @dataclass
 class _ReanalyzeCameraCounts:
-    """One camera's tally in a reanalyze run. Three buckets are mutually exclusive."""
+    """One camera's tally in a reanalyze run. Buckets are mutually exclusive per clip."""
 
     rescored: int = 0
     skipped_missing: int = 0
@@ -627,12 +616,12 @@ class _ReanalyzeReport:
     per_camera: dict[int, _ReanalyzeCameraCounts] = field(default_factory=dict)
 
     def for_camera(self, camera_id: int) -> _ReanalyzeCameraCounts:
-        """Return (creating if absent) the tally bucket for ``camera_id``."""
+        """Get-or-create the per-camera tally so callers don't have to pre-seed the dict."""
         return self.per_camera.setdefault(camera_id, _ReanalyzeCameraCounts())
 
     @property
     def total_errored(self) -> int:
-        """Sum of ``errored`` across cameras; drives the exit-code branch."""
+        """Drives the exit-code branch."""
         return sum(c.errored for c in self.per_camera.values())
 
 
@@ -668,7 +657,7 @@ def _run_reanalyze(args: _ParsedArgs) -> int:
 
 @dataclass(frozen=True)
 class _ReanalyzeContext:
-    """Per-loop context for reanalyze. Bundles the inputs ``_backfill_clip_frames`` needs."""
+    """Per-loop inputs that ``_backfill_clip_frames`` needs."""
 
     config: Config
     camera_name_by_id: dict[int, str]
@@ -682,9 +671,8 @@ def _reanalyze_loop(
     detector: Detector,
     args: _ParsedArgs,
 ) -> tuple[_ReanalyzeReport, dict[int, str]]:
-    """Process qualifying clips one at a time; commits per clip so concurrent writers (web/poller
-    heartbeats) aren't starved while YOLO + JPEG encoding holds the per-clip session.
-    """
+    """Process qualifying clips one at a time; commit per clip so concurrent writers (web/poller
+    heartbeats) aren't starved while YOLO + JPEG encoding holds the per-clip session."""
     report = _ReanalyzeReport()
     stmt = select(Clip.id).order_by(Clip.start_ts.asc())
     if not args.all:
@@ -746,9 +734,9 @@ def _reanalyze_one_clip(
 
 
 def _apply_detection_fields(clip: Clip, fields: DetectionFields) -> None:
-    """Copy ``detection_for`` field output onto ``clip``. ``manual_has_cat`` is intentionally untouched.
+    """Copy ``detection_for`` field output onto ``clip``; leaves ``manual_has_cat`` untouched.
 
-    The COALESCE projection in the web layer makes the manual override prevail over re-detection;
+    The web layer's COALESCE projection makes the manual override prevail over re-detection;
     overwriting it here would silently discard operator labels.
     """
     clip.has_cat = fields["has_cat"]
@@ -770,11 +758,11 @@ def _backfill_clip_frames(
 ) -> None:
     """Encode per-frame thumbs, replace ``clip_frames`` rows, repoint ``Clip.thumb_path``, unlink legacy thumb.
 
-    Idempotent re-run: any pre-existing ``ClipFrame`` rows for ``clip`` are deleted before the new
-    batch is attached. The delete + insert + thumb_path repoint commit atomically with the caller's
-    per-clip session. The legacy single-frame thumb at the old ``thumb_path`` is unlinked
-    best-effort once ``thumb_path`` actually changes; permission failures are logged so a single
-    bad file doesn't abort the whole reanalyze run.
+    Idempotent re-run: existing ``ClipFrame`` rows for ``clip`` are deleted before the new batch is
+    attached. Delete + insert + thumb_path repoint commit atomically with the caller's per-clip
+    session. The legacy single-frame thumb at the old ``thumb_path`` is unlinked best-effort once
+    ``thumb_path`` actually changes; a permission failure is logged so a single bad file doesn't
+    abort the whole reanalyze run.
     """
     camera_name = ctx.camera_name_by_id[clip.camera_id]
     camera_tz = ctx.camera_tz_by_name.get(camera_name) or ZoneInfo(ctx.config.web.display_timezone)
@@ -807,7 +795,7 @@ def _run_backup(args: _ParsedArgs) -> int:
     an unmounted drive surfaces the same operator-actionable timeout instead of a raw
     FileNotFoundError.
     """
-    from cat_watcher.backup import run_backup  # noqa: PLC0415  # avoid pulling backup module deps when other sub-commands run
+    from cat_watcher.backup import run_backup  # noqa: PLC0415
 
     config = load_config(args.config)
     try:
@@ -867,8 +855,7 @@ def _agents_loaded() -> bool:
             timeout=10,
         )
     except FileNotFoundError, subprocess.TimeoutExpired:
-        # Without launchctl (non-Mac CI) we can't probe — fall back to "no agents loaded" so tests
-        # on Linux can exercise the success path.
+        # Without launchctl (non-Mac CI) we can't probe; treat as "no agents loaded".
         return False
     text = result.stdout.decode(errors="replace")
     return any(_label_loaded(line) for line in text.splitlines())

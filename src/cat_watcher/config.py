@@ -1,8 +1,8 @@
 """Typed configuration loaded from TOML + environment.
 
-Single source of truth for runtime parameters. Structural config comes from ``config.toml``
-(read via :func:`tomllib.load`); secrets come from environment variables (and optionally a ``.env``
-file, read natively by ``pydantic-settings``).
+Single source of truth for runtime parameters. Structural config comes from ``config.toml`` (read
+via :func:`tomllib.load`); secrets come from environment variables (and optionally a ``.env`` file,
+read natively by ``pydantic-settings``).
 
 Resolution order for the TOML path:
 
@@ -39,7 +39,6 @@ class CameraConfig(BaseModel, extra="forbid"):
     @field_validator("timezone")
     @classmethod
     def _validate_timezone(cls, value: str | None) -> str | None:
-        """Reject anything that ``zoneinfo`` cannot resolve to an IANA zone."""
         if value is None:
             return None
         try:
@@ -92,19 +91,17 @@ class AlertConfig(BaseModel, extra="forbid"):
 
 
 def _split_csv(value: str) -> tuple[str, ...]:
-    """Split a comma-separated env value into a tuple, stripping empties."""
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 class CameraSecrets(BaseSettings):
     """Shared Amcrest camera credentials (one pair for all cameras)."""
 
-    # ``env_file=".env"`` lets ``pydantic-settings`` read a sibling .env when present; real env vars
-    # always win. ``dotenv_filtering="only_existing"`` is required so the dotenv source ignores
-    # keys that don't map to a field on this class -- without it, ``extra="forbid"`` rejects
-    # sibling-class keys (e.g. ``CAT_WATCHER_GMAIL_USER`` sharing the same .env file) as extra
-    # inputs. The ``EnvSettingsSource`` already filters by defined fields; this aligns the dotenv
-    # source's behavior with that.
+    # ``dotenv_filtering="only_existing"`` is required so the dotenv source ignores keys that don't
+    # map to a field on this class -- without it, ``extra="forbid"`` rejects sibling-class keys
+    # (e.g. ``CAT_WATCHER_GMAIL_USER`` sharing the same .env file) as extra inputs.
+    # ``EnvSettingsSource`` already filters by defined fields; this aligns the dotenv source's
+    # behavior with that.
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         extra="forbid",
         env_file=".env",
@@ -120,7 +117,6 @@ class CameraSecrets(BaseSettings):
 class EmailSecrets(BaseSettings):
     """Outbound email credentials + recipients (env-only)."""
 
-    # See ``CameraSecrets`` for why ``dotenv_filtering="only_existing"`` is required.
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         extra="forbid",
         env_file=".env",
@@ -139,7 +135,6 @@ class EmailSecrets(BaseSettings):
     @field_validator("alert_to_addresses", mode="before")
     @classmethod
     def _split_recipients(cls, value: object) -> object:
-        """Accept a comma-separated string from env and split it into a tuple."""
         if isinstance(value, str):
             return _split_csv(value)
         return value
@@ -148,7 +143,6 @@ class EmailSecrets(BaseSettings):
 class WebAuth(BaseSettings):
     """HTTP basic auth credentials for the web UI (env-only)."""
 
-    # See ``CameraSecrets`` for why ``dotenv_filtering="only_existing"`` is required.
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         extra="forbid",
         env_file=".env",
@@ -203,13 +197,11 @@ class PollerConfig(BaseModel, extra="forbid"):
 class Config(BaseModel, extra="forbid"):
     """Root configuration model — bound TOML + env at startup."""
 
-    # Structural fields (TOML).
     internal_root: Path
     storage_root: Path
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    # ``min_length=1`` rejects an empty ``[[cameras]]`` list with pydantic's standard error
-    # ("List should have at least 1 item after validation, not 0"); the wrap site in
-    # ``load_config`` re-raises it as ``ConfigError``.
+    # ``min_length=1`` rejects an empty ``[[cameras]]`` list; ``load_config`` re-wraps the
+    # validation error as ``ConfigError``.
     cameras: Annotated[list[CameraConfig], Field(min_length=1)]
     detector: DetectorConfig
     alerts: AlertConfig
@@ -219,14 +211,13 @@ class Config(BaseModel, extra="forbid"):
     backup: BackupConfig = Field(default_factory=BackupConfig)
     poller: PollerConfig = Field(default_factory=PollerConfig)
 
-    # Env-driven sibling models (built independently from the env / .env layer).
     camera_secrets: CameraSecrets
     email: EmailSecrets
     web_auth: WebAuth
 
     @model_validator(mode="after")
     def _unique_camera_names(self) -> Config:
-        """Reject duplicate camera names; the storage slug derived from name must be unique."""
+        """The storage slug is derived from name, so duplicates would collide on disk."""
         seen: set[str] = set()
         duplicates: list[str] = []
         for cam in self.cameras:
@@ -251,7 +242,6 @@ def _resolve_config_path(config_path: Path | None) -> Path:
 
 
 def _load_toml_dict(path: Path) -> dict[str, object]:
-    """Load TOML structural config; cast ``Any`` -> ``object`` at the boundary."""
     with path.open("rb") as fh:
         return cast("dict[str, object]", tomllib.load(fh))
 
@@ -295,8 +285,6 @@ def load_config(config_path: Path | None = None) -> Config:
 
     structural = _load_toml_dict(resolved)
 
-    # Build env-driven secrets; ``_load_settings`` re-raises missing-field errors as
-    # ``ConfigError`` naming the env var.
     structural["camera_secrets"] = _load_settings(CameraSecrets)
     structural["email"] = _load_settings(EmailSecrets)
     structural["web_auth"] = _load_settings(WebAuth)

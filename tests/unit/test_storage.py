@@ -22,7 +22,7 @@ _STORAGE_SUBDIRS = ("clips", "thumbs", "backups")
 
 
 def test_ensure_storage_layout_creates_expected_subdirectories(tmp_path: Path) -> None:
-    """``ensure_storage_layout`` creates the exact internal + storage subfolders."""
+    """Pins the exact subfolder set per root — internal vs. storage layouts must not bleed."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     internal_root.mkdir()
@@ -42,7 +42,7 @@ def test_ensure_storage_layout_creates_expected_subdirectories(tmp_path: Path) -
 
 
 def test_ensure_storage_layout_is_idempotent(tmp_path: Path) -> None:
-    """Running ``ensure_storage_layout`` twice is a no-op on the second run."""
+    """Re-running ``ensure_storage_layout`` must preserve existing files in the managed subdirs."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     internal_root.mkdir()
@@ -63,7 +63,7 @@ def test_ensure_storage_layout_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_ensure_storage_layout_missing_internal_root_raises(tmp_path: Path) -> None:
-    """A missing ``internal_root`` raises ``StorageError`` mentioning the bad path."""
+    """The error must mention the bad path so operators don't have to grep config to find it."""
     internal_root = tmp_path / "missing-internal"
     storage_root = tmp_path / "storage"
     storage_root.mkdir()
@@ -74,7 +74,7 @@ def test_ensure_storage_layout_missing_internal_root_raises(tmp_path: Path) -> N
 
 
 def test_ensure_storage_layout_missing_storage_root_raises(tmp_path: Path) -> None:
-    """A missing ``storage_root`` raises ``StorageError`` mentioning the bad path."""
+    """The error must mention the bad path so operators don't have to grep config to find it."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "missing-storage"
     internal_root.mkdir()
@@ -85,11 +85,9 @@ def test_ensure_storage_layout_missing_storage_root_raises(tmp_path: Path) -> No
 
 
 def test_ensure_storage_layout_raises_when_subdir_name_collides_with_a_file(tmp_path: Path) -> None:
-    """If a subdir name (e.g. ``models``) already exists as a regular file, the error names the path."""
-    # Create internal_root containing a regular FILE named "models" where the subdir would go.
+    """A subdir name (e.g. ``models``) colliding with a regular file must surface the path in the error."""
     collision = tmp_path / "models"
     _ = collision.write_text("not a directory")
-    # storage_root is a separate empty dir.
     storage = tmp_path / "storage"
     storage.mkdir()
 
@@ -99,17 +97,17 @@ def test_ensure_storage_layout_raises_when_subdir_name_collides_with_a_file(tmp_
 
 
 def test_storage_available_true_for_writable_directory(tmp_path: Path) -> None:
-    """A normal writable directory returns True (write probe succeeds)."""
+    """A writable directory passes the live write probe."""
     assert storage_available(tmp_path) is True
 
 
 def test_storage_available_false_for_missing_path(tmp_path: Path) -> None:
-    """A non-existent path returns False without raising."""
+    """Missing path returns False rather than raising — caller must rely on the boolean."""
     assert storage_available(tmp_path / "does-not-exist") is False
 
 
 def test_storage_available_false_when_path_is_a_file(tmp_path: Path) -> None:
-    """A regular file (not a directory) returns False."""
+    """A regular file at the configured path is unavailable — caller must distinguish dir from file."""
     file_path = tmp_path / "regular.txt"
     _ = file_path.write_text("hi")
 
@@ -117,11 +115,10 @@ def test_storage_available_false_when_path_is_a_file(tmp_path: Path) -> None:
 
 
 def test_storage_available_false_when_write_probe_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """If the write probe raises ``OSError``, ``storage_available`` returns False.
+    """A failing write probe (e.g. unmounted external drive) returns False.
 
-    Patches ``tempfile.NamedTemporaryFile`` rather than relying on chmod, which behaves
-    inconsistently across macOS / Linux for mount-point and tmp dir scenarios. This isolates
-    the "directory exists but cannot accept writes" branch (e.g. unmounted external drive).
+    Patches ``tempfile.NamedTemporaryFile`` rather than chmod — chmod behaves inconsistently across
+    macOS / Linux for mount-points and tmp dirs.
     """
 
     def _raise(**_: object) -> object:
@@ -134,20 +131,14 @@ def test_storage_available_false_when_write_probe_fails(tmp_path: Path, monkeypa
 
 
 def test_wait_for_storage_returns_none_when_path_available(tmp_path: Path) -> None:
-    """``wait_for_storage`` returns ``None`` immediately when the path is already available.
-
-    A successful call simply returns; no exception is raised. The "returns None" contract is
-    enforced by the function signature (``-> None``) and verified by mypy / basedpyright, so this
-    test only needs to confirm the no-raise behavior.
-    """
+    """An already-available path lets ``wait_for_storage`` return without raising."""
     wait_for_storage(tmp_path, interval_seconds=1, timeout_seconds=5)
 
 
 def test_wait_for_storage_raises_on_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``wait_for_storage`` raises ``StorageUnavailableError`` once the timeout elapses.
+    """``wait_for_storage`` raises once the timeout elapses.
 
-    Mocks ``time.monotonic`` and ``time.sleep`` inside the storage module so the test runs in
-    microseconds. The fake clock advances by ``interval_seconds`` on every ``sleep`` call.
+    A fake clock advances by ``interval_seconds`` on every ``sleep`` so the test runs in microseconds.
     """
     missing = tmp_path / "missing"
     interval = 1
@@ -160,22 +151,17 @@ def test_wait_for_storage_raises_on_timeout(tmp_path: Path, monkeypatch: pytest.
     def fake_sleep(seconds: float) -> None:
         fake_now[0] += seconds
 
-    # Patch the *module-under-test*'s view of time so we don't perturb pytest internals.
+    # Patch the module-under-test's view of time so we don't perturb pytest internals.
     monkeypatch.setattr("cat_watcher.storage.time.monotonic", fake_monotonic)
     monkeypatch.setattr("cat_watcher.storage.time.sleep", fake_sleep)
 
     with pytest.raises(StorageUnavailableError, match=str(missing)):
         wait_for_storage(missing, interval_seconds=interval, timeout_seconds=timeout)
-    # Sanity check: the loop actually advanced the fake clock past the timeout.
     assert fake_now[0] >= timeout
 
 
 def test_wait_for_storage_succeeds_after_path_appears(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``wait_for_storage`` returns ``None`` once a delayed path becomes available.
-
-    Verifies the EAFP polling loop calls ``storage_available`` more than once and resolves on
-    success without raising.
-    """
+    """A path that materializes mid-poll resolves the loop on the next probe."""
     target = tmp_path / "appears-later"
     fake_now: list[float] = [0.0]
     call_count = {"n": 0}
@@ -186,8 +172,8 @@ def test_wait_for_storage_succeeds_after_path_appears(tmp_path: Path, monkeypatc
     def fake_sleep(seconds: float) -> None:
         fake_now[0] += seconds
         call_count["n"] += 1
-        # On the second sleep, materialize the directory so the next probe succeeds.
         if call_count["n"] == 2:
+            # Materialize the directory mid-poll so the next probe succeeds.
             target.mkdir()
 
     monkeypatch.setattr("cat_watcher.storage.time.monotonic", fake_monotonic)
@@ -199,11 +185,7 @@ def test_wait_for_storage_succeeds_after_path_appears(tmp_path: Path, monkeypatc
 
 
 def test_wait_for_storage_sleeps_with_interval_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``wait_for_storage`` calls ``time.sleep`` with the caller-supplied ``interval_seconds``.
-
-    The existing timeout test proves the loop sleeps *something*; this test pins that every
-    sleep uses the caller's ``interval_seconds`` value (guards against a future hardcoded sleep).
-    """
+    """Every sleep must use the caller's ``interval_seconds`` — guards against a hardcoded sleep regression."""
     missing = tmp_path / "missing"
     interval = 7  # arbitrary, distinct from any default
     fake_now: list[float] = [0.0]
@@ -222,17 +204,13 @@ def test_wait_for_storage_sleeps_with_interval_argument(tmp_path: Path, monkeypa
     with pytest.raises(StorageUnavailableError):
         wait_for_storage(missing, interval_seconds=interval, timeout_seconds=21)
 
-    # Don't pin the exact count (depends on loop shape); pin that every sleep used the interval.
+    # Pin the per-call interval, not the count — the count varies with loop shape.
     assert sleep_calls, "expected at least one sleep before timeout"
     assert all(s == interval for s in sleep_calls), f"all sleeps should use interval={interval}, got {sleep_calls}"
 
 
 def test_wait_for_storage_probes_before_checking_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Even with ``timeout_seconds=0``, the loop probes once before raising.
-
-    The EAFP loop must always do at least one ``storage_available`` probe before the first timeout
-    check; otherwise ``timeout_seconds=0`` would never probe.
-    """
+    """``timeout_seconds=0`` must still probe once — otherwise the zero-timeout caller never runs the check."""
     missing = tmp_path / "missing"
     probe_calls = 0
 
@@ -245,7 +223,6 @@ def test_wait_for_storage_probes_before_checking_timeout(tmp_path: Path, monkeyp
         return None
 
     monkeypatch.setattr("cat_watcher.storage.storage_available", counting_probe)
-    # Avoid wall-time waste; the test never sleeps because timeout fires immediately.
     monkeypatch.setattr("cat_watcher.storage.time.sleep", noop_sleep)
 
     with pytest.raises(StorageUnavailableError):
@@ -255,5 +232,5 @@ def test_wait_for_storage_probes_before_checking_timeout(tmp_path: Path, monkeyp
 
 
 def test_storage_unavailable_error_is_storage_error() -> None:
-    """``StorageUnavailableError`` must be catchable as ``StorageError`` (caller convenience)."""
+    """``StorageUnavailableError`` must be catchable as ``StorageError`` so callers can use one except."""
     assert issubclass(StorageUnavailableError, StorageError)

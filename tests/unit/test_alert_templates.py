@@ -1,9 +1,8 @@
 """Tests for cat_watcher.alert_templates.
 
-The renderers are pure functions: every test passes plain values and asserts the full subject + body
-text. No mocks, no DB, no time-of-day flakiness — ``now`` is always pinned. Snapshot-style equality
-catches accidental whitespace shifts; the ``_macos_summary_under_cap`` parameterized test enforces
-the spec §4.14 ≤120-character ceiling on ``macos_summary``.
+The renderers are pure functions: ``now`` is always pinned. Snapshot-style equality catches
+accidental whitespace shifts; the ``_macos_summary_under_cap`` parameterized test enforces the
+spec §4.14 ≤120-character ceiling on ``macos_summary``.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -158,11 +157,7 @@ def test_frequency_renders_count_and_window_in_subject() -> None:
     ],
 )
 def test_heartbeat_watchdog_uses_shared_template(alert_type: AlertType, agent_name: str) -> None:
-    """Watchdog types share the spec §4.14 body shape; the subject + agent name vary by type.
-
-    Two parametrizations is enough to prove the alert_type / agent_name fields are interpolated
-    rather than hard-coded — a third (``ALERTS_STUCK``) would re-test the same code path.
-    """
+    """Watchdog types share the spec §4.14 body shape; the subject + agent name vary by type."""
     last_hb = _NOW - timedelta(minutes=14)
 
     content = render_heartbeat_watchdog(
@@ -390,12 +385,7 @@ def test_relative_ago_buckets_seconds_minutes_hours() -> None:
 
 
 def test_macos_summary_truncation_appends_visible_ellipsis() -> None:
-    """An over-cap summary lands at exactly 120 chars and ends with ``…`` so the cut is visible.
-
-    The companion ``test_macos_summary_never_exceeds_cap`` only verifies length ≤ 120; this pins
-    the *visible*-truncation contract that ``_capped_summary`` documents (silent truncation would
-    still satisfy the length check but hide content from the operator).
-    """
+    """An over-cap summary lands at exactly 120 chars and ends with ``…`` so the cut is visible."""
     long_name = "P" * 200  # well over the 120-char cap once "Pantry: no cats seen" prefix is implied
     content = render_inactivity(
         camera_display_name=long_name,

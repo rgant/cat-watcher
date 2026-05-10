@@ -176,15 +176,13 @@ class AmcrestClient:
         )
 
     def __enter__(self) -> Self:
-        """Context-manager entry."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        """Context-manager exit. Closes the underlying httpxyz client."""
         self.close()
 
     def close(self) -> None:
-        """Close the underlying httpxyz client; safe to call multiple times."""
+        """Idempotent."""
         self._client.close()
 
     def _classify_status(self, status_code: int) -> None:
@@ -261,7 +259,6 @@ class AmcrestClient:
         local_since = since.astimezone(self._tz).strftime(_AMCREST_TIME_FORMAT)
         local_until = until.astimezone(self._tz).strftime(_AMCREST_TIME_FORMAT)
 
-        # Per Amcrest-HTTP_API_V3.26.pdf §"Create a media files finder", factory.create is GET.
         create_response = self._request_with_retries("GET", _FIND_ENDPOINT, params={"action": "factory.create"})
         result_match = _RESULT_PATTERN.search(create_response.text)
         if result_match is None:
@@ -277,12 +274,13 @@ class AmcrestClient:
     def get_camera_time(self) -> datetime:
         """Fetch the camera's reported wall clock as a tz-aware UTC datetime.
 
-        Calls ``global.cgi?action=getCurrentTime`` (Amcrest API §4.6.2). The body is one line of
-        the form ``result = Y-M-D H:M:S`` in the camera's local timezone (per the doc, the format
-        is **not** affected by ``Locales.TimeFormat``); we parse it through :data:`_AMCREST_TIME_FORMAT`
-        and reinterpret using the ``camera_tz`` passed at construction time, then convert to UTC.
-        Raises :class:`CameraAPIError` on a malformed body. Used by ``cat-watcher test-cameras``
-        to compare camera-side wall clock against host clock for drift detection (spec §4.10).
+        Calls ``global.cgi?action=getCurrentTime`` (Amcrest API §4.6.2). The body is one line of the
+        form ``result = Y-M-D H:M:S`` in the camera's local timezone (per the doc, the format
+        is **not** affected by ``Locales.TimeFormat``); we parse it
+        through :data:`_AMCREST_TIME_FORMAT` and reinterpret using the ``camera_tz`` passed at
+        construction time, then convert to UTC. Raises :class:`CameraAPIError` on a malformed body.
+        Used by ``cat-watcher test-cameras`` to compare camera-side wall clock against host clock
+        for drift detection (spec §4.10).
         """
         response = self._request_with_retries("GET", _GLOBAL_CGI_ENDPOINT, params={"action": "getCurrentTime"})
         match = _GETCURRENTTIME_VALUE_PATTERN.search(response.text)
@@ -423,13 +421,12 @@ class AmcrestClient:
         raise CameraUnreachableError(msg) from last_exc
 
     def _stream_to_part(self, url: str, part_path: Path) -> None:
-        """Open the camera URL and write bytes into ``part_path`` with fsync before close."""
+        """Stream the camera URL into ``part_path`` and fsync before close."""
         with self._client.stream("GET", url) as response:
             self._classify_status(response.status_code)
             if response.status_code >= _HTTP_INTERNAL_ERROR:
                 # Translate 5xx into a retryable transport error so the outer download loop's
-                # ``except _RETRYABLE_HTTPX_ERRORS`` reacts the same way it does for connect /
-                # read-timeout failures, mirroring ``_request_with_retries``'s 5xx handling.
+                # ``except _RETRYABLE_HTTPX_ERRORS`` covers it like a connect/read-timeout failure.
                 msg = f"camera {self._camera.name!r} returned HTTP {response.status_code} during download"
                 raise httpxyz.RemoteProtocolError(msg, request=response.request)
             fd = os.open(part_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)

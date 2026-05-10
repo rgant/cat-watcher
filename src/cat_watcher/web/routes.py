@@ -1,31 +1,31 @@
 """HTTP routes for the cat-watcher web UI.
 
-The full route surface lands across Tasks 20-24; this module today owns:
+This module owns:
 
-* ``/health`` (Task 20) — auth-bypassed liveness probe.
-* ``/clips`` and ``/clips/{id}`` (Task 21) — clip listing + detail (HTML).
-* ``/media/clip/{id}.mp4`` (Task 21) — MP4 streaming with HTTP byte-Range support.
-* ``/media/thumb/{id}.jpg`` (Task 21) — thumbnail JPEG.
-* ``POST /clips/{id}/label`` and ``DELETE /clips/{id}/label`` (Task 22) — manual label
-  set/clear; the POST redirects 303 back to the detail page so the form survives a refresh.
-* ``/`` and ``/timeline`` (Task 23) — per-camera SVG activity timeline; switches between per-clip
-  markers and per-hour heatmap buckets at the 24h threshold (spec §4.7.1).
-* ``/cameras``, ``/stats``, ``/alerts`` (Task 24) — per-camera health, 30-day daily activity
-  aggregation (with manual-label override applied via ``COALESCE(manual_has_cat, has_cat)``),
-  and alert dispatch history.
+* ``/health`` — auth-bypassed liveness probe.
+* ``/clips`` and ``/clips/{id}`` — clip listing + detail (HTML).
+* ``/media/clip/{id}.mp4`` — MP4 streaming with HTTP byte-Range support.
+* ``/media/thumb/{id}.jpg`` — thumbnail JPEG.
+* ``POST /clips/{id}/label`` and ``DELETE /clips/{id}/label`` — manual label set/clear; the POST
+  redirects 303 back to the detail page so the form survives a refresh.
+* ``/`` and ``/timeline`` — per-camera SVG activity timeline; switches between per-clip markers
+  and per-hour heatmap buckets at the 24h threshold (spec §4.7.1).
+* ``/cameras``, ``/stats``, ``/alerts`` — per-camera health, 30-day daily activity aggregation (with
+  manual-label override applied via ``COALESCE(manual_has_cat, has_cat)``), and alert dispatch
+  history.
 
-Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state`` — they
-do **not** instantiate their own engine or templates loader.
+Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state`` — they do
+**not** instantiate their own engine or templates loader.
 
 **Storage-offline degradation (spec §4.13):** the ``/media/...`` routes distinguish two failure
 modes for missing files:
 
 * ``503 Service Unavailable`` — the external drive is offline (probed via
-  ``storage_root.is_dir()``). The timeline template's ``onerror`` handler swaps in a placeholder
-  SVG and the storage-offline banner shows.
+  ``storage_root.is_dir()``). The timeline template's ``onerror`` handler swaps in a placeholder SVG
+  and the storage-offline banner shows.
 * ``410 Gone`` — the drive is mounted but this specific clip's file isn't on disk anymore (e.g.
-  retention sweep removed the file but hasn't yet pruned the row). Distinct response code keeps
-  the operator-visible signal in logs separable from the bulk-offline case.
+  retention sweep removed the file but hasn't yet pruned the row). Distinct response code keeps the
+  operator-visible signal in logs separable from the bulk-offline case.
 """
 
 import operator
@@ -52,8 +52,6 @@ if TYPE_CHECKING:
     from cat_watcher.config import Config
 
     class _CameraRow(TypedDict):
-        """Flat projection of a :class:`Camera` ORM row consumed by the timeline view-model."""
-
         id: int
         name: str
         display_name: str
@@ -74,7 +72,6 @@ class _AppState(Protocol):
 
 
 def _state(request: Request) -> _AppState:
-    """Return a typed view of ``request.app.state``; the only place the cast is needed."""
     return cast("_AppState", request.app.state)  # pyright: ignore[reportAny]  # FastAPI types ``request.app`` as Any
 
 
@@ -82,8 +79,8 @@ _AGENT_NAME_WEB = "web"
 _CLIPS_LIST_LIMIT = 200
 _THUMB_MEDIA_TYPE = "image/jpeg"
 _VIDEO_MEDIA_TYPE = "video/mp4"
-# Spec §4.7: ``/cameras`` shows the most recent N alerts per camera; 5 is the same N the design
-# spec calls out, kept here as a constant so the template doesn't have to know it.
+# Spec §4.7: ``/cameras`` shows the most recent N alerts per camera; 5 is the same N the design spec
+# calls out, kept here as a constant so the template doesn't have to know it.
 _CAMERA_RECENT_ALERTS_LIMIT = 5
 # Spec §4.7: ``/stats`` and ``/alerts`` cap their windows at 30 days so a long-running deployment
 # doesn't grow into a multi-thousand-row scroll.
@@ -181,11 +178,7 @@ async def list_clips(
 
 @clips_router.get("/clips/{clip_id}")
 async def clip_detail(request: Request, clip_id: int) -> object:
-    """Render the detail page for ``clip_id``: video player + detection metadata + label form.
-
-    The label-form HTML (POST/DELETE to ``/clips/{id}/label``) is rendered here per Task 21's
-    contract; the endpoints themselves land in Task 22.
-    """
+    """Render the detail page for ``clip_id``: video player + detection metadata + label form."""
     state = _state(request)
     display_tz = ZoneInfo(state.config.web.display_timezone)
     confidence_threshold = state.config.detector.confidence_threshold
@@ -196,10 +189,8 @@ async def clip_detail(request: Request, clip_id: int) -> object:
             raise HTTPException(status_code=404, detail="clip not found")
         camera = session.get(Camera, clip.camera_id)
         # Project ``clip.frames`` into plain dicts BEFORE expunge so the relationship's lazy load
-        # runs while the session is still live. Ordering comes from the relationship's
-        # ``order_by="ClipFrame.ordinal"``; per-frame display strings + ``below_threshold`` are
-        # precomputed here per the project's precompute-in-routes convention so the template stays
-        # free of arithmetic and threshold knowledge.
+        # runs while the session is still live. Per-frame display strings + ``below_threshold`` are
+        # precomputed so the template stays free of arithmetic and threshold knowledge.
         frames = [
             {
                 "id": f.id,
@@ -212,10 +203,8 @@ async def clip_detail(request: Request, clip_id: int) -> object:
             }
             for f in clip.frames
         ]
-        # Global next/prev neighbors by ``start_ts`` — listing-order independent. Newer = greater
-        # ``start_ts``; older = lesser. Same-timestamp collisions are rare enough on a single-host
-        # ingest that the simple ordering is fine; extreme ties just resolve via the index's
-        # tie-break and the operator can fall back to the listing.
+        # Global next/prev neighbors by ``start_ts`` — listing-order independent. Same-timestamp
+        # ties resolve via the index's tie-break; rare enough on a single-host ingest to ignore.
         prev_clip_id = session.scalar(select(Clip.id).where(Clip.start_ts > clip.start_ts).order_by(Clip.start_ts.asc()).limit(1))
         next_clip_id = session.scalar(select(Clip.id).where(Clip.start_ts < clip.start_ts).order_by(desc(Clip.start_ts)).limit(1))
         # Detach the rows from the session so the template can read attributes after exit.
@@ -223,9 +212,8 @@ async def clip_detail(request: Request, clip_id: int) -> object:
         if camera is not None:
             session.expunge(camera)
 
-    # The Amcrest video has the camera-local clock burned into the OSD; rendering the heading
-    # in display_timezone keeps the page label aligned with what the user sees in the player.
-    # Kept here (not in the template) per the project's precompute-in-routes convention.
+    # The Amcrest video has the camera-local clock burned into the OSD; rendering the heading in
+    # display_timezone keeps the page label aligned with what the user sees in the player.
     display_start = clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
     return state.templates.TemplateResponse(
@@ -288,12 +276,10 @@ async def clear_label(request: Request, clip_id: int) -> Response:
 
 
 def _clip_video_relpath(clip: Clip) -> str:
-    """Accessor for ``Clip.file_path``; named so callsites read intent rather than dotted access."""
     return clip.file_path
 
 
 def _clip_thumb_relpath(clip: Clip) -> str:
-    """Accessor for ``Clip.thumb_path``; pairs with :func:`_clip_video_relpath`."""
     return clip.thumb_path
 
 
@@ -301,8 +287,8 @@ def _clip_thumb_relpath(clip: Clip) -> str:
 async def media_clip(request: Request, clip_id: int) -> FileResponse:
     """Serve the MP4 file for ``clip_id``. ``FileResponse`` handles HTTP byte-Range itself
     (``<video>`` seeking, RFC 7233 § 4): ``200`` for no Range header, ``206`` with a correct
-    ``Content-Range`` for valid ranges, ``400`` for malformed Range syntax, ``416`` for ranges
-    that fall past EOF. Plus our 404/503/410 from :func:`_resolve_media_path`.
+    ``Content-Range`` for valid ranges, ``400`` for malformed Range syntax, ``416`` for ranges that
+    fall past EOF. Plus our 404/503/410 from :func:`_resolve_media_path`.
     """
     state = _state(request)
     file_path = _resolve_media_path(engine=state.engine, clip_id=clip_id, get_relpath=_clip_video_relpath, config=state.config)
@@ -332,8 +318,8 @@ def _clip_summary(clip: Clip, cameras: list[Camera], *, display_tz: ZoneInfo) ->
     """Project a Clip + its Camera into a flat dict the template can render without lazy loads.
 
     ``display_start`` is precomputed in ``display_tz`` so the visible cell aligns with the
-    camera-OSD time burned into the video; the raw ``start_ts`` (UTC) is also passed for the
-    HTML5 ``<time datetime="…">`` attribute.
+    camera-OSD time burned into the video; the raw ``start_ts`` (UTC) is also passed for the HTML5
+    ``<time datetime="…">`` attribute.
     """
     by_id = {cam.id: cam for cam in cameras}
     cam = by_id.get(clip.camera_id)
@@ -380,10 +366,7 @@ def _resolve_media_path(
 def _resolve_frame_media_path(*, engine: Engine, frame_id: int, config: Config) -> Path:
     """Look up ``ClipFrame.id`` and return the on-disk path for its ``thumb_path``.
 
-    Mirrors :func:`_resolve_media_path` but keyed on a per-frame row instead of a clip. Kept as a
-    parallel function (rather than retrofitting the clip helper's signature with a model selector)
-    because the lookup model and 404 message differ; the storage-online + file-exists tail is short
-    enough that the tiny duplication reads better than a generic abstraction.
+    Mirrors :func:`_resolve_media_path` but keyed on a per-frame row instead of a clip.
     """
     with get_session(engine) as session:
         frame = session.get(ClipFrame, frame_id)
@@ -412,8 +395,7 @@ def _storage_root_available(storage_root: Path) -> bool:
 async def root(request: Request, range: str = _TIMELINE_DEFAULT_RANGE) -> object:  # noqa: A002  # ``range`` is the public query-param name
     """Render the activity timeline at the default 24h window (or whatever ``?range=`` overrides to).
 
-    Same handler as :func:`timeline`; the distinct route name is what the nav's ``url_for('root')``
-    resolves to so the "Timeline" link in the header has a stable name.
+    Distinct route name from :func:`timeline` so the nav's ``url_for('root')`` has a stable target.
     """
     return _render_timeline(request, range_key=range)
 
@@ -437,8 +419,8 @@ def _render_timeline(request: Request, *, range_key: str) -> object:
     state = _state(request)
     delta = _TIMELINE_RANGES.get(range_key, _TIMELINE_RANGES[_TIMELINE_DEFAULT_RANGE])
     if range_key not in _TIMELINE_RANGES:
-        # Snap to the default rather than 400-ing — operators following an old bookmark should
-        # still get a usable page, just at the standard window.
+        # Snap to the default rather than 400-ing — operators following an old bookmark should still
+        # get a usable page, just at the standard window.
         range_key = _TIMELINE_DEFAULT_RANGE
     start_window = datetime.now(UTC) - delta
     display_tz = ZoneInfo(state.config.web.display_timezone)
@@ -547,7 +529,6 @@ def _build_lanes_view(
 
 
 def _camera_lane(cam: Camera) -> _CameraRow:
-    """Project a Camera row into a flat dict the template can render without lazy loads."""
     return {"id": cam.id, "name": cam.name, "display_name": cam.display_name}
 
 
@@ -632,17 +613,16 @@ def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -
 
 
 def _format_tick_label_hour_minute(dt_local: datetime) -> str:
-    """Used at 6h and 24h: ``HH:MM`` clock label."""
     return dt_local.strftime("%H:%M")
 
 
 def _format_tick_label_weekday_hour(dt_local: datetime) -> str:
-    """Used at 7d: ``Mon 14:00`` so a label survives a date crossing without a separate marker."""
+    """At 7d: ``Mon 14:00`` so a label survives a date crossing without a separate marker."""
     return dt_local.strftime("%a %H:%M")
 
 
 def _format_tick_label_day_month(dt_local: datetime) -> str:
-    """Used at 30d: ``5 May`` — no clock component needed when ticks are 24h apart."""
+    """At 30d: ``5 May`` — no clock component needed when ticks are 24h apart."""
     return dt_local.strftime("%-d %b")
 
 
@@ -841,8 +821,8 @@ async def alerts_page(request: Request) -> object:
 
     Sorted newest-first. Camera-scoped alerts (``camera_id`` set) render the camera's display name;
     non-camera alerts (``WEB_DOWN``, ``DISK_LOW``, etc.) render :data:`_NO_CAMERA_PLACEHOLDER` so
-    operators can scan the column for "which subsystem fired this" without losing the row to a
-    blank cell.
+    operators can scan the column for "which subsystem fired this" without losing the row to a blank
+    cell.
     """
     state = _state(request)
     cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
@@ -873,12 +853,9 @@ async def alerts_page(request: Request) -> object:
 def _stat_row(row: object, *, camera_display_by_id: dict[int, str]) -> dict[str, object]:
     """Project a stats query Row into a flat dict the template can render.
 
-    The query selects ``(camera_id, date_label, total, cat_total)`` so we destructure positionally
-    via ``cast`` + tuple-unpack rather than attribute access; SQLAlchemy types Row column accessors
-    as ``Any``, which would otherwise blossom into per-attribute ``reportAny`` warnings here. The
-    label expressions are typed positionally — column 0 is ``camera_id``, column 3 is the
-    ``func.sum(cat_expr)`` result which is ``None`` for an all-NULL bucket — so we coerce the
-    nullable last value to ``int`` for template arithmetic.
+    Destructured positionally via ``cast`` + tuple-unpack because SQLAlchemy types Row column
+    accessors as ``Any`` and per-attribute access would blossom into ``reportAny`` warnings. The
+    nullable ``func.sum(cat_expr)`` is coerced to ``int`` for template arithmetic.
     """
     camera_id, date_value, total, cat_total = cast("tuple[int, object, int, int | None]", tuple(cast("Sequence[object]", row)))
     return {
@@ -893,10 +870,9 @@ def _stat_row(row: object, *, camera_display_by_id: dict[int, str]) -> dict[str,
 def _camera_row(cam: Camera, *, recent_alerts: list[dict[str, object]]) -> dict[str, object]:
     """Project a Camera row into a flat dict the template can render without lazy loads.
 
-    Includes the precomputed ``recent_alerts`` list so the template's outer ``{% for cam %}`` loop
-    can render the camera's recent-alert sub-table without re-running a query per row.
-    ``poll_error`` is truncated here so the template doesn't have to know the cap (and the cap can
-    move without sweeping the templates).
+    Embeds the precomputed ``recent_alerts`` list so the template's ``{% for cam %}`` loop renders
+    the recent-alert sub-table without re-running a query per row. ``poll_error`` is truncated here
+    so the cap can move without sweeping templates.
     """
     return {
         "id": cam.id,
@@ -931,7 +907,6 @@ def _alert_summary(alert: AlertSent, *, camera_display_name: str | None) -> dict
 
 
 def _truncate(value: str | None, limit: int) -> str | None:
-    """Cap ``value`` at ``limit`` characters with a single trailing ellipsis when truncated."""
     if value is None:
         return None
     if len(value) <= limit:

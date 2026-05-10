@@ -16,8 +16,8 @@ Three responsibilities:
   reachable does the agent insert ``agent_starts(agent_name='backup', ...)`` and run the backup.
   Returns exit 2 on storage timeout (operator-actionable: drive offline / unlock dismissed).
 
-The backup agent does **not** participate in the heartbeat watchdog scheme — its once-daily
-cadence would always look stale to a heartbeat-based check. Backup health is monitored by the
+The backup agent does **not** participate in the heartbeat watchdog scheme — its once-daily cadence
+would always look stale to a heartbeat-based check. Backup health is monitored by the
 ``BACKUP_STALE`` rule (:mod:`cat_watcher.alerts`) via filesystem mtime instead.
 """
 
@@ -139,9 +139,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _record_start_and_back_up(*, config: Config, db_path: Path, now: datetime) -> int:
     """Insert the ``agent_starts`` row, hot-copy the DB, and return the agent's exit code.
 
-    Owns the ``Engine`` lifecycle for the post-wait phase: it's only safe to write ``agent_starts``
-    once the storage wait has succeeded (the test contract requires no row when the wait times
-    out), so the engine is created here rather than at the top of :func:`main`.
+    Owns the ``Engine`` lifecycle for the post-wait phase: ``agent_starts`` must only be written
+    after the storage wait succeeds (no row when the wait times out), so the engine is created here
+    rather than at the top of :func:`main`.
     """
     engine = create_engine(f"sqlite:///{db_path}")
     try:

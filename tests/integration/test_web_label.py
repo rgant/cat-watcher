@@ -34,11 +34,8 @@ _DEFAULT_START_TS = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
 
 
 def _seed_unlabeled_clip(db_session_factory: Callable[[Path], AbstractContextManager[Session]], internal_root: Path) -> int:
-    """Seed one camera + one initially-unlabeled clip; return the clip's id.
-
-    "Unlabeled" because :attr:`Clip.manual_has_cat` starts ``None`` — these tests verify the
-    POST/DELETE label endpoints take it through transitions. The on-disk media files aren't
-    materialized; the label routes only mutate the row.
+    """``Clip.manual_has_cat`` starts ``None`` so the POST/DELETE label endpoints can transition it.
+    On-disk media isn't materialized — the label routes only mutate the row.
     """
     with db_session_factory(internal_root) as session:
         cam = Camera(name="pantry", display_name="Pantry", host="cam.example.com")
@@ -63,7 +60,7 @@ def _seed_unlabeled_clip(db_session_factory: Callable[[Path], AbstractContextMan
 
 
 def _read_clip(db_session_factory: Callable[[Path], AbstractContextManager[Session]], internal_root: Path, clip_id: int) -> Clip:
-    """Read ``clip_id`` back from the DB outside any active app session and return it detached."""
+    """Read outside any active app session; the row is detached on return."""
     with db_session_factory(internal_root) as session:
         clip = session.scalar(select(Clip).where(Clip.id == clip_id))
         assert clip is not None
@@ -203,8 +200,8 @@ def test_label_post_overwrites_existing_label(
 ) -> None:
     """A second POST replaces the first label's columns and re-stamps ``manual_label_at``.
 
-    Documents the real user workflow (label wrong → fix it) and proves the route does an UPDATE,
-    not an INSERT-or-error.
+    Documents the real user workflow (label wrong → fix it) and proves the route does an UPDATE, not
+    an INSERT-or-error.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)

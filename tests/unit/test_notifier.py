@@ -17,7 +17,7 @@ from cat_watcher.notifier import (
 
 
 def _email_secrets() -> EmailSecrets:
-    """Build an ``EmailSecrets`` directly (init kwargs win over env / .env)."""
+    """Build an ``EmailSecrets`` directly so init kwargs win over ambient env / .env."""
     return EmailSecrets(
         gmail_user="alerts@example.com",
         gmail_app_password=SecretStr("app-pw"),
@@ -36,8 +36,8 @@ def _macos_rules(*, enabled: bool = True) -> MacOsRulesConfig:
 def _patch_smtp(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     """Patch ``smtplib.SMTP`` and return ``(ctor, instance)``.
 
-    The real SMTP class returns ``self`` from ``__enter__``; the instance mock has to do the same so
-    ``with smtplib.SMTP(...) as smtp:`` rebinds to the object the assertions inspect.
+    The instance mock returns ``self`` from ``__enter__`` so ``with smtplib.SMTP(...) as smtp:``
+    rebinds to the same object the assertions inspect.
     """
     smtp_instance = MagicMock(spec=smtplib.SMTP)
     smtp_instance.__enter__.return_value = smtp_instance
@@ -48,7 +48,7 @@ def _patch_smtp(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
 
 
 def test_send_email_uses_smtp_starttls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Successful send: STARTTLS, login with secret, sendmail with envelope from + recipients list."""
+    """The happy path constructs the SMTP client, runs STARTTLS, logs in, and sends the message — pinning the full sequence."""
     ctor, fake_smtp = _patch_smtp(monkeypatch)
 
     result = send_email(
@@ -87,7 +87,7 @@ def test_send_email_uses_configured_smtp_host_and_port(monkeypatch: pytest.Monke
 
 
 def test_send_email_returns_failure_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Network-level failure (DNS, connection refused) -> returns EmailResult(ok=False)."""
+    """Network-level failure (DNS, connection refused) returns ok=False rather than raising."""
     ctor: MagicMock = create_autospec(smtplib.SMTP, side_effect=OSError("name resolution failed"))
     monkeypatch.setattr(smtplib, "SMTP", ctor)
 
@@ -99,7 +99,7 @@ def test_send_email_returns_failure_on_oserror(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_send_email_returns_failure_on_smtp_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``smtplib`` raising mid-conversation -> returns EmailResult(ok=False)."""
+    """``smtplib`` raising mid-conversation returns ok=False rather than propagating."""
     _, fake_smtp = _patch_smtp(monkeypatch)
     fake_smtp.login.side_effect = smtplib.SMTPAuthenticationError(535, b"bad creds")
 
@@ -125,14 +125,13 @@ def test_send_email_disabled_short_circuits(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def _patch_subprocess_run(monkeypatch: pytest.MonkeyPatch, return_value: subprocess.CompletedProcess[bytes]) -> MagicMock:
-    """Patch ``subprocess.run`` with an autospec'd mock validating call-site signature."""
     run_mock: MagicMock = create_autospec(subprocess.run, return_value=return_value)
     monkeypatch.setattr(subprocess, "run", run_mock)
     return run_mock
 
 
 def test_send_macos_notification_invokes_osascript(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Successful invocation: ``osascript -e '...display notification...'`` via subprocess.run."""
+    """The happy path shells out to ``osascript -e 'display notification ...'`` with the title and body quoted."""
     completed: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
     run_mock = _patch_subprocess_run(monkeypatch, completed)
 
@@ -203,7 +202,7 @@ def test_send_macos_notification_escapes_backslashes(monkeypatch: pytest.MonkeyP
 
 
 def test_send_macos_notification_failure_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Non-zero exit code returns NotifResult(ok=False) with stderr surfaced as error."""
+    """Non-zero exit returns ok=False with stderr surfaced as error rather than raising."""
     completed: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"boom")
     _ = _patch_subprocess_run(monkeypatch, completed)
 
@@ -228,7 +227,7 @@ def test_send_macos_notification_handles_subprocess_exceptions(
     subprocess_exception: BaseException,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both subprocess exceptions in the ``except`` tuple yield NotifResult(ok=False), no raise."""
+    """Both subprocess exceptions yield ok=False rather than propagating to the caller."""
     run_mock: MagicMock = create_autospec(subprocess.run, side_effect=subprocess_exception)
     monkeypatch.setattr(subprocess, "run", run_mock)
 

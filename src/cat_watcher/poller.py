@@ -8,17 +8,14 @@ schedules a tick every ``[poller].cadence_seconds``. A tick:
 3. Inserts an ``agent_starts`` row.
 4. For each configured camera (or one if ``--camera``), discovers + ingests new recordings via
    :class:`cat_watcher.amcrest_client.AmcrestClient`. Strict file-before-row ordering: download +
-   thumbnail + fsync land on disk before the ``clips`` row commits, so the web UI never points
-   at a partial file.
+   thumbnail + fsync land on disk before the ``clips`` row commits, so the web UI never points at a
+   partial file.
 5. Updates camera state with preservation semantics (each field follows its own rule — see
    :func:`update_camera_state_success`).
 6. Calls :func:`cat_watcher.retention.sweep` at end of tick.
 7. Upserts the ``poller`` heartbeat.
 8. Checks the ``alerts`` heartbeat and dispatches ``ALERTS_STUCK`` if stale (cool-down honored
    via :func:`cat_watcher.alerts.dispatch_alert`).
-
-CLI flags ``--config / --camera / --since / --until / --limit / --no-detect / --list-only`` per
-spec §4.10.
 """
 
 import argparse
@@ -115,8 +112,8 @@ def update_camera_state_success(
 
     - ``last_polled_at`` advances to ``now`` only when ``advance_cursor`` is true. Scoped queries
       (``--since`` / ``--until`` / ``--limit``) cannot prove they covered the full
-      ``[last_polled_at, now]`` window and so must leave the resume cursor untouched —
-      otherwise the next default tick would skip whatever the scoped run did not cover.
+      ``[last_polled_at, now]`` window and so must leave the resume cursor untouched — otherwise the
+      next default tick would skip whatever the scoped run did not cover.
     - ``last_clip_at`` advances to ``max(start_ts of new clips)`` only if any clips were ingested.
     - ``last_cat_seen_at`` advances to the latest ``COALESCE(manual_has_cat, has_cat) = true`` clip
       only if at least one new clip is cat-positive (model or operator override).
@@ -172,7 +169,7 @@ def update_camera_state_failure(  # noqa: PLR0913  # state-update sibling of upd
 
 
 def upsert_heartbeat(session: Session, *, agent_name: str, now: datetime) -> None:
-    """Insert or update the ``heartbeats`` row for ``agent_name`` to ``now``."""
+    """Update the row matching ``agent_name`` if it exists, otherwise insert it — single-row guarantee per agent."""
     existing = session.scalar(select(Heartbeat).where(Heartbeat.agent_name == agent_name))
     if existing is None:
         session.add(Heartbeat(agent_name=agent_name, last_seen_at=now))
@@ -242,10 +239,10 @@ class DetectionFields(TypedDict):
 def detection_for(detector: Detector | None, clip_full: Path) -> tuple[DetectionFields, tuple[ScoredFrame, ...]]:
     """Run the detector (or substitute ``--no-detect`` markers) and return ``(DetectionFields, scored_frames)``.
 
-    The returned tuple's second element is empty when ``detector`` is ``None`` or detection
-    raised; on success it is the detector's full per-frame buffer (one entry per sampled frame).
-    Callers branch on ``analysis_error is None and scored_frames`` to choose between the per-frame
-    thumb pipeline and the legacy single-frame fallback.
+    The returned tuple's second element is empty when ``detector`` is ``None`` or detection raised;
+    on success it is the detector's full per-frame buffer (one entry per sampled frame). Callers
+    branch on ``analysis_error is None and scored_frames`` to choose between the per-frame thumb
+    pipeline and the legacy single-frame fallback.
     """
     if detector is None:
         fields = DetectionFields(
@@ -294,7 +291,7 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
 
 @dataclass(frozen=True)
 class IngestContext:
-    """Bundle of per-camera state shared by the poller and ``import_local`` per-clip pipelines."""
+    """Per-camera state shared by the poller and ``import_local`` per-clip pipelines."""
 
     engine: Engine
     storage_root: Path
@@ -431,7 +428,6 @@ def _ingest_recording(rec: Recording, *, client: AmcrestClient, ctx: IngestConte
     """Poller per-clip wrapper: download via the camera client, then run the shared pipeline."""
 
     def download(dest: Path) -> None:
-        # Amcrest client fsyncs the .part before atomic rename — see Task 14.
         client.download_recording(rec.camera_path, dest=dest)
 
     return materialize_and_persist_clip(
@@ -464,10 +460,10 @@ class PollerArgs:  # pylint: disable=too-many-instance-attributes  # flat CLI-ar
     def truncates_default_window(self) -> bool:
         """True when ``--since`` / ``--until`` / ``--limit`` narrow the search below the full
         ``[last_polled_at, now]`` default. ``run_tick`` reads this to decide whether to advance
-        ``cameras.last_polled_at`` after a successful (or failed) tick: a scoped query cannot
-        prove it covered the full window, so the resume cursor must stay where it is — otherwise
-        the next default tick would skip whatever the scoped run missed. ``--list-only`` is
-        handled separately (entire DB-write block is gated upstream).
+        ``cameras.last_polled_at`` after a successful (or failed) tick: a scoped query cannot prove
+        it covered the full window, so the resume cursor must stay where it is — otherwise the next
+        default tick would skip whatever the scoped run missed. ``--list-only`` is handled
+        separately (entire DB-write block is gated upstream).
         """
         return self.since is not None or self.until is not None or self.limit is not None
 
@@ -505,10 +501,12 @@ class _CameraTickResult:
 
     success: bool
     window: _PollWindow
-    status_on_failure: PollStatus = PollStatus.OK  # only consulted when success=False
+    # Only consulted when ``success=False``.
+    status_on_failure: PollStatus = PollStatus.OK
     error_msg: str = ""
     ingested: list[Clip] = field(default_factory=list)
-    listed: int = 0  # only meaningful under --list-only; mutually exclusive with ``ingested``
+    # Only meaningful under ``--list-only``; mutually exclusive with ``ingested``.
+    listed: int = 0
 
 
 def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchestration helper; dataclass-bundling these would just nest the noise
@@ -581,7 +579,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
 
 
 def _limited[ItemT](items: Iterable[ItemT], limit: int | None) -> Iterator[ItemT]:
-    """Yield at most ``limit`` items (or all if limit is None)."""
+    """Yield at most ``limit`` items, or every item when ``limit`` is None."""
     if limit is None:
         yield from items
         return
@@ -700,7 +698,7 @@ def _parse_iso_datetime(raw: str) -> datetime:
 
 
 def ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
-    """Return the ``Camera`` row for ``cam_cfg.name``, creating it if absent."""
+    """Return the ``Camera`` row for ``cam_cfg.name``, inserting one if absent."""
     with get_session(engine) as session:
         existing = session.scalar(select(Camera).where(Camera.name == cam_cfg.name))
         if existing is not None:
@@ -810,9 +808,8 @@ def _check_alerts_stuck(*, config: Config, engine: Engine, now: datetime) -> Non
 def _emit(line: str) -> None:
     """Write one line of human-facing summary output to stdout.
 
-    Wraps ``sys.stdout.write`` so the print/no-print rule (ruff T201 forbids ``print``) lives in one
-    place. Logging goes to stderr via the configured handler; this stream is the primary user-facing
-    output of an interactive ``cat-watcher-poller`` invocation.
+    Single chokepoint for the print/no-print rule. Logging goes to stderr via the configured
+    handler; this stream is the primary user-facing output of an interactive poller invocation.
     """
     _ = sys.stdout.write(line + "\n")
 
@@ -853,13 +850,11 @@ def _print_retention_summary(report: retention.RetentionReport) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code.
 
-    Stdout always carries the user-facing report — per-camera summary lines, retention sweep
-    line, and (under ``--list-only``) the per-clip manifest — independent of log level.
-    Default log level is ``WARNING`` so only genuine problems surface on stderr.
-    ``--verbose`` raises the level to ``INFO`` and routes diagnostic detail to stderr (and the
-    JSONL log): httpxyz requests, the empty-window
-    note from ``amcrest_client``, and other diagnostic detail. The full structured-logging design
-    (Task 26b in the plan) replaces this when it lands.
+    Stdout always carries the user-facing report — per-camera summary lines, retention sweep line,
+    and (under ``--list-only``) the per-clip manifest — independent of log level. Default log level
+    is ``WARNING`` so only genuine problems surface on stderr; ``--verbose`` raises it to ``INFO``
+    and routes diagnostic detail (httpxyz requests, empty-window notes from ``amcrest_client``) to
+    stderr and the JSONL log.
     """
     args = _parse_args(argv)
     config = load_config(args.config_path)

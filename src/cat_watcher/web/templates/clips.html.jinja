@@ -35,12 +35,6 @@
     <button type="submit">Filter</button>
   </form>
   {% if clip_rows %}
-    {# ``data-label`` on every body ``<td>`` powers the mobile card-stack pattern in
-     style.css: at narrow widths the table rows render as labelled stacks via
-     ``td::before { content: attr(data-label); }``; at ≥768px the labels are hidden
-     via ``content: none`` and the real table layout returns. The thumbnail cell is
-     opted out of the label pattern via the ``thumb-cell`` class because the image
-     itself is the row's visual anchor. #}
     <table class="clip-list">
       <caption class="sr-only">Clips, ordered newest first, capped at 200 rows.</caption>
       <thead>

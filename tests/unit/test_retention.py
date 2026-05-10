@@ -1,8 +1,8 @@
 """Tests for cat_watcher.retention.
 
-The sweep operates against a real file-backed SQLite (``db_engine`` fixture) and a real ``tmp_path``
-filesystem so we exercise the actual SQLAlchemy queries and ``os.unlink`` / ``os.rmdir`` calls.
-Only ``time`` is mocked (via the explicit ``now`` argument) for determinism.
+Sweeps run against a real file-backed SQLite (``db_engine``) and real ``tmp_path`` filesystem so the
+actual SQLAlchemy queries and ``os.unlink`` / ``os.rmdir`` calls are exercised; only ``time`` is
+mocked (via the explicit ``now`` argument) for determinism.
 """
 
 import logging
@@ -28,7 +28,6 @@ def _retention(*, clip_days: int = 30, agent_starts_days: int = 30, alerts_sent_
 
 
 def _seed_camera(engine: Engine, *, name: str = "pantry") -> int:
-    """Insert a Camera row and return its id."""
     cam = Camera(name=name, display_name=name.title(), host=f"{name}.local")
     with get_session(engine) as session:
         session.add(cam)
@@ -46,7 +45,7 @@ def _seed_clip(  # noqa: PLR0913  # test-fixture builder; inlining the args at e
     start_ts: datetime,
     file_mtime: datetime | None = None,
 ) -> int:
-    """Insert a Clip row and create the corresponding files on disk; return clip id."""
+    """Insert a Clip row, create the on-disk files, and return the clip id."""
     clip_path = storage_root / rel_clip
     thumb_path = storage_root / rel_thumb
     clip_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +76,6 @@ def _seed_clip(  # noqa: PLR0913  # test-fixture builder; inlining the args at e
 
 
 def _make_orphan(storage_root: Path, rel_path: str, *, mtime: datetime) -> Path:
-    """Create a file with no matching DB row; set its mtime explicitly."""
     full = storage_root / rel_path
     full.parent.mkdir(parents=True, exist_ok=True)
     _ = full.write_bytes(b"orphan-bytes")
@@ -90,7 +88,7 @@ def _make_orphan(storage_root: Path, rel_path: str, *, mtime: datetime) -> Path:
 
 
 def test_pass1_removes_old_clips_and_files(db_engine: Engine, tmp_path: Path) -> None:
-    """Clips with start_ts older than the cutoff are deleted from the DB and disk."""
+    """A clip past ``clip_days`` is deleted from the DB and both files (mp4 + thumb) unlinked."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=31)
     rel_clip = "clips/pantry/2026-03-31/060000.mp4"
@@ -107,7 +105,7 @@ def test_pass1_removes_old_clips_and_files(db_engine: Engine, tmp_path: Path) ->
 
 
 def test_pass1_preserves_recent_clips(db_engine: Engine, tmp_path: Path) -> None:
-    """Clips inside the retention window are left alone."""
+    """Clips inside the retention window survive — sweep is age-bounded, not aggressive."""
     cam_id = _seed_camera(db_engine)
     young_ts = _NOW - timedelta(days=10)
     rel_clip = "clips/pantry/2026-04-21/060000.mp4"
@@ -129,7 +127,7 @@ def test_pass1_oserror_during_unlink_does_not_raise(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """If a file unlink fails (race / already-gone), the row is still committed-removed and a WARNING is logged."""
+    """If unlink fails (race / already-gone), the row is still committed-removed and a WARNING is logged."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=31)
     rel_clip = "clips/pantry/2026-03-31/060000.mp4"
@@ -154,7 +152,7 @@ def test_pass1_oserror_during_unlink_does_not_raise(
 
 
 def test_pass2_removes_old_orphans(db_engine: Engine, tmp_path: Path) -> None:
-    """Files with no matching Clip row and old mtime are unlinked."""
+    """Old files in the storage tree without a matching DB row are unlinked in pass 2."""
     _ = _seed_camera(db_engine)
     old_mtime = _NOW - timedelta(days=45)
     orphan = _make_orphan(tmp_path, "clips/pantry/2026-03-17/000000.mp4", mtime=old_mtime)
@@ -166,7 +164,7 @@ def test_pass2_removes_old_orphans(db_engine: Engine, tmp_path: Path) -> None:
 
 
 def test_pass2_preserves_recent_orphans(db_engine: Engine, tmp_path: Path) -> None:
-    """A young orphan (mtime inside retention window) is preserved — it might be a partial download in progress."""
+    """Young orphans are preserved — likely a partial download still in progress."""
     _ = _seed_camera(db_engine)
     young_mtime = _NOW - timedelta(hours=2)
     orphan = _make_orphan(tmp_path, "clips/pantry/2026-04-30/100000.mp4", mtime=young_mtime)
@@ -178,7 +176,7 @@ def test_pass2_preserves_recent_orphans(db_engine: Engine, tmp_path: Path) -> No
 
 
 def test_pass2_preserves_files_with_matching_clip_row(db_engine: Engine, tmp_path: Path) -> None:
-    """A file whose path matches a surviving Clip.file_path / thumb_path is NOT treated as an orphan."""
+    """Files matching a surviving Clip.file_path / thumb_path are kept even with old mtimes."""
     cam_id = _seed_camera(db_engine)
     young_ts = _NOW - timedelta(days=5)
     rel_clip = "clips/pantry/2026-04-26/120000.mp4"
@@ -202,7 +200,7 @@ def test_pass2_preserves_files_with_matching_clip_row(db_engine: Engine, tmp_pat
 
 
 def test_crash_tolerance_pass2_cleans_up_pass1_orphan(db_engine: Engine, tmp_path: Path) -> None:
-    """A file whose Clip row was deleted (simulating a pass1 crash mid-sequence) gets swept by pass2."""
+    """Files left behind by a pass1 crash (row deleted, file alive) get swept by pass2."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=60)
     rel_clip = "clips/pantry/2026-03-02/060000.mp4"
@@ -227,7 +225,7 @@ def test_crash_tolerance_pass2_cleans_up_pass1_orphan(db_engine: Engine, tmp_pat
 
 
 def test_empty_date_dir_removed_after_pass1(db_engine: Engine, tmp_path: Path) -> None:
-    """A clips/<slug>/<date>/ directory that becomes empty during the sweep is rmdir'd."""
+    """A ``clips/<slug>/<date>/`` dir that becomes empty during the sweep gets rmdir'd."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=45)
     rel_clip = "clips/pantry/2026-03-17/060000.mp4"
@@ -243,7 +241,7 @@ def test_empty_date_dir_removed_after_pass1(db_engine: Engine, tmp_path: Path) -
 
 
 def test_non_empty_date_dir_preserved(db_engine: Engine, tmp_path: Path) -> None:
-    """A date directory containing a surviving (young) file is kept even if a sibling was swept."""
+    """A date dir with at least one surviving file is kept even when a sibling is swept."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=45)
     young_ts = _NOW - timedelta(days=2)
@@ -277,7 +275,7 @@ def test_non_empty_date_dir_preserved(db_engine: Engine, tmp_path: Path) -> None
 
 
 def test_clip_days_configurable(db_engine: Engine, tmp_path: Path) -> None:
-    """``retention.clip_days = 7`` removes clips older than 7 days; the default 30 would keep them."""
+    """A clip_days override changes the cutoff: same clip survives at 30, gets swept at 7."""
     cam_id = _seed_camera(db_engine)
     ten_day_ts = _NOW - timedelta(days=10)
     rel_clip = "clips/pantry/2026-04-21/060000.mp4"
@@ -296,7 +294,7 @@ def test_clip_days_configurable(db_engine: Engine, tmp_path: Path) -> None:
 
 
 def test_sweep_is_idempotent(db_engine: Engine, tmp_path: Path) -> None:
-    """A second sweep with identical inputs deletes nothing additional."""
+    """A second sweep over the same state reports zeros — no double-deletion or counter inflation."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=45)
     _ = _seed_clip(
@@ -325,7 +323,7 @@ def test_sweep_is_idempotent(db_engine: Engine, tmp_path: Path) -> None:
 
 
 def test_agent_starts_pruned_by_age(db_engine: Engine, tmp_path: Path) -> None:
-    """``agent_starts`` rows older than agent_starts_days are removed; recent ones survive."""
+    """``agent_starts`` rows past ``agent_starts_days`` are pruned; rows inside the window survive."""
     old_start = AgentStart(agent_name="poller", started_at=_NOW - timedelta(days=45))
     young_start = AgentStart(agent_name="poller", started_at=_NOW - timedelta(days=5))
     with get_session(db_engine) as session:
@@ -341,7 +339,7 @@ def test_agent_starts_pruned_by_age(db_engine: Engine, tmp_path: Path) -> None:
 
 
 def test_alerts_sent_pruned_by_age(db_engine: Engine, tmp_path: Path) -> None:
-    """``alerts_sent`` rows older than alerts_sent_days are removed; recent ones survive."""
+    """``alerts_sent`` rows past ``alerts_sent_days`` are pruned; rows inside the window survive."""
     cam_id = _seed_camera(db_engine)
     old_alert = AlertSent(
         alert_type=AlertType.INACTIVITY,
@@ -370,12 +368,12 @@ def test_alerts_sent_pruned_by_age(db_engine: Engine, tmp_path: Path) -> None:
 
 
 def test_independent_retention_windows(db_engine: Engine, tmp_path: Path) -> None:
-    """Each table's prune cutoff is independent: agent_starts_days=7, alerts_sent_days=30, clip_days=30."""
+    """Each table's prune cutoff is independent — same 10-day-old row is pruned or kept by table-specific config."""
     cam_id = _seed_camera(db_engine)
-    # 10-day-old agent_start: pruned under agent_starts_days=7 but kept under default 30.
+    # 10-day-old agent_start: pruned at agent_starts_days=7 but kept at default 30.
     with get_session(db_engine) as session:
         session.add(AgentStart(agent_name="poller", started_at=_NOW - timedelta(days=10)))
-        # 10-day-old alert: kept under alerts_sent_days=30.
+        # 10-day-old alert: kept at alerts_sent_days=30.
         session.add(
             AlertSent(
                 alert_type=AlertType.INACTIVITY,
@@ -401,8 +399,7 @@ def test_independent_retention_windows(db_engine: Engine, tmp_path: Path) -> Non
 
 
 def test_sweep_on_fresh_storage_root_does_not_crash(db_engine: Engine, tmp_path: Path) -> None:
-    """Day-zero deploy: ``storage_root`` exists but has no ``clips/`` or ``thumbs/`` subdirs yet."""
-    # tmp_path is empty; no clips/, no thumbs/. The sweep must short-circuit gracefully.
+    """Day-zero deploy: ``storage_root`` exists but has no ``clips/`` or ``thumbs/`` yet."""
     report = sweep(engine=db_engine, storage_root=tmp_path, retention=_retention(), now=_NOW)
 
     assert report == RetentionReport(
@@ -486,7 +483,6 @@ def test_sweep_full_pipeline_against_representative_state(db_engine: Engine, tmp
 
 
 def _write_per_frame_thumbs(storage_root: Path, per_clip_dir: str, frame_count: int) -> list[str]:
-    """Create ``frame_count`` thumb files under ``per_clip_dir`` and return their relpaths."""
     relpaths: list[str] = []
     for ordinal in range(frame_count):
         rel = f"{per_clip_dir}/{ordinal:02d}.jpg"
@@ -548,7 +544,7 @@ def _seed_per_frame_clip(  # noqa: PLR0913  # test-fixture builder; inlining the
 
 
 def test_retention_pass1_unlinks_per_frame_thumbs(db_engine: Engine, tmp_path: Path) -> None:
-    """Pass 1 unlinks every per-frame thumb file and rmdirs the per-clip <HHMMSS>/ subdir."""
+    """Pass 1 unlinks every per-frame thumb and rmdirs the per-clip ``<HHMMSS>/`` subdir."""
     cam_id = _seed_camera(db_engine)
     old_ts = _NOW - timedelta(days=45)
     rel_clip = "clips/pantry/2026-03-17/103045.mp4"
@@ -572,7 +568,7 @@ def test_retention_pass1_unlinks_per_frame_thumbs(db_engine: Engine, tmp_path: P
     for rel in frame_relpaths:
         assert not (tmp_path / rel).exists()
     assert not (tmp_path / per_clip_dir).exists()
-    # No legacy flat-file leftover at <HHMMSS>.jpg either.
+    # No flat-file leftover at <HHMMSS>.jpg either.
     assert not (tmp_path / "thumbs/pantry/2026-03-17/103045.jpg").exists()
 
 

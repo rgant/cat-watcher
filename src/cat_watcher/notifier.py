@@ -90,17 +90,14 @@ def send_email(
 def _escape_for_applescript(value: str) -> str:
     """Escape a Python string for embedding in an AppleScript double-quoted literal.
 
-    AppleScript string literals recognize ``\\\\``, ``\\"``, ``\\n``, ``\\r``, ``\\t``. An unescaped
-    backslash followed by an unrecognized character is undefined (parse error on some macOS
-    versions, silent mangling on others) — both manifest as the notification disappearing without
-    operator visibility. Order matters: escape backslashes *first* so we don't double-escape the
-    backslash we add for the quote.
+    Order matters: escape backslashes *first* so we don't double-escape the backslash we add for the
+    quote. An unescaped backslash followed by an unrecognized character is undefined in AppleScript
+    and manifests as the notification silently disappearing.
     """
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _osascript_payload(title: str, body: str) -> str:
-    """Render the AppleScript ``display notification`` command with escaped operator content."""
     return f'display notification "{_escape_for_applescript(body)}" with title "{_escape_for_applescript(title)}"'
 
 
@@ -114,8 +111,8 @@ def send_macos_notification(
 
     Returns :class:`NotifResult` and never raises. Handles missing executable (``osascript`` absent
     on non-macOS hosts), timeout, and non-zero exit. The first call after install triggers the
-    system "send notifications" permission prompt — that's why the umbrella CLI's
-    ``test-notification`` sub-command (Task 25) exists.
+    system "send notifications" permission prompt — the umbrella CLI's ``test-notification``
+    sub-command exists to fire that prompt deliberately at install time.
     """
     if not rules.enabled:
         return NotifResult(ok=True, error=_DISABLED_MARKER)

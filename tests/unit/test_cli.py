@@ -2,12 +2,6 @@
 
 Focuses on argument parsing + dispatch to handler functions. End-to-end behavior of the
 ``import-local`` handler itself is covered by tests/integration/test_import_local_end_to_end.py.
-
-Task 25 sub-commands (status, inspect, test-cameras, test-notification, fetch-models, reanalyze,
-backup, restore-backup) are tested handler-by-handler below. The pattern: build a Config via
-``make_config``, materialize the SQLite schema at ``<internal_root>/cat_watcher.sqlite`` via
-:func:`init_schema`, optionally seed rows via :func:`seed_clip` / :func:`seed_camera`, then call
-the handler directly with a typed ``_ParsedArgs`` and assert on stdout / exit code / DB state.
 """
 
 import urllib.error
@@ -191,16 +185,10 @@ def test_run_import_local_skips_detector_when_no_detect(tmp_path: Path, make_con
         _ = _run_import_local(args)
 
     detector_cls.from_weights.assert_not_called()
-    # Verify import_local was called with detector=None.
     _, kwargs = import_local_mock.call_args
     assert kwargs["detector"] is None
     assert isinstance(kwargs["now"], datetime)
     assert kwargs["now"].tzinfo == UTC
-
-
-# --- Task 25 shared helpers ----------------------------------------------------------------------
-# Imported from ``tests/fixtures/cli_test_helpers.py`` to keep this module under pylint's
-# ``too-many-lines`` cap; both ``test_cli.py`` and ``test_cli_reanalyze.py`` consume them.
 
 
 # --- status sub-command --------------------------------------------------------------------------
@@ -280,9 +268,8 @@ def test_inspect_renders_missing_file_marker(
 ) -> None:
     """A clip whose ``file_path`` doesn't exist on disk renders ``(missing)`` next to the path.
 
-    Pins the data-integrity-drift surface: row exists, file is gone (e.g. retention sweep ran
-    before the row was pruned). Operator must see this distinct from "(N bytes)" so they can
-    correlate against the retention log.
+    Operator must see "(missing)" distinct from "(N bytes)" to correlate against the retention log
+    when the row exists but the file is gone.
     """
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
@@ -310,8 +297,8 @@ def _amcrest_client_mock(
 ) -> MagicMock:
     """Autospec'd ``AmcrestClient`` instance with ``__enter__`` re-pointed at the mock itself.
 
-    Without the re-point, ``with client:`` would yield a fresh MagicMock and break the production
-    pattern where the same client survives the context-manager block.
+    Without the re-point, ``with client:`` would yield a fresh MagicMock — the production code
+    relies on the same client surviving the context-manager block.
     """
     client = cast("MagicMock", create_autospec(AmcrestClient, instance=True))
     client.__enter__.return_value = client
@@ -364,12 +351,7 @@ def test_test_cameras_clock_drift_ok_below_warn_threshold(
     make_config: Callable[[Path, Path], Config],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Drift ≤ 60s prints ``clock-drift: OK`` (not WARN, not FAIL).
-
-    Pins the lower bound of the threshold ladder. Without this, a regression that flipped the
-    comparison sign on the warn threshold would let any small drift print WARN — and the existing
-    ``120s -> WARN`` test would happily accept the broken output.
-    """
+    """Drift ≤ 60s prints ``clock-drift: OK`` (not WARN, not FAIL)."""
     config = config_with_dirs(tmp_path, make_config)
     client = _amcrest_client_mock(time_drift_seconds=5)  # well below warn threshold
     with (
@@ -412,10 +394,9 @@ def test_test_cameras_timezone_drift_emits_advisory_with_both_zones(
 ) -> None:
     """Camera reporting ``"America/Denver"`` with config ``"America/New_York"`` advises both zones.
 
-    Override the default ``timezone="UTC"`` on the seeded ``CameraConfig`` to ``"America/New_York"``
-    so the per-camera value is the source of the expected zone (rather than the
-    ``web.display_timezone`` fallback). That keeps the assertion focused on the comparison contract
-    and not on which config layer supplied the expected string.
+    Per-camera ``timezone`` is set explicitly so the seeded ``CameraConfig`` is the source of the
+    expected zone (rather than the ``web.display_timezone`` fallback) — keeps the assertion focused
+    on the comparison contract.
     """
     from cat_watcher.config import CameraConfig  # local import; only this test cares
 
@@ -520,7 +501,7 @@ def test_fetch_models_is_noop_when_file_already_present(
         exit_code = _run_fetch_models(make_handler_args())
     assert exit_code == 0
     download_mock.assert_not_called()
-    assert target.read_bytes() == b"already-there"  # untouched
+    assert target.read_bytes() == b"already-there"
 
 
 # --- backup sub-command --------------------------------------------------------------------------
@@ -566,10 +547,7 @@ def test_restore_backup_refuses_when_agents_loaded(
     assert "bootout" in err
 
 
-def test_restore_backup_copies_when_no_agents_loaded(
-    tmp_path: Path,
-    make_config: Callable[[Path, Path], Config],
-) -> None:
+def test_restore_backup_copies_when_no_agents_loaded(tmp_path: Path, make_config: Callable[[Path, Path], Config]) -> None:
     """With no agents loaded, the backup file is copied over the live DB."""
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
@@ -588,10 +566,7 @@ def test_restore_backup_copies_when_no_agents_loaded(
     assert target.read_bytes() == payload
 
 
-def test_restore_backup_returns_three_for_unknown_date(
-    tmp_path: Path,
-    make_config: Callable[[Path, Path], Config],
-) -> None:
+def test_restore_backup_returns_three_for_unknown_date(tmp_path: Path, make_config: Callable[[Path, Path], Config]) -> None:
     """A non-existent backup date returns the not-found exit code."""
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
@@ -678,10 +653,8 @@ def test_fetch_models_cleans_up_partial_download_on_failure(
 ) -> None:
     """A mid-download failure leaves no ``.part`` (and no truncated final file) behind.
 
-    Pins the atomic-write contract: a SIGKILL'd or network-failed download must not strand a
-    truncated artifact at ``target`` that the next invocation's existence check would treat as a
-    complete download. Mock writes some bytes to the ``.part`` then raises, then we assert both
-    the ``.part`` and the final ``target`` are absent.
+    Atomic-write contract: a SIGKILL'd or network-failed download must not strand a truncated
+    artifact at ``target`` that the next invocation's existence check would treat as complete.
     """
     config = config_with_dirs(tmp_path, make_config)
     target = config.internal_root / "models" / config.detector.model
@@ -723,7 +696,6 @@ def test_backup_returns_locked_when_storage_unavailable(
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "storage_root unavailable" in err
-    # No backup file written.
     assert not list((config.storage_root / "backups").glob("cat_watcher-*.sqlite"))
 
 
@@ -731,21 +703,14 @@ def test_backup_returns_locked_when_storage_unavailable(
 
 
 def test_config_path_precedence_arg_beats_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """``--config PATH`` overrides ``CAT_WATCHER_CONFIG`` which overrides the default.
-
-    Asserts on :func:`cat_watcher.config._resolve_config_path` directly so the precedence rule is
-    pinned without booting the full config loader (which would need real TOML on disk + real env).
-    """
+    """``--config PATH`` overrides ``CAT_WATCHER_CONFIG`` which overrides the default."""
     from cat_watcher.config import _resolve_config_path  # internal import; testing precedence helper directly
 
     arg_path = tmp_path / "from-arg.toml"
     env_path = tmp_path / "from-env.toml"
     monkeypatch.setenv("CAT_WATCHER_CONFIG", str(env_path))
 
-    # Argument wins over env.
     assert _resolve_config_path(arg_path) == arg_path
-    # Env wins over default when no argument.
     assert _resolve_config_path(None) == env_path
-    # Default kicks in when both are absent.
     monkeypatch.delenv("CAT_WATCHER_CONFIG")
     assert _resolve_config_path(None) == Path("./config.toml")

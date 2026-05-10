@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 
 def _materialize_db(internal_root: Path) -> None:
-    """Create the SQLite schema under ``internal_root`` so the lifespan startup succeeds."""
     engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
     Base.metadata.create_all(engine)
     engine.dispose()

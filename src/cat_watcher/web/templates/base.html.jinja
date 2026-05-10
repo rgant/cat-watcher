@@ -11,9 +11,6 @@
       {% endblock title %}
     </title>
     <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-    {# htmx 2.x powers the timeline range presets (Task 23) and the manual-label DELETE.
-       Loaded once in <head> so progressive-enhancement attributes (`hx-*`) on any
-       template — current or forthcoming — Just Work. #}
     <script src="https://unpkg.com/htmx.org@2.0.4"
             integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
             crossorigin="anonymous"
@@ -21,8 +18,8 @@
     {{ dev_hot_reload_script | safe }}
   </head>
   <body>
-    {# Active-link highlight: per-link aria-current="page" rather than a JS-driven class
-       so screen readers announce the current page even before any script runs. #}
+    {# Active-link highlight: per-link aria-current="page" rather than a JS-driven class so screen
+    readers announce the current page even before any script runs. #}
     {% set current_path = request.url.path %}
     <nav class="primary" aria-label="Primary">
       <a href="{{ url_for('root') }}"

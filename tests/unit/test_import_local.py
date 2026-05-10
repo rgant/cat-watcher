@@ -40,7 +40,7 @@ from cat_watcher.import_local import (
     ],
 )
 def test_dav_filename_re_matches_amcrest_pattern_only(name: str, matches: bool) -> None:  # noqa: FBT001  # pytest.parametrize boolean is the canonical pattern
-    """The filename regex accepts canonical Amcrest event clips (any trigger letter) and rejects everything else."""
+    """Strict shape catches operator-renamed files — only zero-padded mp4 names with the ``[M][0@0][0]`` suffix match."""
     assert (_DAV_FILENAME_RE.match(name) is not None) is matches
 
 
@@ -48,7 +48,7 @@ def test_dav_filename_re_matches_amcrest_pattern_only(name: str, matches: bool) 
 
 
 def test_find_date_dir_walks_to_nearest_yyyy_mm_dd_ancestor(tmp_path: Path) -> None:
-    """The nearest YYYY-MM-DD ancestor is returned, regardless of depth below source_dir."""
+    """Walking up from a clip stops at the first YYYY-MM-DD ancestor; deeper dirs (camera, NNN, dav, HH) are ignored."""
     source = tmp_path
     deep = source / "2026-04-27-camera" / "2026-04-27" / "001" / "dav" / "05" / "clip.mp4"
     deep.parent.mkdir(parents=True)
@@ -57,7 +57,7 @@ def test_find_date_dir_walks_to_nearest_yyyy_mm_dd_ancestor(tmp_path: Path) -> N
 
 
 def test_find_date_dir_returns_none_for_orphan_at_source_root(tmp_path: Path) -> None:
-    """A clip at the root of source_dir has no date ancestor; the operator's stray orphan case."""
+    """A clip at the root of source_dir has no date ancestor; covers the operator stray-orphan case."""
     source = tmp_path
     orphan = source / "06.47.04-06.48.58[M][0@0][0].mp4"
     _ = orphan.write_bytes(b"")
@@ -65,7 +65,7 @@ def test_find_date_dir_returns_none_for_orphan_at_source_root(tmp_path: Path) ->
 
 
 def test_find_date_dir_does_not_walk_above_source_dir(tmp_path: Path) -> None:
-    """A YYYY-MM-DD dir ABOVE source_dir is not consulted (would be operator surprise)."""
+    """A YYYY-MM-DD dir above source_dir would be an operator surprise; never consulted."""
     above = tmp_path / "2026-04-27"
     source = above / "snapshot"
     clip = source / "001" / "dav" / "05" / "clip.mp4"
@@ -78,7 +78,7 @@ def test_find_date_dir_does_not_walk_above_source_dir(tmp_path: Path) -> None:
 
 
 def test_find_jpg_dir_derives_parallel_jpg_path_from_dav_ancestor(tmp_path: Path) -> None:
-    """For .../<NNN>/dav/<HH>/<file>.mp4 the jpg dir is .../<NNN>/jpg/<HH>/<MM>/."""
+    """For ``.../<NNN>/dav/<HH>/<file>.mp4`` the jpg dir is ``.../<NNN>/jpg/<HH>/<MM>/``."""
     mp4 = tmp_path / "2026-04-27" / "001" / "dav" / "05" / "05.50.17-05.51.20[M][0@0][0].mp4"
     mp4.parent.mkdir(parents=True)
     _ = mp4.write_bytes(b"")
@@ -87,7 +87,7 @@ def test_find_jpg_dir_derives_parallel_jpg_path_from_dav_ancestor(tmp_path: Path
 
 
 def test_find_jpg_dir_returns_none_when_no_dav_ancestor(tmp_path: Path) -> None:
-    """If the path doesn't sit under a ``dav`` directory the jpg layout assumption breaks."""
+    """Without a ``dav`` ancestor the parallel ``jpg`` path can't be derived; caller falls back."""
     mp4 = tmp_path / "loose.mp4"
     _ = mp4.write_bytes(b"")
     assert _find_jpg_dir(mp4, start_hh=0, start_mm=0) is None
@@ -97,7 +97,7 @@ def test_find_jpg_dir_returns_none_when_no_dav_ancestor(tmp_path: Path) -> None:
 
 
 def test_locate_sd_thumb_picks_earliest_jpg_within_clip_window(tmp_path: Path) -> None:
-    """When several jpgs sit inside the clip's time window, the earliest is returned (best still)."""
+    """The earliest jpg in the clip window is the best still — closest to the trigger frame."""
     for sec in (24, 25, 26):
         _ = (tmp_path / f"{sec:02d}[M][0@0][0].jpg").write_bytes(b"")
     chosen = _locate_sd_thumb(tmp_path, start_sec=17, duration_sec=63)
@@ -105,18 +105,18 @@ def test_locate_sd_thumb_picks_earliest_jpg_within_clip_window(tmp_path: Path) -
 
 
 def test_locate_sd_thumb_returns_none_when_no_candidates_in_window(tmp_path: Path) -> None:
-    """Jpgs outside the clip's time window are not eligible (e.g. earlier seconds, off-by-minute)."""
+    """No jpg within ``[start_sec, start_sec + duration_sec]`` returns None — never the closest miss."""
     _ = (tmp_path / "10[M][0@0][0].jpg").write_bytes(b"")  # before start_sec
     assert _locate_sd_thumb(tmp_path, start_sec=20, duration_sec=5) is None
 
 
 def test_locate_sd_thumb_returns_none_when_directory_absent(tmp_path: Path) -> None:
-    """Missing jpg directory is benign; the caller falls back to ffmpeg extraction."""
+    """Missing jpg directory is benign; caller falls back to ffmpeg extraction."""
     assert _locate_sd_thumb(tmp_path / "missing", start_sec=0, duration_sec=10) is None
 
 
 def test_locate_sd_thumb_skips_non_amcrest_jpgs(tmp_path: Path) -> None:
-    """Stray jpgs (operator's screenshots, etc.) don't match the Amcrest naming pattern."""
+    """Stray jpgs (operator screenshots, etc.) don't match the Amcrest naming pattern."""
     _ = (tmp_path / "stray.jpg").write_bytes(b"")  # no [M][0@0][0] suffix
     _ = (tmp_path / "20[M][0@0][0].jpg").write_bytes(b"")
     chosen = _locate_sd_thumb(tmp_path, start_sec=15, duration_sec=10)
@@ -139,7 +139,7 @@ def _make_sd_clip(root: Path, date_str: str, hour: int, minute: int, second: int
 
 
 def test_scan_source_returns_matched_clips_and_skipped_count(tmp_path: Path) -> None:
-    """Walks the tree, returns matched clips with parsed timestamps + counts skipped non-matches."""
+    """Walking the SD tree returns matched DAV clips plus a skipped count — operators see both numbers."""
     _ = _make_sd_clip(tmp_path, "2026-04-27", 5, 50, 17)
     _ = _make_sd_clip(tmp_path, "2026-04-27", 19, 1, 35)
     # non-matching file (operator stray):
@@ -159,7 +159,7 @@ def test_scan_source_returns_matched_clips_and_skipped_count(tmp_path: Path) -> 
 
 
 def test_scan_source_handles_midnight_wrap(tmp_path: Path) -> None:
-    """A clip starting at 23:59:59 and ending at 00:00:30 spans into the next local day."""
+    """A clip ending past midnight spans into the next local day; end_ts must roll forward."""
     fname = "23.59.59-00.00.30[M][0@0][0].mp4"
     path = tmp_path / "2026-04-27" / "001" / "dav" / "23" / fname
     path.parent.mkdir(parents=True)
@@ -173,7 +173,7 @@ def test_scan_source_handles_midnight_wrap(tmp_path: Path) -> None:
 
 
 def test_scan_source_camera_tz_offsets_into_utc(tmp_path: Path) -> None:
-    """A camera timezone offset shifts the parsed local times into UTC."""
+    """Filename timestamps are in camera-local time; ``camera_tz`` shifts them to UTC for storage."""
     _ = _make_sd_clip(tmp_path, "2026-04-27", 5, 0, 0)
     matched, _ = _scan_source(tmp_path, camera_tz=ZoneInfo("America/New_York"))
     # Apr 27 2026 is EDT (UTC-4), so 05:00 local -> 09:00 UTC.

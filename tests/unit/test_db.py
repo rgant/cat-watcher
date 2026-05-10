@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 def _file_engine(tmp_path: Path) -> Engine:
     """Build a file-based SQLite engine for tests of ``create_engine`` itself.
 
-    The conftest ``db_engine`` fixture is built on the factory under test — using it here would
-    be circular. ``:memory:`` SQLite is also out (no WAL mode support).
+    The conftest ``db_engine`` fixture is built on the factory under test — using it here would be
+    circular. ``:memory:`` SQLite is also out (no WAL mode support).
     """
     db_path = tmp_path / "test.sqlite"
     return create_engine(f"sqlite:///{db_path}")
@@ -72,9 +72,8 @@ def _make_clip(camera: Camera, *, source_filename: str = "2026/05/03/12.00.00-12
 def test_create_engine_enables_wal_and_foreign_keys(tmp_path: Path) -> None:
     """A fresh connection must report ``journal_mode=wal`` and ``foreign_keys=1``.
 
-    SQLite's WAL mode is persistent on the database file, so we verify it is set after the
-    connect-time PRAGMA fires. ``foreign_keys`` is per-connection, so confirming it here proves the
-    connect listener actually ran for this new connection.
+    ``foreign_keys`` is per-connection, so confirming it here proves the connect listener actually
+    ran for this new connection.
     """
     eng = _file_engine(tmp_path)
     try:
@@ -108,8 +107,7 @@ def test_round_trip_camera_clip_alert(db_engine: Engine) -> None:
     with get_session(db_engine) as session:
         session.add_all([camera, clip, alert])
 
-    # Fresh session: reload from disk to prove the commit persisted the rows
-    # and the FK relationships round-trip correctly.
+    # Fresh session: reload from disk to prove the commit persisted and the FK round-trips.
     with get_session(db_engine) as session:
         loaded_camera = session.scalars(select(Camera).where(Camera.name == "pantry")).one()
         assert loaded_camera.display_name == "Pantry Litter Box Camera"
@@ -118,9 +116,7 @@ def test_round_trip_camera_clip_alert(db_engine: Engine) -> None:
         assert len(loaded_camera.clips) == 1
         loaded_clip = loaded_camera.clips[0]
         assert loaded_clip.has_cat is True
-        # ``pytest.approx`` is partially-typed in the upstream stubs; the comparison is
-        # well-defined at runtime and the suppression keeps basedpyright clean.
-        assert loaded_clip.max_score == pytest.approx(0.92)  # pyright: ignore[reportUnknownMemberType]
+        assert loaded_clip.max_score == 0.92
         assert loaded_clip.start_ts == datetime(2026, 5, 3, 12, 0, 0, tzinfo=UTC)
         # tz-aware DateTime columns must hand back tz-aware datetimes.
         assert loaded_clip.start_ts.tzinfo is not None
@@ -178,13 +174,9 @@ def test_camera_cascade_deletes_clips(db_engine: Engine) -> None:
 
 
 def test_clip_frame_model_round_trip_and_cascades(db_engine: Engine) -> None:
-    """Per-frame thumbnail rows attach to a ``Clip``, sort by ``ordinal``, and cascade on delete.
+    """Per-frame thumbnail rows attach to a ``Clip``, sort by ``ordinal`` ASC, and cascade on delete.
 
-    Confirms three guarantees the rest of the pipeline depends on:
-    * The ``Clip.frames`` relationship returns rows in ``ordinal`` ASC regardless of insert order.
-    * ``ondelete=CASCADE`` plus ``passive_deletes=True`` removes ``ClipFrame`` rows when a parent
-      ``Clip`` is deleted at the DB level (relies on ``PRAGMA foreign_keys=ON`` from the engine).
-    * Field round-trip preserves ``score`` / ``t_offset_seconds`` / ``thumb_path`` exactly.
+    Cascade relies on ``ondelete=CASCADE`` + ``passive_deletes=True`` + ``PRAGMA foreign_keys=ON``.
     """
     camera = _make_camera()
     clip = _make_clip(camera)
@@ -199,8 +191,8 @@ def test_clip_frame_model_round_trip_and_cascades(db_engine: Engine) -> None:
         loaded_clip = session.scalars(select(Clip)).one()
         assert len(loaded_clip.frames) == 2
         assert [f.ordinal for f in loaded_clip.frames] == [0, 1]
-        assert loaded_clip.frames[0].score == pytest.approx(0.91)  # pyright: ignore[reportUnknownMemberType]
-        assert loaded_clip.frames[0].t_offset_seconds == pytest.approx(0.0)  # pyright: ignore[reportUnknownMemberType]
+        assert loaded_clip.frames[0].score == 0.91
+        assert loaded_clip.frames[0].t_offset_seconds == 0.0
         assert loaded_clip.frames[0].thumb_path == "frames/pantry/0000.jpg"
         assert loaded_clip.frames[1].thumb_path == "frames/pantry/0001.jpg"
 
@@ -215,9 +207,8 @@ def test_clip_frame_model_round_trip_and_cascades(db_engine: Engine) -> None:
 def test_alert_sent_survives_camera_deletion(db_engine: Engine) -> None:
     """AlertSent rows persist after their Camera is deleted (no cascade — keep history).
 
-    Uses a nullable ``camera_id`` FK with no ``ondelete`` action: SQLite blocks the delete
-    (RESTRICT) unless the application clears the column first. The test clears it explicitly, then
-    verifies the alert row survives.
+    The nullable ``camera_id`` FK has no ``ondelete`` action, so SQLite blocks the delete (RESTRICT)
+    unless the application clears the column first.
     """
     camera = _make_camera()
     alert = AlertSent(
@@ -249,8 +240,7 @@ def test_alert_sent_survives_camera_deletion(db_engine: Engine) -> None:
 def test_heartbeat_round_trip(db_engine: Engine) -> None:
     """Heartbeat (PK on agent_name) inserts and reads back correctly.
 
-    The PK-on-string pattern is non-default for SQLAlchemy ORM models, so we verify the round-trip
-    explicitly rather than relying on the broader Camera/Clip/Alert round-trip.
+    The PK-on-string pattern is non-default for SQLAlchemy ORM models.
     """
     now = datetime(2026, 5, 3, 14, 0, 0, tzinfo=UTC)
     with get_session(db_engine) as session:
@@ -262,10 +252,8 @@ def test_heartbeat_round_trip(db_engine: Engine) -> None:
 
 
 def test_naive_datetime_is_rejected_on_insert(db_engine: Engine) -> None:
-    """Binding a naive datetime to a UTC column raises ``ValueError`` (no silent drift).
-
-    The ``UtcDateTime`` decorator rejects naive datetimes at bind time so a stray ``datetime.now()``
-    (without ``tz=UTC``) cannot quietly land in the DB labeled as UTC.
+    """Binding a naive datetime to a UTC column raises ``ValueError`` — a stray ``datetime.now()``
+    without ``tz=UTC`` must not quietly land labeled as UTC.
     """
     naive = datetime(2026, 5, 3, 12, 0, 0, tzinfo=None)  # noqa: DTZ001  # intentional: this is the failure path under test
     camera = Camera(
@@ -297,42 +285,32 @@ def test_utc_datetime_result_value_normalizes_aware_input_to_utc() -> None:
     Test the decorator directly to cover the branch.
     """
     decorator = UtcDateTime()
-    # ``dialect`` is ignored by both methods at runtime; cast a sentinel object so type-checkers
-    # accept the call without us having to construct a real dialect.
+    # ``dialect`` is ignored at runtime; cast a sentinel so type-checkers accept the call.
     fake_dialect = cast("Dialect", object())
 
     naive_input = datetime(2026, 5, 3, 12, 0, 0, tzinfo=None)  # noqa: DTZ001  # exercising the SQLite-style naive return path
     aware_naive = decorator.process_result_value(naive_input, dialect=fake_dialect)
     assert aware_naive == datetime(2026, 5, 3, 12, 0, 0, tzinfo=UTC)
 
-    # Branch under test: input already has a non-UTC tzinfo.
     eastern = timezone(timedelta(hours=-5))
     converted = decorator.process_result_value(datetime(2026, 5, 3, 7, 0, 0, tzinfo=eastern), dialect=fake_dialect)
     assert converted == datetime(2026, 5, 3, 12, 0, 0, tzinfo=UTC)
     assert converted is not None
     assert converted.tzinfo is UTC
 
-    # Coverage of the ``value is None`` early-return.
     assert decorator.process_result_value(None, dialect=fake_dialect) is None
     assert decorator.process_bind_param(None, dialect=fake_dialect) is None
 
-    # Cover ``process_literal_param`` (round-trips through bind-param normalization).
     literal = decorator.process_literal_param(datetime(2026, 5, 3, 12, 0, 0, tzinfo=eastern), dialect=fake_dialect)
-    # Eastern (-5h) 12:00 should normalize to UTC 17:00 in the rendered literal.
+    # Eastern (-5h) 12:00 normalizes to UTC 17:00 in the rendered literal.
     assert "17, 0" in literal
     assert "2026, 5, 3" in literal
 
-    # Cover ``python_type`` accessor.
     assert decorator.python_type is datetime
 
 
 def test_utc_datetime_normalizes_aware_non_utc_input_on_bind(db_engine: Engine) -> None:
-    """An aware, non-UTC datetime is converted to UTC before persistence (no wall-clock drift).
-
-    Guards against a future "simplification" that drops ``value.astimezone(UTC)`` from
-    ``process_bind_param``: without the conversion, an aware non-UTC datetime would store with the
-    wrong wall-clock value (the original local time labeled UTC) — a silent timezone bug.
-    """
+    """An aware, non-UTC datetime is converted to UTC before persistence (no wall-clock drift)."""
     eastern = ZoneInfo("America/New_York")
     # 2026-05-03 08:00:00-04:00 (EDT) is the same instant as 2026-05-03 12:00:00 UTC.
     eastern_input = datetime(2026, 5, 3, 8, 0, 0, tzinfo=eastern)
@@ -354,15 +332,9 @@ def test_utc_datetime_normalizes_aware_non_utc_input_on_bind(db_engine: Engine) 
 
 
 def test_get_session_commits_on_clean_exit(db_engine: Engine) -> None:
-    """A clean ``with`` block commits the changes; a fresh session sees them.
-
-    The rollback-on-exception path is covered separately; this is the symmetric happy-path commit.
-    Guards against a future refactor that accidentally drops ``session.commit()`` from the context
-    manager.
-    """
+    """A clean ``with`` block commits the changes; a fresh session sees them."""
     with get_session(db_engine) as session:
         session.add(_make_camera())
-        # No explicit commit; the context manager handles it on clean exit.
 
     with get_session(db_engine) as session:
         loaded = session.scalars(select(Camera).where(Camera.name == "pantry")).all()

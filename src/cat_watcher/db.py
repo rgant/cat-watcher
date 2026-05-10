@@ -89,13 +89,13 @@ class UtcDateTime(TypeDecorator[datetime]):  # pylint: disable=too-many-ancestor
     """
 
     impl: TypeEngine[datetime] | type[TypeEngine[datetime]] = DateTime(timezone=True)
-    # Pure, instance-stateless transforms → safe to cache compiled SQL.
-    # Adding constructor params later requires reconsidering this flag.
+    # Pure, instance-stateless transforms; safe to cache compiled SQL. Adding constructor params
+    # later requires reconsidering this flag.
     cache_ok: bool | None = True
 
     @override
     def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
-        del dialect  # required by base signature; unused here.
+        del dialect
         if value is None:
             return None
         if value.tzinfo is None:
@@ -105,7 +105,7 @@ class UtcDateTime(TypeDecorator[datetime]):  # pylint: disable=too-many-ancestor
 
     @override
     def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
-        del dialect  # required by base signature; unused here.
+        del dialect
         if value is None:
             return None
         if value.tzinfo is None:
@@ -114,8 +114,8 @@ class UtcDateTime(TypeDecorator[datetime]):  # pylint: disable=too-many-ancestor
 
     @override
     def process_literal_param(self, value: datetime | None, dialect: Dialect) -> str:
-        # Used only when SQLAlchemy needs to render a literal in an inlined SQL string;
-        # round-trip through ``process_bind_param`` to enforce the same UTC normalization.
+        # Round-trip through ``process_bind_param`` so inlined SQL literals get the same UTC
+        # normalization as bound parameters.
         normalized = self.process_bind_param(value, dialect)
         return repr(normalized)
 
@@ -148,7 +148,7 @@ class AlertType(enum.Enum):
 
 
 class Base(DeclarativeBase):
-    """Declarative base for all ORM models. No extra surface — keep it boring."""
+    """Declarative base for all ORM models."""
 
 
 class Camera(Base):
@@ -323,7 +323,6 @@ def create_engine(url: str) -> Engine:
         cursor = dbapi_conn.cursor()
         try:
             for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA synchronous=NORMAL"):
-                # PEP 249 ``cursor.execute`` is typed to return ``Any``; we discard it.
                 _ = cursor.execute(pragma)  # pyright: ignore[reportAny]
         finally:
             cursor.close()
@@ -337,20 +336,14 @@ def create_engine(url: str) -> Engine:
 def get_session(engine: Engine) -> Generator[Session]:
     """Yield a transactional :class:`Session` bound to ``engine``.
 
-    On clean exit the session is committed; any exception inside the ``with`` block triggers a
-    rollback before the exception propagates. The session is always closed.
-
-    Used as::
-
-        with get_session(engine) as session:
-            session.add(row)
-            # commit happens on successful exit
+    Commits on clean exit; rolls back on any exception (including ``KeyboardInterrupt`` and
+    ``SystemExit``); always closes.
     """
     session = Session(bind=engine, expire_on_commit=False)
     try:
         yield session
         session.commit()
-    except BaseException:  # rollback must run on KeyboardInterrupt / SystemExit too; bare ``raise`` re-propagates.
+    except BaseException:
         session.rollback()
         raise
     finally:

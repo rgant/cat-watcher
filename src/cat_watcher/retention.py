@@ -4,8 +4,8 @@ Two-pass design for clip cleanup (per spec §4.4 step 7):
 
 1. **DB-driven pass** — for each ``Clip`` whose ``start_ts`` is past the retention cutoff, delete
    the row inside its own transaction *first*, then unlink the clip + thumbnail files. Row-first
-   ordering means a crash between the two leaves only an orphan file, never a dangling row
-   pointing at a missing path.
+   ordering means a crash between the two leaves only an orphan file, never a dangling row pointing
+   at a missing path.
 
 2. **Orphan filesystem pass** — walks ``<storage_root>/clips`` and ``<storage_root>/thumbs``, and
    for any file whose mtime is past the same cutoff *and* whose relative path is not in the set of
@@ -65,7 +65,8 @@ def sweep(
     retention: RetentionConfig,
     now: datetime,
 ) -> RetentionReport:
-    """Run the full retention sweep against ``engine`` + ``storage_root``."""
+    """Apply all retention passes in order — aged clip rows, orphan files, empty date dirs, then
+    prune ``agent_starts`` and ``alerts_sent``."""
     clip_cutoff = now - timedelta(days=retention.clip_days)
     starts_cutoff = now - timedelta(days=retention.agent_starts_days)
     alerts_cutoff = now - timedelta(days=retention.alerts_sent_days)
@@ -99,13 +100,12 @@ def _pass1_db_driven(engine: Engine, storage_root: Path, cutoff: datetime) -> in
             file_path = storage_root / clip.file_path
             thumb_path = storage_root / clip.thumb_path
             # Read per-frame state while ``clip`` is still attached. A non-empty ``clip.frames``
-            # signals the new layout where the highest-scoring thumb lives one level deeper than
-            # the legacy layout — its parent is the per-clip ``<HHMMSS>/`` subdir we want to rmdir.
+            # means the parent of ``thumb_path`` is the per-clip ``<HHMMSS>/`` subdir to rmdir.
             frame_relpaths: list[str] = [f.thumb_path for f in clip.frames]
             per_clip_dir: Path | None = thumb_path.parent if clip.frames else None
             session.delete(clip)
-        # Files unlinked AFTER the row commit so a crash between the two leaves only an orphan
-        # file (handled by pass 2), never a dangling row pointing at a missing path.
+        # Unlink files AFTER the row commit so a crash between the two leaves only an orphan file
+        # (pass 2 collects it), never a dangling row pointing at a missing path.
         _ = _unlink_best_effort(file_path)
         _ = _unlink_best_effort(thumb_path)
         for rel in frame_relpaths:
@@ -152,9 +152,9 @@ def _pass2_orphan_files(engine: Engine, storage_root: Path, cutoff: datetime) ->
 def _cleanup_empty_date_dirs(storage_root: Path) -> int:
     """``rmdir`` any clips/<slug>/<YYYY-MM-DD>/ or thumbs/<slug>/<YYYY-MM-DD>/ that's empty.
 
-    Under ``thumbs/`` each date dir may contain per-clip ``<HHMMSS>/`` subdirectories (new layout)
-    alongside legacy ``<HHMMSS>.jpg`` flat files. Empty per-clip subdirs are rmdir'd first so they
-    don't block their parent date-dir cleanup; ``dirs_removed`` counts only date dirs.
+    Under ``thumbs/`` each date dir may contain per-clip ``<HHMMSS>/`` subdirectories alongside flat
+    ``<HHMMSS>.jpg`` files. Empty per-clip subdirs are rmdir'd first so they don't block their
+    parent date-dir cleanup; ``dirs_removed`` counts only date dirs.
     """
     removed = 0
     for top in (_CLIPS_DIR, _THUMBS_DIR):
@@ -172,7 +172,6 @@ def _cleanup_empty_date_dirs(storage_root: Path) -> int:
                 try:
                     date_dir.rmdir()
                 except OSError:
-                    # Non-empty (still has surviving files) or vanished mid-sweep — both fine to ignore.
                     continue
                 removed += 1
     return removed
@@ -186,7 +185,6 @@ def _rmdir_empty_per_clip_subdirs(date_dir: Path) -> None:
         try:
             child.rmdir()
         except OSError:
-            # Non-empty (frames still reference it) or already gone — ignore.
             continue
 
 
@@ -198,8 +196,7 @@ def _prune(
 ) -> int:
     """Bulk-delete rows of ``model`` whose ``age_column`` is past ``cutoff``; return row count."""
     with get_session(engine) as session:
-        # ``session.execute(delete(...))`` returns ``CursorResult`` at runtime (which has
-        # ``rowcount``); pyright sees the generic ``Result`` superclass that doesn't expose it.
+        # The runtime CursorResult has ``rowcount``; pyright sees the generic Result superclass.
         result = session.execute(delete(model).where(age_column < cutoff))
         return cast("int", result.rowcount)  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
 

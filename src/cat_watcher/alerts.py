@@ -94,9 +94,8 @@ _HARDCODED_COOLDOWN_OVERRIDES_HOURS: dict[AlertType, int] = {
 class AlertCandidate:
     """Rule evaluator output: a fully-rendered alert ready for :func:`dispatch_alert`.
 
-    Carrying ``alert_type`` here (rather than implying it from the evaluator that produced it)
-    means the orchestrator can collect candidates from multiple evaluators into a single list and
-    dispatch them uniformly without a parallel ``alert_type`` array.
+    ``alert_type`` lives on the candidate so the orchestrator can collect candidates from multiple
+    evaluators into a single list and dispatch them uniformly without a parallel array.
     """
 
     alert_type: AlertType
@@ -199,7 +198,6 @@ def _most_recent_sent_at(
     camera_id: int | None,
     cutoff: datetime,
 ) -> datetime | None:
-    """Return the latest ``alerts_sent.sent_at`` matching ``(alert_type, camera_id)`` since ``cutoff``."""
     camera_predicate = AlertSent.camera_id.is_(None) if camera_id is None else AlertSent.camera_id == camera_id
     stmt = (
         select(AlertSent.sent_at)
@@ -213,7 +211,7 @@ def _most_recent_sent_at(
 
 
 def _format_delivery_error(email_result: EmailResult, notif_result: NotifResult) -> str | None:
-    """Combine non-OK errors into a single ``email: ...; macos: ...`` string capped at 500 chars."""
+    """Combine non-OK errors into a single ``email: ...; macos: ...`` string, capped at 500 chars."""
     parts: list[str] = []
     if not email_result.ok and email_result.error:
         parts.append(f"email: {email_result.error}")
@@ -530,7 +528,6 @@ def evaluate_backup_stale(  # noqa: PLR0913  # rule reads filesystem mtime + ale
 
 
 def _upsert_alerts_heartbeat(session: Session, *, now: datetime) -> None:
-    """Insert or update the ``alerts`` heartbeat row."""
     existing = session.get(Heartbeat, _AGENT_NAME)
     if existing is None:
         session.add(Heartbeat(agent_name=_AGENT_NAME, last_seen_at=now))
@@ -729,9 +726,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     config = load_config(args.config)
     setup_agent_logging(agent_name="alerts", config=config)
-    # The internal root must exist (DB + logs); the storage_root may not (drive offline). We
-    # don't call ensure_storage_layout here because that requires storage_root to be a directory;
-    # the alerts agent specifically tolerates an unmounted drive.
+    # The internal root must exist (DB + logs); the storage_root may not (drive offline). The
+    # alerts agent must run while the external drive is offline so it can fire STORAGE_UNAVAILABLE.
     config.internal_root.mkdir(parents=True, exist_ok=True)
     if storage_available(config.storage_root):
         ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)

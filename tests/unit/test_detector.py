@@ -89,9 +89,8 @@ def test_detect_no_cat_when_no_frames_match(synthetic_clip_path: Path) -> None:
 def test_detect_filters_below_confidence_threshold(synthetic_clip_path: Path) -> None:
     """A sub-threshold cat detection records its raw score but doesn't flip ``has_cat``.
 
-    Diagnostic contract: contact-sheet thumbnails surface "near-miss" frames so the operator can
-    see *why* the detector ruled the clip cat-free; recording the actual sub-threshold score (vs.
-    a flat 0.0) is what makes that surface useful.
+    Recording the actual sub-threshold score (vs. a flat 0.0) is what lets the contact-sheet surface
+    "near-miss" frames the operator can use to see why the detector ruled the clip cat-free.
     """
     below_threshold = _fake_results(cls_ids=[_COCO_CAT], confidences=[0.20], boxes=[[1.0, 2.0, 3.0, 4.0]])
     detector, _ = _make_detector(return_value=below_threshold, frames_to_sample=3, confidence_threshold=0.50)
@@ -218,8 +217,7 @@ def test_detect_calls_model_with_numpy_arrays(synthetic_clip_path: Path) -> None
         assert frame.dtype == np.uint8
         assert frame.ndim == 3
         assert frame.shape[2] == 3  # RGB24 -> 3 channels
-        # ``verbose=False`` matters in production: a poller running every 5 minutes with N frames
-        # per clip would otherwise spam the log file with one ultralytics banner per inference.
+        # ``verbose=False`` keeps ultralytics from spamming the log with one banner per inference.
         assert call.kwargs.get("verbose") is False
 
 
@@ -354,11 +352,7 @@ def test_scored_frame_carries_frame_ndarray(synthetic_clip_path: Path) -> None:
 
 
 def test_detect_samples_frames_at_distinct_timestamps(synthetic_clip_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """ffmpeg is invoked with N distinct ``-ss <timestamp>`` values for ``frames_to_sample=N``.
-
-    Guards against a refactor that calls ``_extract_frame`` N times with the same timestamp
-    (which would yield N copies of one frame; a passing test that proves nothing).
-    """
+    """ffmpeg is invoked with N distinct ``-ss <timestamp>`` values for ``frames_to_sample=N``."""
     per_frame = _fake_results(cls_ids=[], confidences=[], boxes=[])
     detector, _ = _make_detector(return_value=per_frame, frames_to_sample=3)
     real_run = subprocess.run

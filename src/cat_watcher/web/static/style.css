@@ -1,10 +1,10 @@
 /* Mobile-first stylesheet for the cat-watcher web UI.
  *
- * Cascade: base rules target the smallest viewport (~360px). ``@media (min-width: ...)``
- * blocks layer in tablet and desktop enhancements. Only ``min-width`` queries are used —
- * never ``max-width`` — so adding a new breakpoint is purely additive (no existing rule
- * has to be unwound). Breakpoints are derived from where the layout begins to feel
- * cramped, not from device classes:
+ * Cascade: base rules target the smallest viewport (~360px). ``@media (min-width: ...)`` blocks
+ * layer in tablet and desktop enhancements. Only ``min-width`` queries are used — never
+ * ``max-width`` — so adding a new breakpoint is purely additive (no existing rule has to be
+ * unwound). Breakpoints are derived from where the layout begins to feel cramped, not from device
+ * classes:
  *
  * * **480px** — phone-landscape; filter form gains a horizontal axis.
  * * **768px** — tablet; clip-list table reverts from card-stack to a real ``<table>``.
@@ -69,8 +69,8 @@ body {
 h1 {
   margin-block-start: 0;
 
-  /* Scales smoothly between 1.4rem (~22px) on a small phone and 1.875rem (~30px) on
-   * a 1280px viewport. Uses ``vi`` so the breakpoints do not have to be retuned. */
+  /* Scales smoothly between 1.4rem (~22px) on a small phone and 1.875rem (~30px) on a 1280px
+     viewport. Uses ``vi`` so the breakpoints do not have to be retuned. */
   font-size: clamp(1.4rem, 1.1rem + 1.5vi, 1.875rem);
   line-height: 1.2;
 }
@@ -84,9 +84,9 @@ a {
   color: var(--color-link);
 }
 
-/* ``@media (hover: hover)`` gates the hover state to pointing devices that can
- * actually hover; touch devices receive the focus-visible state on tap instead,
- * avoiding the sticky-:hover problem on mobile Safari / Chrome. */
+/* ``@media (hover: hover)`` gates the hover state to pointing devices that can actually hover;
+   touch devices receive the focus-visible state on tap instead, avoiding the sticky-:hover problem
+   on mobile Safari / Chrome. */
 @media (hover: hover) {
   a:hover {
     color: var(--color-link-hover);
@@ -102,8 +102,8 @@ a:focus-visible {
   outline-offset: 2px;
 }
 
-/* WCAG-recommended visually-hidden helper. Used on ``<caption>`` so the table's
- * purpose is announced to screen readers without consuming visual real estate. */
+/* WCAG-recommended visually-hidden helper. Used on ``<caption>`` so the table's purpose is
+   announced to screen readers without consuming visual real estate. */
 .sr-only {
   position: absolute;
 
@@ -128,12 +128,11 @@ a:focus-visible {
   overflow-inline: auto;
   overscroll-behavior-inline: contain;
 
-  /* Horizontal scroll on the rare phone too narrow to fit five short links —
-   * wrapping at 360px would push primary nav onto two rows, eating vertical space
-   * above the fold. ``overflow-inline: auto`` keeps it compact and reachable.
-   * ``overscroll-behavior-inline: contain`` stops the scroll from chaining to the
-   * page; ``scrollbar-gutter: stable`` reserves space so layout doesn't shift when
-   * the scrollbar appears. */
+  /* Horizontal scroll on the rare phone too narrow to fit five short links — wrapping at 360px
+     would push primary nav onto two rows, eating vertical space above the fold. ``overflow-inline:
+     auto`` keeps it compact and reachable. ``overscroll-behavior-inline: contain`` stops the
+     scroll from chaining to the page; ``scrollbar-gutter: stable`` reserves space so layout
+     doesn't shift when the scrollbar appears. */
   display: flex;
   flex-wrap: nowrap;
   gap: var(--space-xs);
@@ -149,8 +148,8 @@ a:focus-visible {
     flex-wrap: wrap;
     align-items: center;
 
-    /* 44×44 minimum tap target (WCAG SC 2.5.5). The padding is what gets touched —
-     * tightening this for a "denser" desktop look would break thumb-tap reliability. */
+    /* 44×44 minimum tap target (WCAG SC 2.5.5). The padding is what gets touched — tightening this
+       for a "denser" desktop look would break thumb-tap reliability. */
     min-block-size: var(--tap-target);
     padding: var(--space-sm) var(--space-md);
     border-radius: .25rem;
@@ -166,8 +165,8 @@ a:focus-visible {
 }
 
 main {
-  /* No max-width yet; the ``@media (min-width: 1024px)`` block adds the cap so prose
-   * doesn't sprawl across a 4K display. */
+  /* No max-width yet; the ``@media (min-width: 1024px)`` block adds the cap so prose doesn't sprawl
+     across a 4K display. */
   inline-size: 100%;
 }
 
@@ -206,8 +205,8 @@ button {
   min-block-size: var(--tap-target);
   padding: var(--space-xs) var(--space-sm);
 
-  /* 16px font-size on form inputs prevents iOS Safari from auto-zooming the page when
-   * the field gains focus — Safari only zooms when font-size is < 16px. */
+  /* 16px font-size on form inputs prevents iOS Safari from auto-zooming the page when the field
+     gains focus — Safari only zooms when font-size is < 16px. */
   font-size: 1rem;
 }
 
@@ -218,12 +217,8 @@ button {
 
 /* ---------- clip-list table (mobile: card-stack via pseudo-labels) ---------- */
 
-/* The plan article calls for "data tables convert to card stacks on mobile, labeling
- * each value." Approach: at mobile width, ``<table>``/``<tr>``/``<td>`` switch to
- * ``display: block``; ``<thead>`` is visually hidden (still reachable by SR for users
- * who navigate via the table-row-by-row keystroke); each ``<td>`` renders its column
- * label via ``::before`` and ``data-label``. Above 768px (``@media`` further down)
- * the rules invert and a real table re-emerges. */
+/* Mobile card-stack: <thead> is sr-only-hidden but kept reachable for screen-reader row navigation;
+   each <td> renders its column via ::before + data-label. Inverted at >=768px. */
 
 .clip-list {
   display: block;
@@ -231,7 +226,6 @@ button {
   inline-size: 100%;
 
   & thead {
-    /* Visually hidden, equivalent to .sr-only. */
     position: absolute;
 
     overflow: hidden;
@@ -286,7 +280,6 @@ button {
 }
 
 .clip-list .thumb-cell {
-  /* Thumbnail row: drop the label, center the image, give it room. */
   display: block;
   margin-block-end: var(--space-sm);
 }
@@ -361,12 +354,9 @@ video {
   color: var(--color-muted);
 }
 
-/* =====================================================================
+/* =================================================================================================
  * Tablet: 768px+
- *
- * Re-establish the real ``<table>`` for the clip list, switch forms back
- * to a horizontal flex axis, and widen the body margin.
- * ===================================================================== */
+ * ============================================================================================== */
 
 @media (width >= 48rem) {
   body {
@@ -378,7 +368,6 @@ video {
     flex-wrap: wrap;
   }
 
-  /* Filter and label forms: horizontal flex with wrapping when items don't fit. */
   .filter-form,
   .label-form {
     flex-flow: row wrap;
@@ -398,14 +387,12 @@ video {
     align-self: end;
   }
 
-  /* Restore real table layout — pseudo-labels disappear via ``content: none``. */
   .clip-list {
     display: table;
 
     & thead {
-      /* Reverse the sr-only visually-hidden block to re-show the column headings.
-       * Only ``display`` and the dimensional/visibility properties matter here;
-       * margin/padding/border are honored on the cells, not the header group. */
+      /* Reversing sr-only: only display/dimensional props matter — table-header-group ignores
+         margin/padding/border, which apply to the cells instead. */
       position: static;
 
       overflow: visible;
@@ -424,8 +411,8 @@ video {
     }
 
     & tr {
-      /* ``display: table-row`` ignores margin, padding, and border-radius; styling
-       * for stripes / borders applies to the cells (& th, & td) below. */
+      /* ``display: table-row`` ignores margin, padding, and border-radius; styling for stripes /
+         borders applies to the cells (& th, & td) below. */
       display: table-row;
       background: transparent;
     }
@@ -465,8 +452,8 @@ video {
     max-inline-size: 10rem;
   }
 
-  /* Constrain video back to a sensible width once the viewport is wide enough that
-   * stretching it edge-to-edge wastes screen space. */
+  /* Constrain video back to a sensible width once the viewport is wide enough that stretching it
+     edge-to-edge wastes screen space. */
   video {
     max-inline-size: 40rem;
   }
@@ -480,18 +467,15 @@ video {
 
   .range-presets a {
     /* Tighter padding once we're confident there's a real pointer driving the segmented control;
-     * the surrounding pill keeps the visual height reasonable. */
+       the surrounding pill keeps the visual height reasonable. */
     min-block-size: 2rem;
     padding: var(--space-xs) var(--space-md);
   }
 }
 
-/* =====================================================================
+/* =================================================================================================
  * Desktop: 1024px+
- *
- * Cap content width for readability and switch detail metadata to two
- * columns where the value column has room to breathe.
- * ===================================================================== */
+ * ============================================================================================== */
 
 @media (width >= 64rem) {
   main {
@@ -508,14 +492,9 @@ video {
   }
 }
 
-/* =====================================================================
+/* =================================================================================================
  * Timeline page (/, /timeline)
- *
- * Layered like the rest of this stylesheet: mobile-first base rules, then
- * @media (min-width:...) blocks for tablet and desktop. Selectors are
- * scoped under .timeline-svg / .thumb-strip / .timeline-header so they
- * don't leak to other pages.
- * ===================================================================== */
+ * ============================================================================================== */
 
 .timeline-header {
   display: flex;
@@ -539,8 +518,8 @@ video {
     flex-wrap: nowrap;
     align-items: center;
 
-    /* WCAG SC 2.5.5 minimum is preserved by the surrounding pill height; the @media (>=768px)
-     * block below tightens this padding once a real pointer is the likely input mode. */
+    /* WCAG SC 2.5.5 minimum is preserved by the surrounding pill height; the @media (>=768px) block
+       below tightens this padding once a real pointer is the likely input mode. */
     min-block-size: var(--tap-target);
     padding: var(--space-xs) var(--space-md);
     border-radius: 6px;
@@ -643,8 +622,8 @@ video {
   font-size: .625rem;
 
   /* paint-order: stroke fill paints the stroke first (a fat translucent white halo around each
-   * glyph) then the fill on top — cheap legibility win against any underlying clip color without
-   * adding a backing <rect> to the template. */
+     glyph) then the fill on top — cheap legibility win against any underlying clip color without
+     adding a backing <rect> to the template. */
   paint-order: stroke fill;
 
   fill: var(--color-warn);
@@ -687,7 +666,7 @@ video {
 
 .thumb-strip {
   display: grid;
-  grid-template-columns: [thumb-start] 1fr [thumb-end]; /* mobile: single column */
+  grid-template-columns: [thumb-start] 1fr [thumb-end];
   gap: var(--space-md);
 
   margin: 0;
@@ -700,15 +679,15 @@ video {
 
     overflow: hidden;
 
-    /* Small gutter around the <img> so the inset box-shadow state-border (1px no-cat, 2px cat,
-     * 2px error) reads as a "matted frame" rather than being hidden under the photo. */
+    /* Small gutter around the <img> so the inset box-shadow state-border (1px no-cat, 2px cat, 2px
+       error) reads as a "matted frame" rather than being hidden under the photo. */
     padding: .1875rem;
     border-radius: 6px;
 
     background: var(--color-bg-stripe);
 
     /* The inset state border is delivered via box-shadow so it doesn't shift the layout when its
-   * width changes between the 1px no-cat case and the 2px cat / error case. */
+       width changes between the 1px no-cat case and the 2px cat / error case. */
     box-shadow: inset 0 0 0 1px var(--color-no-cat-graphic);
   }
 
@@ -721,18 +700,14 @@ video {
   }
 }
 
-/* Hover/active scale animation is wrapped in a reduced-motion guard further down; the
- * transition declaration is gated to the same media query so users who request reduced
- * motion get an instant state-change instead of a 0.12s ease. */
 @media (prefers-reduced-motion: no-preference) {
   .thumb-strip .clip {
     transition: transform .12s ease-out;
   }
 }
 
-/* When both manual and error apply, the manual blue stripe is added on the side; the inset
- * border still reads error-red because manual is rendered as a side-stripe, not as a
- * box-shadow. */
+/* When both manual and error apply, the manual blue stripe is added on the side; the inset border
+   still reads error-red because manual is rendered as a side-stripe, not as a box-shadow. */
 .thumb-strip .clip-manual::before {
   content: '';
 
@@ -748,7 +723,7 @@ video {
 
 .thumb-strip .clip-error::after {
   /* Small red dot in the top-right corner: extra signal for error so the card reads even when
-   * scrolling fast and the inset border blurs. */
+     scrolling fast and the inset border blurs. */
   content: '';
 
   position: absolute;
@@ -795,7 +770,7 @@ video {
   padding: var(--space-xs) var(--space-sm);
 
   /* Round the bottom corners to match the image's border-radius so the gradient strip's
-   * bottom-left/right don't poke past the image's curve. */
+     bottom-left/right don't poke past the image's curve. */
   border-end-start-radius: 6px;
   border-end-end-radius: 6px;
 
@@ -813,10 +788,10 @@ video {
 }
 
 @media (hover: hover) {
-  /* Hover scale + soft outer ring. The outer ring is a translucent --color-link tint stacked
-   * AFTER the existing inset state-border (1px no-cat / 2px cat / 2px error) so both shadows
-   * paint together; adding an outer-only shadow without re-declaring the inset would clobber
-   * the matted-frame border. Hardcoded oklch matches --color-link at 25% alpha. */
+  /* Hover scale + soft outer ring. The outer ring is a translucent --color-link tint stacked AFTER
+     the existing inset state-border (1px no-cat / 2px cat / 2px error) so both shadows paint
+     together; adding an outer-only shadow without re-declaring the inset would clobber the
+     matted-frame border. Hardcoded oklch matches --color-link at 25% alpha. */
   .thumb-strip .clip:hover {
     transform: scale(1.02);
     box-shadow:
@@ -870,7 +845,7 @@ video {
 
   text-align: center;
 
-  /* color: muted is inherited from the legacy .empty-state rule above. */
+  /* color: muted is inherited from the .empty-state rule above. */
 
   & .empty-icon {
     inline-size: 3rem;
@@ -881,7 +856,7 @@ video {
   & h2 {
     margin: 0;
 
-    /* Override the legacy italic so the h2 reads as a normal headline. */
+    /* Override .empty-state's italic so the headline reads as normal weight. */
     font-style: normal;
     color: var(--color-text);
   }
@@ -890,7 +865,7 @@ video {
     max-inline-size: 28rem;
     margin: 0;
 
-    /* Override legacy italic for the prose. The block layout speaks for itself. */
+    /* Override .empty-state's italic. */
     font-style: normal;
   }
 }
@@ -929,10 +904,7 @@ video {
 }
 
 .timeline-tooltip::before {
-  /* Small upward-pointing triangle anchored above the tooltip's left edge. The tooltip itself is
-   * positioned 12px below/right of the cursor by timeline.js, so the pointer points UP toward the
-   * cursor. The border-bottom-color matches the tooltip's dark background so the triangle reads
-   * as part of the same shape. */
+  /* Triangle points up toward the cursor (timeline.js offsets the tooltip 12px below/right). */
   content: '';
 
   position: absolute;
@@ -974,14 +946,9 @@ video {
   }
 }
 
-/* =====================================================================
+/* =================================================================================================
  * Clip-detail contact sheet
- *
- * Row of small per-frame thumbnails under the <video> element. Layered
- * with the same mobile-first breakpoints as ``.thumb-strip``: 2 columns
- * at phone-landscape, 4 at tablet, 6 at desktop. Each frame is a small
- * card with the t-offset stamp underneath.
- * ===================================================================== */
+ * ============================================================================================== */
 
 .contact-sheet {
   margin-block: var(--space-sm);
@@ -989,7 +956,7 @@ video {
 
 .contact-sheet-list {
   display: grid;
-  grid-template-columns: [contact-start] 1fr [col-2] 1fr [contact-end]; /* mobile: 2 columns */
+  grid-template-columns: [contact-start] 1fr [col-2] 1fr [contact-end];
   gap: var(--space-sm);
 
   margin: var(--space-sm) 0 0;
@@ -1017,9 +984,7 @@ video {
   color: var(--color-muted);
 }
 
-/* Click-to-seek wrapper: the entire frame card is the click target so a tap anywhere on the
- * thumbnail or its caption row seeks the <video> player. ``width: 100%`` makes the button
- * stretch to its flex parent (<li>) so the click area fills the grid cell. */
+/* width: 100% stretches the button to its flex parent <li> so the click area fills the grid cell. */
 .contact-sheet-button {
   cursor: pointer;
 
@@ -1056,9 +1021,7 @@ video {
   color: var(--color-text);
 }
 
-/* Sub-threshold scores get the same muted treatment as ``.contact-sheet-time`` so the operator
- * can see at a glance which frames the detector ruled out. The threshold itself lives in
- * config; the route precomputes the per-frame branch and toggles this class. */
+/* Sub-threshold frames get the muted treatment so the operator sees which the detector ruled out. */
 .contact-sheet-score-below {
   color: var(--color-muted);
 }

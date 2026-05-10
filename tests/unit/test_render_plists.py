@@ -25,11 +25,8 @@ def _override_cadences(config: Config) -> Config:
     )
 
 
-def test_substitutions_for_poller_uses_poller_cadence(
-    tmp_path: Path,
-    make_config: Callable[..., Config],
-) -> None:
-    """The ``poller`` agent gets ``__START_INTERVAL__`` from ``poller.cadence_seconds``."""
+def test_substitutions_for_poller_uses_poller_cadence(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """``poller`` placeholders pull ``__START_INTERVAL__`` from ``poller.cadence_seconds`` (not alerts/backup)."""
     config = _override_cadences(make_config(tmp_path / "internal", tmp_path / "storage"))
     subs = render_plists._substitutions_for("poller", config=config, repo_dir=tmp_path)
     assert subs["__REPO_DIR__"] == str(tmp_path)
@@ -37,21 +34,15 @@ def test_substitutions_for_poller_uses_poller_cadence(
     assert subs["__START_INTERVAL__"] == "600"
 
 
-def test_substitutions_for_alerts_uses_alerts_cadence(
-    tmp_path: Path,
-    make_config: Callable[..., Config],
-) -> None:
-    """The ``alerts`` agent gets ``__START_INTERVAL__`` from ``alerts.cadence_seconds``."""
+def test_substitutions_for_alerts_uses_alerts_cadence(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """``alerts`` placeholders pull ``__START_INTERVAL__`` from ``alerts.cadence_seconds``, not poller's."""
     config = _override_cadences(make_config(tmp_path / "internal", tmp_path / "storage"))
     subs = render_plists._substitutions_for("alerts", config=config, repo_dir=tmp_path)
     assert subs["__START_INTERVAL__"] == "900"
 
 
-def test_substitutions_for_backup_uses_calendar_fields(
-    tmp_path: Path,
-    make_config: Callable[..., Config],
-) -> None:
-    """The ``backup`` agent gets ``__HOUR__`` / ``__MINUTE__`` from ``backup.cadence_*`` fields."""
+def test_substitutions_for_backup_uses_calendar_fields(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """``backup`` uses calendar-style ``__HOUR__`` / ``__MINUTE__``; no interval placeholder."""
     config = _override_cadences(make_config(tmp_path / "internal", tmp_path / "storage"))
     subs = render_plists._substitutions_for("backup", config=config, repo_dir=tmp_path)
     assert subs["__HOUR__"] == "4"
@@ -59,28 +50,22 @@ def test_substitutions_for_backup_uses_calendar_fields(
     assert "__START_INTERVAL__" not in subs
 
 
-def test_substitutions_for_web_has_no_cadence(
-    tmp_path: Path,
-    make_config: Callable[..., Config],
-) -> None:
+def test_substitutions_for_web_has_no_cadence(tmp_path: Path, make_config: Callable[..., Config]) -> None:
     """The ``web`` agent runs as KeepAlive; no cadence placeholder is needed."""
     config = make_config(tmp_path / "internal", tmp_path / "storage")
     subs = render_plists._substitutions_for("web", config=config, repo_dir=tmp_path)
     assert set(subs) == {"__REPO_DIR__", "__INTERNAL_ROOT__"}
 
 
-def test_substitutions_for_unknown_agent_raises(
-    tmp_path: Path,
-    make_config: Callable[..., Config],
-) -> None:
-    """Asking for an agent slug not in the four known names is a programming error."""
+def test_substitutions_for_unknown_agent_raises(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """An agent slug not in the four known names is a programming error, not a soft skip."""
     config = make_config(tmp_path / "internal", tmp_path / "storage")
     with pytest.raises(ValueError, match="unknown agent"):
         _ = render_plists._substitutions_for("ghost", config=config, repo_dir=tmp_path)
 
 
 def test_render_one_substitutes_all_placeholders(tmp_path: Path) -> None:
-    """``_render_one`` substitutes every placeholder in the template and writes the rendered plist."""
+    """Every ``__FOO__`` token in the template is replaced; the rendered plist contains no leftover placeholders."""
     template_dir = tmp_path / "templates"
     template_dir.mkdir()
     output_dir = tmp_path / "out"
@@ -102,7 +87,7 @@ def test_render_one_substitutes_all_placeholders(tmp_path: Path) -> None:
 
 
 def test_render_one_rejects_unrendered_placeholder(tmp_path: Path) -> None:
-    """A typo in the substitution dict leaves a ``__FOO__`` token; the helper must abort."""
+    """A typo in the substitution dict leaves a ``__FOO__`` token; the helper must abort, not write a half-rendered plist."""
     template_dir = tmp_path / "templates"
     template_dir.mkdir()
     output_dir = tmp_path / "out"
@@ -120,7 +105,7 @@ def test_main_creates_output_and_logs_dirs(
     monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., Config],
 ) -> None:
-    """``main()`` mkdirs ``--output`` and ``<internal_root>/logs/`` even when both are absent."""
+    """``main()`` creates ``--output`` and ``<internal_root>/logs/`` if either is absent."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     storage_root.mkdir()

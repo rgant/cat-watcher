@@ -70,7 +70,7 @@ def _build_record(  # noqa: PLR0913 — test-fixture builder; bundling args at t
 
 
 def test_required_schema_fields_only_with_no_extras() -> None:
-    """Plain INFO call produces exactly the six required schema fields and no extras key."""
+    """A vanilla log call emits exactly the six required schema fields — no spurious keys."""
     record = _build_record(msg="ingested clip")
     parsed = _format_record(record, agent_name="poller")
     assert set(parsed.keys()) == {"ts", "level", "logger", "agent", "pid", "msg"}
@@ -82,7 +82,7 @@ def test_required_schema_fields_only_with_no_extras() -> None:
 
 
 def test_ts_is_iso8601_utc_with_microseconds() -> None:
-    """The ``ts`` field is tz-aware UTC with microsecond precision and round-trips via fromisoformat."""
+    """``ts`` is ISO-8601 UTC with microsecond precision so log lines sort lexically by time."""
     record = _build_record()
     parsed = _format_record(record)
     ts = parsed["ts"]
@@ -98,14 +98,14 @@ def test_ts_is_iso8601_utc_with_microseconds() -> None:
 
 
 def test_per_call_extras_are_emitted_under_extras_key() -> None:
-    """Per-call ``extra={...}`` keys land under the JSONL ``extras`` object verbatim."""
+    """Logger ``extra=`` kwargs land under the ``extras`` key, isolated from the schema fields."""
     record = _build_record(msg="ingested clip", extra={"camera_name": "office", "clip_id": 42})
     parsed = _format_record(record)
     assert parsed["extras"] == {"camera_name": "office", "clip_id": 42}
 
 
 def test_standard_logrecord_attributes_never_appear_in_extras() -> None:
-    """Stdlib LogRecord attrs (pathname, args, levelname, etc.) are filtered out of ``extras``."""
+    """``LogRecord`` builtins (``args``, ``msg``, etc.) must not leak into the ``extras`` dict."""
     record = _build_record(msg="formatted: %s", args=("kitchen",))
     parsed = _format_record(record)
     assert "extras" not in parsed
@@ -113,13 +113,12 @@ def test_standard_logrecord_attributes_never_appear_in_extras() -> None:
 
 
 def _raise_value_error() -> None:
-    """Raise a ``ValueError`` for use as the source of an ``exc_info`` triple in tests."""
     msg = "bad value"
     raise ValueError(msg)
 
 
 def test_exception_capture_emits_qualified_exc_type_msg_and_traceback() -> None:
-    """``logger.exception``-style records emit ``exc_type`` (``builtins.ValueError``), ``exc_msg``, and ``traceback``."""
+    """``exc_info`` produces the qualified type, the message, and a string traceback — operators need all three to triage."""
     exc_info: ExcInfoTuple = None
     try:
         _raise_value_error()
@@ -135,7 +134,7 @@ def test_exception_capture_emits_qualified_exc_type_msg_and_traceback() -> None:
 
 
 def test_setup_logging_creates_logs_dir_and_writes_jsonl(tmp_path: Path) -> None:
-    """``setup_logging`` mkdirs ``logs/`` if needed and the first record lands in ``<agent>.jsonl``."""
+    """First call materializes the ``logs/`` dir under ``internal_root`` and writes one record per JSONL line."""
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
     logging.getLogger("cat_watcher.test").info("first record")
 
@@ -148,20 +147,19 @@ def test_setup_logging_creates_logs_dir_and_writes_jsonl(tmp_path: Path) -> None
 
 
 def test_setup_logging_is_idempotent(tmp_path: Path) -> None:
-    """A repeated ``setup_logging`` call leaves the root logger with one file + one stream handler."""
+    """Repeated calls leave the root logger with exactly one file + one stream handler."""
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
     handlers = logging.getLogger().handlers
     rotating_count = sum(1 for h in handlers if isinstance(h, logging.handlers.RotatingFileHandler))
-    # Use exact-type comparison: ``RotatingFileHandler`` is a subclass of ``StreamHandler`` so a
-    # plain ``isinstance`` would double-count the file handler.
+    # ``RotatingFileHandler`` subclasses ``StreamHandler``; exact-type comparison avoids double-counting.
     stream_count = sum(1 for h in handlers if type(h) is logging.StreamHandler)
     assert rotating_count == 1
     assert stream_count == 1
 
 
 def test_setup_logging_does_not_call_basicconfig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``setup_logging`` configures handlers explicitly; it must not delegate to ``logging.basicConfig``."""
+    """Handlers must be configured explicitly; ``logging.basicConfig`` must not be called."""
 
     def _fail(*_args: object, **_kwargs: object) -> None:
         msg = "logging.basicConfig must not be called by setup_logging"
@@ -172,7 +170,7 @@ def test_setup_logging_does_not_call_basicconfig(tmp_path: Path, monkeypatch: py
 
 
 def test_rotation_creates_backup_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Driving ``_MAX_BYTES`` low forces a rotation; the active file plus a ``.1`` backup must exist."""
+    """Forcing ``_MAX_BYTES`` low triggers rotation; both the active file and a ``.1`` backup must exist."""
     monkeypatch.setattr(logging_setup, "_MAX_BYTES", 200)
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
 
@@ -188,11 +186,10 @@ def test_rotation_creates_backup_file(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 def test_stderr_handler_respects_level_parameter(tmp_path: Path) -> None:
-    """The stderr handler must be set to the same level as the root logger.
+    """The stderr handler must match the root logger level.
 
-    Pins the contract that ``--verbose`` (level=INFO) actually surfaces INFO records on
-    stderr, and the default (level=WARNING) keeps stderr quiet. Without this, INFO records
-    from httpxyz / amcrest_client only reach the JSONL file.
+    Without this, ``--verbose`` (INFO) wouldn't surface INFO records on stderr — they'd only reach
+    the JSONL file — and the default (WARNING) wouldn't keep stderr quiet.
     """
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
     handlers = logging.getLogger().handlers
@@ -206,7 +203,7 @@ def test_stderr_handler_respects_level_parameter(tmp_path: Path) -> None:
 
 
 def test_single_line_invariant_with_embedded_newlines() -> None:
-    """A message containing literal newlines still serializes to a single physical line."""
+    """Embedded newlines in a message round-trip through JSON without ever breaking the one-record-per-line contract."""
     record = _build_record(msg="line one\nline two\nline three")
     formatter = JsonFormatter(agent_name="poller")
     line = formatter.format(record)

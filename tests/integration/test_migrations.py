@@ -76,9 +76,8 @@ def test_upgrade_head_creates_all_tables(alembic_cfg: Config, tmp_path: Path) ->
 def test_no_db_url_raises_rather_than_creating_stub_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With no CAT_WATCHER_DB_URL and no config.toml, upgrade raises ValueError loudly.
 
-    Pre-fix behavior silently created an empty SQLite stub at the alembic.ini fallback path. The
-    current contract: a typo'd config or missing env var fails with a clear diagnostic instead of
-    leaving a confusing leftover file on disk.
+    A typo'd config or missing env var fails with a clear diagnostic instead of leaving a confusing
+    leftover SQLite stub on disk at the alembic.ini fallback path.
     """
     monkeypatch.delenv("CAT_WATCHER_DB_URL", raising=False)
     # Point CAT_WATCHER_CONFIG at a path that doesn't exist so load_config never fires.

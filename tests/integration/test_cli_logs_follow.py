@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 
 def _record(ts: str, msg: str) -> str:
-    """Serialize a JSONL record line (with trailing newline) for fixture writes."""
     payload = {
         "ts": ts,
         "level": "INFO",
@@ -66,7 +65,6 @@ def _run_follow_in_thread(
 
 
 def _appended_msgs_from_sink(sink: io.StringIO) -> list[str]:
-    """Parse current sink contents into the list of `msg` strings (skipping non-string msgs)."""
     out: list[str] = []
     for line in sink.getvalue().splitlines():
         if not line:
@@ -78,7 +76,6 @@ def _appended_msgs_from_sink(sink: io.StringIO) -> list[str]:
 
 
 def _wait_for_messages(sink: io.StringIO, expected: list[str], timeout_s: float) -> list[str]:
-    """Poll ``sink`` up to ``timeout_s`` for every message in ``expected``; return the seen list."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         seen = _appended_msgs_from_sink(sink)
@@ -145,7 +142,7 @@ def test_follow_handles_rotation_inode_change(tmp_path: Path, monkeypatch: pytes
 
 
 def test_follow_loop_exits_cleanly_on_keyboard_interrupt(tmp_path: Path) -> None:
-    """Direct unit-style test of the loop function — its KeyboardInterrupt path returns 0."""
+    """The loop's KeyboardInterrupt path returns 0."""
     log_path = tmp_path / "logs" / "poller.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _ = log_path.write_text(_record("2026-05-05T10:00:00.000000+00:00", "seed"), encoding="utf-8")

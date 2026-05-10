@@ -1,6 +1,4 @@
-// Wires contact-sheet buttons to the <video> element so clicking a frame seeks the player to
-// that frame's t_offset_seconds. Auto-play is intentionally omitted: the operator may be
-// triaging from the office without sound, and a sudden audio playback would be jarring.
+// No auto-play after seek: operator may be triaging from a quiet room.
 (function () {
   'use strict';
 

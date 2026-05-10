@@ -1,9 +1,9 @@
 """Implementation of the ``cat-watcher logs`` sub-command.
 
 Reads JSONL records written by :mod:`cat_watcher.logging_setup`, applies operator filters
-(``--since``, ``--level``, ``--camera``, ``--grep``), and emits either the raw lines (``--json``)
-or a pretty, color-aware columnar format. ``--follow`` tails the selected files and re-opens them
-on rotation so the operator can ``pixi run logs`` and see new records as they're written.
+(``--since``, ``--level``, ``--camera``, ``--grep``), and emits either the raw lines(``--json``) or
+a pretty, color-aware columnar format. ``--follow`` tails the selected files and re-opens them on
+rotation so the operator can ``pixi run logs`` and see new records as they're written.
 """
 
 import argparse
@@ -81,9 +81,8 @@ def _resolve_agent_files(internal_root: Path, agents: Iterable[str]) -> list[Pat
 def _iter_records_in(fh: IO[str]) -> Iterator[LogRecordDict]:
     """Parse one JSONL record per non-empty line from ``fh``; silently skip malformed lines.
 
-    A malformed line almost always means a write-in-progress (the writer flushes line-by-line but
-    a rotation can leave a torn final line). The viewer is read-only and should not abort on torn
-    data; the next read will see the file in a consistent state.
+    A malformed line almost always means a write-in-progress or a torn line at rotation. The viewer
+    is read-only and should not abort on torn data; the next read sees a consistent file.
     """
     for raw in fh:
         line = raw.rstrip("\n")
@@ -106,7 +105,7 @@ def _parse_jsonl_lines(path: Path) -> Iterator[LogRecordDict]:
 
 
 def _record_ts_key(record: LogRecordDict) -> str:
-    """Sortable key for chronological merge. Lexicographic ISO 8601 sorts chronologically."""
+    """Sortable key for chronological merge (lexicographic ISO 8601 sorts chronologically)."""
     ts = record.get("ts")
     return ts if isinstance(ts, str) else ""
 
@@ -216,7 +215,7 @@ class _Filters:
     grep: str | None
 
     def passes(self, record: LogRecordDict) -> bool:
-        """Return True if ``record`` satisfies every active filter (``None`` filters skip)."""
+        """True iff ``record`` satisfies every active filter (``None`` filters skip)."""
         if self.since is not None and not _record_after(record, self.since):
             return False
         if self.level is not None and not _record_at_level(record, self.level):
@@ -284,7 +283,7 @@ def _follow_loop(
                     continue
                 stat = path.stat()
                 last_pos = state.get(path, stat.st_ino)
-                # Truncate (file got smaller) → start over from BOF.
+                # File shrank → truncated; restart from BOF.
                 start = 0 if stat.st_size < last_pos else last_pos
                 if stat.st_size <= start:
                     state.set(path, stat.st_ino, start)
@@ -353,8 +352,8 @@ class LogsNamespace(argparse.Namespace):
 class RunArgs:
     """Typed view over the post-argparse fields the ``logs`` sub-command needs.
 
-    Bundling the fields gives :func:`run` a small parameter surface and lets basedpyright flow
-    concrete types through the call.
+    Lets :func:`run` take a small typed parameter surface so basedpyright can flow concrete types
+    through the call.
     """
 
     agent: str | None

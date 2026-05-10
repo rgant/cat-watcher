@@ -1,16 +1,4 @@
-"""Tests for cat_watcher.backup.
-
-Coverage roadmap (per Task 19 plan):
-
-* **Data integrity** — the produced backup file is a valid SQLite database carrying the same rows
-  as the source.
-* **Pruning** — with ``keep_count + 3`` seeded files of varying mtimes, only the ``keep_count``
-  most recent survive; honored across different ``keep_count`` values.
-* **Storage wait** — ``main()`` exits with code 2 when ``wait_for_storage`` raises
-  :class:`StorageUnavailableError`; the success path runs the backup + prune end-to-end.
-* **agent_starts row** — inserted on a successful run; **not** inserted when the storage wait
-  times out (the agent never reaches the DB write).
-"""
+"""Tests for cat_watcher.backup."""
 
 import os
 import sqlite3
@@ -155,12 +143,7 @@ def _build_config(make_config: Callable[..., Config], internal_root: Path, stora
 
 
 def test_main_returns_zero_and_writes_backup_on_clean_run(tmp_path: Path, make_config: Callable[..., Config]) -> None:
-    """Storage available + DB present → exit 0, backup file written, ``agent_starts`` row inserted.
-
-    Patching ``wait_for_storage_using_config`` confirms the wait fired with the live Config,
-    which in turn carries the ``[storage]`` intervals — so the wait wrapper sees the operator's
-    configured values, not the module-level defaults.
-    """
+    """Storage available + DB present → exit 0, backup file written, ``agent_starts`` row inserted."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     config = _build_config(make_config, internal_root, storage_root)
@@ -177,7 +160,6 @@ def test_main_returns_zero_and_writes_backup_on_clean_run(tmp_path: Path, make_c
 
     backups = list((storage_root / "backups").glob(_BACKUP_GLOB))
     assert len(backups) == 1
-    # Verify agent_starts row exists.
     engine = create_engine(f"sqlite:///{internal_root / _DB_FILENAME}")
     try:
         with get_session(engine) as session:
@@ -204,10 +186,7 @@ def test_main_returns_two_when_storage_wait_times_out(tmp_path: Path, make_confi
         rc = main([])
 
     assert rc == 2
-    # No backup file written.
     assert not list((storage_root / "backups").glob(_BACKUP_GLOB))
-    # No agent_starts row written either — the agent must reach the DB write only after the wait
-    # succeeds.
     engine = create_engine(f"sqlite:///{internal_root / _DB_FILENAME}")
     try:
         with get_session(engine) as session:
@@ -220,9 +199,9 @@ def test_main_returns_two_when_storage_wait_times_out(tmp_path: Path, make_confi
 def test_run_backup_prunes_by_mtime_not_filename(tmp_path: Path) -> None:
     """``_prune`` keys on mtime, not filename — a date-old name with a recent mtime survives.
 
-    Pins the spec §4.12 contract: pruning is mtime-based. Without this divergence between filename
-    order and mtime order, the existing parametrized prune test cannot distinguish a correct
-    ``key=lambda p: p.stat().st_mtime`` from a regression to ``key=lambda p: p.name``.
+    Pins the spec §4.12 contract: pruning is mtime-based. Required because divergence between
+    filename order and mtime order is the only way to distinguish ``key=p.stat().st_mtime`` from
+    ``key=p.name``.
     """
     internal_root = tmp_path / "internal"
     internal_root.mkdir()
@@ -291,12 +270,7 @@ def test_run_backup_prune_ignores_files_outside_glob(tmp_path: Path) -> None:
 
 
 def test_run_backup_does_not_modify_source_db(tmp_path: Path) -> None:
-    """The source DB content is unchanged after the hot-copy runs (read-only-on-source contract).
-
-    The online backup API copies pages out without writing to source. A regression that opened the
-    source connection writeable and accidentally modified it (schema migration, journal rewrite,
-    etc.) would change the row content.
-    """
+    """The source DB content is unchanged after the hot-copy runs (read-only-on-source contract)."""
     internal_root = tmp_path / "internal"
     internal_root.mkdir()
     db_path = _populated_db(internal_root)

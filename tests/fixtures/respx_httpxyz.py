@@ -1,8 +1,8 @@
 """Teach respx how to patch httpxyz/httpcorexyz, and make it the default mocker.
 
-respx ships :class:`respx.mocks.HTTPCoreMocker`, which patches httpcore's connection / pool /
-proxy classes. httpxyz uses ``httpcorexyz`` (a vendored fork) instead, so respx's default mocker
-patches the wrong class objects and tests' mocks never fire. This module fixes that two ways:
+respx ships :class:`respx.mocks.HTTPCoreMocker`, which patches httpcore's connection / pool / proxy
+classes. httpxyz uses ``httpcorexyz`` (a vendored fork) instead, so respx's default mocker patches
+the wrong class objects and tests' mocks never fire. This module fixes that two ways:
 
 1. **Subclass HTTPCoreMocker with httpcorexyz targets.** :class:`HTTPCoreXYZMocker` declares
    ``name = "httpcorexyz"`` and the matching patch target paths under ``httpcorexyz._{a,}sync``;
@@ -17,12 +17,7 @@ patches the wrong class objects and tests' mocks never fire. This module fixes t
 ``tests/conftest.py`` imports this module before any other respx-touching imports so the side
 effects (registration + default override) run before tests collect.
 
-This replaces the previous ``tests/fixtures/httpxyz_compat.py`` ``sys.modules`` aliasing trick,
-which made respx's HTTPCoreMocker resolve its httpcore patch targets through httpcorexyz module
-objects. The new approach uses respx's documented extension mechanism for the patch targets, and
-only the default-mocker override remains a private-attribute pragma.
-
-TODO(ROB, 20260507, respx): drop the ``respx.mock._using`` mutation once respx exposes a public
+TODO(ROB, 20260507, respx#316): drop the ``respx.mock._using`` mutation once respx exposes a public
 API for setting the default mocker. See lundberg's note on
 https://github.com/lundberg/respx/issues/316: *"There's no current way of setting the respx
 default mocker."*

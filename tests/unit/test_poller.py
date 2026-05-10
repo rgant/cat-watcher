@@ -51,7 +51,7 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def test_update_state_success_advances_last_polled_when_no_clips(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """A successful tick with no new clips advances ``last_polled_at`` only."""
+    """Empty ingest still bumps ``last_polled_at`` so the heartbeat advances even on quiet polls."""
     cam_id = seed_camera(db_engine, last_clip_at=_NOW - timedelta(days=2), last_cat_seen_at=_NOW - timedelta(days=3))
     previous_clip_at = _NOW - timedelta(days=2)
     previous_cat_at = _NOW - timedelta(days=3)
@@ -76,7 +76,7 @@ def test_update_state_success_advances_last_clip_at_when_clips_ingested(
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., None],
 ) -> None:
-    """``last_clip_at`` becomes ``max(start_ts of new clips)`` when clips were ingested."""
+    """``last_clip_at`` becomes ``max(start_ts)`` of new clips when any are ingested."""
     cam_id = seed_camera(db_engine)
     clip1_ts = _NOW - timedelta(minutes=30)
     clip2_ts = _NOW - timedelta(minutes=10)
@@ -98,7 +98,7 @@ def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., None],
 ) -> None:
-    """``last_cat_seen_at`` advances to the latest cat-positive clip's start_ts."""
+    """``last_cat_seen_at`` advances to the latest cat-positive clip; later non-cat clips don't move it back."""
     cam_id = seed_camera(db_engine)
     no_cat_ts = _NOW - timedelta(minutes=30)
     cat_ts = _NOW - timedelta(minutes=20)
@@ -123,7 +123,7 @@ def test_update_state_success_preserves_last_cat_seen_when_no_cat_positive(
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., None],
 ) -> None:
-    """If new clips are ingested but none are cat-positive, ``last_cat_seen_at`` is preserved."""
+    """A polling round with only no-cat clips leaves ``last_cat_seen_at`` untouched (no false reset)."""
     previous_cat_at = _NOW - timedelta(days=3)
     cam_id = seed_camera(db_engine, last_cat_seen_at=previous_cat_at)
     new_ts = _NOW - timedelta(minutes=10)
@@ -145,7 +145,7 @@ def test_update_state_success_respects_manual_has_cat_override(
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., None],
 ) -> None:
-    """``COALESCE(manual_has_cat, has_cat)`` semantics: a model-false clip with ``manual_has_cat=True`` counts as cat-positive."""
+    """``COALESCE(manual_has_cat, has_cat)``: a model-false clip with ``manual_has_cat=True`` is cat-positive."""
     cam_id = seed_camera(db_engine)
     ts = _NOW - timedelta(minutes=5)
     seed_clip(db_engine, camera_id=cam_id, start_ts=ts, has_cat=False, manual_has_cat=True)
@@ -161,7 +161,7 @@ def test_update_state_success_respects_manual_has_cat_override(
 
 
 def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """A successful tick after a non-OK status clears ``poll_status_since`` (transition back to OK)."""
+    """Successful poll after a failure clears ``poll_status_since`` and ``poll_error`` — recovery is observable."""
     cam_id = seed_camera(
         db_engine,
         poll_status=PollStatus.UNREACHABLE,
@@ -184,7 +184,7 @@ def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: En
 
 
 def test_update_state_failure_sets_poll_status_since_on_first_failure(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """OK -> non-OK transition sets ``poll_status_since`` to ``now`` and records the error."""
+    """OK -> non-OK transition pins ``poll_status_since`` to ``now`` and records the error message."""
     cam_id = seed_camera(db_engine)  # starts OK
 
     with get_session(db_engine) as session:
@@ -206,7 +206,7 @@ def test_update_state_failure_sets_poll_status_since_on_first_failure(db_engine:
 
 
 def test_update_state_failure_preserves_poll_status_since_on_repeat(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """A second consecutive non-OK tick leaves ``poll_status_since`` unchanged (still failing)."""
+    """A repeat non-OK tick leaves ``poll_status_since`` pointing at the original transition."""
     earlier = _NOW - timedelta(hours=1)
     cam_id = seed_camera(
         db_engine,
@@ -277,7 +277,7 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(
 
 
 def test_update_state_failure_preserves_last_polled_at_when_cursor_locked(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """``advance_cursor=False`` on the failure path: cursor stays put, status fields update."""
+    """Failure path with ``advance_cursor=False``: cursor stays put while status fields update."""
     earlier = _NOW - timedelta(hours=1)
     cam_id = seed_camera(db_engine, last_polled_at=earlier)
 
@@ -331,7 +331,7 @@ def test_update_state_failure_preserves_last_polled_at_when_cursor_locked(db_eng
     ],
 )
 def test_poller_args_truncates_default_window(case: tuple[PollerArgs, bool]) -> None:
-    """``--since`` / ``--until`` / ``--limit`` mark the run as scoped; other flags do not."""
+    """Only ``--since`` / ``--until`` / ``--limit`` mark the run as scoped — gates cursor advancement."""
     args, expected = case
     assert args.truncates_default_window is expected
 
@@ -340,7 +340,7 @@ def test_poller_args_truncates_default_window(case: tuple[PollerArgs, bool]) -> 
 
 
 def test_upsert_heartbeat_inserts_when_absent(db_engine: Engine) -> None:
-    """First call for an agent name inserts the row."""
+    """First call for an unseen ``agent_name`` inserts a fresh row at ``now``."""
     with get_session(db_engine) as session:
         upsert_heartbeat(session, agent_name="poller", now=_NOW)
 
@@ -367,7 +367,7 @@ def test_upsert_heartbeat_updates_when_present(db_engine: Engine) -> None:
 
 
 def test_pid_lock_writes_pid_file_and_releases_on_exit(tmp_path: Path) -> None:
-    """The lock context manager writes the current PID and removes the lock on clean exit."""
+    """Inside the context the ``.poller.pid`` file holds the current PID; after exit the lock can be re-acquired."""
     with pid_lock(tmp_path):
         pid_file = tmp_path / ".poller.pid"
         assert pid_file.is_file()
@@ -380,9 +380,9 @@ def test_pid_lock_writes_pid_file_and_releases_on_exit(tmp_path: Path) -> None:
 def test_pid_lock_raises_when_already_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A second concurrent acquisition raises ``PollerLockedError``.
 
-    Mocks ``fcntl.flock`` to raise ``BlockingIOError`` on the second call (mirroring what
-    ``LOCK_NB`` does cross-process when the lock is held). Same-process flock is reentrant on the
-    same FD so we can't exercise this with a literal nested ``with``.
+    Same-process flock is reentrant on the same FD, so simulate cross-process contention by mocking
+    ``fcntl.flock`` to raise ``BlockingIOError`` on the second call (what ``LOCK_NB`` does when the
+    lock is held).
     """
     real_flock = fcntl.flock
     calls = {"count": 0}
@@ -407,7 +407,7 @@ def test_pid_lock_raises_when_already_held(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_relative_paths_for_uses_camera_local_date_and_time() -> None:
-    """The on-disk layout matches the camera-local clock (operator-friendly date dirs)."""
+    """On-disk layout uses the camera-local clock so date dirs line up with operator expectations."""
     local_dt = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
     rel_clip, rel_thumb = relative_paths_for("pantry", local_dt)
     assert rel_clip == "clips/pantry/2026-05-01/064704.mp4"
@@ -418,7 +418,7 @@ def test_relative_paths_for_uses_camera_local_date_and_time() -> None:
 
 
 def test_resolve_window_uses_args_since_when_provided(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """``--since`` overrides every other source."""
+    """``--since`` overrides every other source (cursor, retention backfill)."""
     cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(hours=1))
     args = PollerArgs(since=_NOW - timedelta(days=2))
     with get_session(db_engine) as session:
@@ -430,7 +430,7 @@ def test_resolve_window_uses_args_since_when_provided(db_engine: Engine, seed_ca
 
 
 def test_resolve_window_uses_last_polled_at_when_no_since(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """Steady-state: ``camera.last_polled_at`` is the start of the window."""
+    """Steady state: the resume cursor is ``camera.last_polled_at``."""
     last_poll = _NOW - timedelta(minutes=10)
     cam_id = seed_camera(db_engine, last_polled_at=last_poll)
     with get_session(db_engine) as session:
@@ -441,7 +441,7 @@ def test_resolve_window_uses_last_polled_at_when_no_since(db_engine: Engine, see
 
 
 def test_resolve_window_first_run_uses_retention_days_backfill(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """Fresh-install: no ``last_polled_at`` and no ``--since`` -> fall back to ``now - retention``."""
+    """Fresh install with no cursor and no ``--since`` falls back to ``now - retention``."""
     cam_id = seed_camera(db_engine, last_polled_at=None)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -451,7 +451,7 @@ def test_resolve_window_first_run_uses_retention_days_backfill(db_engine: Engine
 
 
 def test_resolve_window_args_until_overrides_now(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """``--until`` caps the upper bound; default is ``now``."""
+    """``--until`` caps the upper bound (default is ``now``)."""
     cam_id = seed_camera(db_engine)
     explicit_until = _NOW - timedelta(hours=1)
     with get_session(db_engine) as session:
@@ -465,7 +465,7 @@ def test_resolve_window_args_until_overrides_now(db_engine: Engine, seed_camera:
 
 
 def test_extract_thumbnail_produces_valid_jpeg(synthetic_clip_path: Path, tmp_path: Path) -> None:
-    """Real ffmpeg invocation against the synthetic clip yields a non-empty JPEG."""
+    """Real ffmpeg against the synthetic clip yields a non-empty JPEG (no mocks)."""
     thumb = tmp_path / "thumb.jpg"
     extract_thumbnail(synthetic_clip_path, thumb)
     assert thumb.is_file()
@@ -477,7 +477,6 @@ def test_extract_thumbnail_produces_valid_jpeg(synthetic_clip_path: Path, tmp_pa
 
 
 def _make_mock_detector(*, has_cat: bool, version: str = "test@deadbeef", side_effect: BaseException | None = None) -> MagicMock:
-    """Build a Detector mock with a canned ``detect()`` return or side effect."""
     mock_detector = MagicMock(spec=Detector)
     mock_detector.version = version
     if side_effect is not None:
@@ -495,7 +494,7 @@ def _make_mock_detector(*, has_cat: bool, version: str = "test@deadbeef", side_e
 
 
 def test_detection_fields_for_returns_no_detect_markers_when_detector_is_none(tmp_path: Path) -> None:
-    """``--no-detect`` (detector=None) yields the standard skip markers stored in the Clip row."""
+    """``detector=None`` (the ``--no-detect`` path) yields the standard skip markers on the Clip row."""
     fields = detection_fields_for(None, tmp_path / "anyfile.mp4")
 
     assert fields["analysis_error"] == "skipped: --no-detect"
@@ -504,7 +503,7 @@ def test_detection_fields_for_returns_no_detect_markers_when_detector_is_none(tm
 
 
 def test_detection_fields_for_records_detector_error(tmp_path: Path) -> None:
-    """A DetectorError during detect() is captured into ``analysis_error`` (clip still inserts)."""
+    """A DetectorError gets captured into ``analysis_error`` so the clip row still inserts."""
     detector = _make_mock_detector(has_cat=False, side_effect=DetectorError("ffprobe died"))
     fields = detection_fields_for(detector, tmp_path / "anyfile.mp4")
 
@@ -532,7 +531,7 @@ def test_update_state_failure_raises_when_camera_missing(db_engine: Engine) -> N
 
 
 def test_extract_thumbnail_raises_when_ffmpeg_missing(synthetic_clip_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``ffmpeg`` missing from PATH surfaces as ``PollerError``."""
+    """Missing ``ffmpeg`` on PATH surfaces as ``PollerError`` rather than a raw ``FileNotFoundError``."""
 
     def missing_which(_name: str) -> str | None:
         return None
@@ -544,7 +543,7 @@ def test_extract_thumbnail_raises_when_ffmpeg_missing(synthetic_clip_path: Path,
 
 
 def test_extract_thumbnail_raises_on_ffmpeg_failure(tmp_path: Path) -> None:
-    """A bogus input file causes ffmpeg to exit non-zero, surfaced as ``PollerError``."""
+    """ffmpeg's non-zero exit (bogus input) surfaces as ``PollerError`` rather than a raw stderr."""
     bogus = tmp_path / "not-a-video.txt"
     _ = bogus.write_text("definitely not an mp4")
     with pytest.raises(PollerError, match="thumbnail failed"):
@@ -557,9 +556,8 @@ def test_extract_thumbnail_raises_on_ffmpeg_failure(tmp_path: Path) -> None:
 def test_parse_args_supports_full_flag_surface(tmp_path: Path) -> None:
     """All CLI flags round-trip into a populated PollerArgs.
 
-    ``--since`` / ``--until`` use explicit ``+00:00`` offsets so the test is independent of the OS
-    timezone the test runner happens to be in (naive values are now interpreted as OS-local by
-    ``_parse_iso_datetime``).
+    ``--since`` / ``--until`` use explicit ``+00:00`` offsets so the assertion is independent of
+    the test runner's OS timezone (naive values are interpreted as OS-local by ``_parse_iso_datetime``).
     """
     cfg_path = tmp_path / "cfg.toml"
     args = _parse_args(
@@ -591,7 +589,7 @@ def test_parse_args_supports_full_flag_surface(tmp_path: Path) -> None:
 
 
 def test_parse_args_defaults_are_empty() -> None:
-    """No CLI flags means PollerArgs() defaults — ``run_tick`` falls back at the boundary."""
+    """No CLI flags means PollerArgs() defaults; ``run_tick`` resolves them at the boundary."""
     args = _parse_args([])
 
     assert args.config_path is None
@@ -609,13 +607,11 @@ def test_parse_iso_datetime_naive_treated_as_os_local() -> None:
     from tz_helpers import pinned_tz
 
     with pinned_tz("America/New_York"):  # EDT in May = UTC-04:00
-        # Naive: "May 4 midnight in New York" → "May 4 04:00 UTC"
+        # Naive: "May 4 midnight in New York" -> "May 4 04:00 UTC".
         naive_result = _parse_iso_datetime("2026-05-04T00:00:00")
         assert naive_result == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)
-        # Explicit UTC offset: honored as-is.
         explicit_result = _parse_iso_datetime("2026-05-04T00:00:00+00:00")
         assert explicit_result == datetime(2026, 5, 4, 0, 0, 0, tzinfo=UTC)
-        # Explicit non-UTC offset: converted.
         offset_result = _parse_iso_datetime("2026-05-04T00:00:00-04:00")
         assert offset_result == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)
 
@@ -633,7 +629,7 @@ def test_parse_iso_datetime_naive_treated_as_os_local() -> None:
     ids=["caps_to_limit", "none_means_all", "empty_input"],
 )
 def test_limited_caps_iterable(items: list[int], limit: int | None, expected: list[int]) -> None:
-    """``_limited`` yields at most ``limit`` items; ``None`` yields everything."""
+    """``_limited`` caps to ``limit``, returns all when None, and yields nothing for an empty input."""
     assert list(_limited(iter(items), limit)) == expected
 
 
@@ -657,7 +653,7 @@ def test_run_tick_raises_when_camera_filter_does_not_match_config(
 
 
 def _disabled_alerts_config(make_config: Callable[..., Config], internal_root: Path, storage_root: Path) -> Config:
-    """Build a Config with both alert channels disabled — Task 18 wiring tests don't need real I/O."""
+    """Build a Config with both alert channels disabled — wiring tests don't need real I/O."""
     base = make_config(internal_root, storage_root)
     return base.model_copy(
         update={
@@ -676,7 +672,7 @@ def test_check_alerts_stuck_dispatches_when_alerts_heartbeat_stale(
     tmp_path: Path,
     make_config: Callable[..., Config],
 ) -> None:
-    """A stale ``alerts`` heartbeat fires ``ALERTS_STUCK`` via :func:`dispatch_alert` (one row written)."""
+    """A stale ``alerts`` heartbeat fires ``ALERTS_STUCK`` and writes exactly one ``alerts_sent`` row."""
     config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
     with get_session(db_engine) as session:
         session.add(Heartbeat(agent_name="alerts", last_seen_at=_NOW - timedelta(minutes=45)))
@@ -694,7 +690,7 @@ def test_check_alerts_stuck_silent_when_heartbeat_recent(
     tmp_path: Path,
     make_config: Callable[..., Config],
 ) -> None:
-    """Recent ``alerts`` heartbeat → no fire (no ``alerts_sent`` row written)."""
+    """A recent ``alerts`` heartbeat suppresses the stuck-alert dispatch — no row written."""
     config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
     with get_session(db_engine) as session:
         session.add(Heartbeat(agent_name="alerts", last_seen_at=_NOW - timedelta(minutes=5)))
@@ -711,7 +707,7 @@ def test_check_alerts_stuck_silent_when_heartbeat_missing(
     tmp_path: Path,
     make_config: Callable[..., Config],
 ) -> None:
-    """No ``alerts`` heartbeat row at all → no fire (matches the watchdog evaluator's contract)."""
+    """A missing heartbeat row is treated as silence, matching the watchdog evaluator's contract."""
     config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
 
     _check_alerts_stuck(config=config, engine=db_engine, now=_NOW)

@@ -47,11 +47,7 @@ def _seed_camera_and_clip(  # noqa: PLR0913  # test-fixture builder; bundling ar
     camera_name: str = "pantry",
     camera_display_name: str = "Pantry Litter Box",
 ) -> tuple[int, int]:
-    """Seed one camera + one clip; optionally write the clip + thumb bytes to disk.
-
-    Returns ``(camera_id, clip_id)``. Setting ``write_files=False`` simulates the storage-offline
-    degradation case: DB row exists, files don't.
-    """
+    """``write_files=False`` simulates the storage-offline degradation case: DB row exists, files don't."""
     rel_clip, rel_thumb = _relative_paths_for(camera_name, start_ts)
     if write_files:
         _materialize_clip_files(storage_root, rel_clip, clip_bytes, rel_thumb, thumb_bytes)
@@ -67,7 +63,6 @@ def _seed_camera_and_clip(  # noqa: PLR0913  # test-fixture builder; bundling ar
 
 
 def _relative_paths_for(camera_name: str, start_ts: datetime) -> tuple[str, str]:
-    """Return ``(rel_clip_path, rel_thumb_path)`` derived from the camera + UTC timestamp."""
     fname = start_ts.strftime("%H%M%S")
     date_dir = start_ts.strftime("%Y-%m-%d")
     return (
@@ -77,7 +72,6 @@ def _relative_paths_for(camera_name: str, start_ts: datetime) -> tuple[str, str]
 
 
 def _materialize_clip_files(storage_root: Path, rel_clip: str, clip_bytes: bytes, rel_thumb: str, thumb_bytes: bytes) -> None:
-    """Write the clip + thumb bytes to disk under ``storage_root``, creating parent dirs."""
     for rel, payload in ((rel_clip, clip_bytes), (rel_thumb, thumb_bytes)):
         full = storage_root / rel
         full.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +87,6 @@ def _build_clip(  # noqa: PLR0913  # constructor wrapper; flat kwargs map 1:1 to
     *,
     has_cat: bool,
 ) -> Clip:
-    """Build a populated :class:`Clip` ORM instance with the test-suite default detection scores."""
     return Clip(
         camera_id=camera_id,
         source_filename=rel_clip.rsplit("/", 1)[-1],
@@ -120,13 +113,9 @@ def _seed_clip_frame(
     clip_id: int,
     frame_bytes: bytes | None = b"\xff\xd8\xff\xe0frame-bytes",
 ) -> int:
-    """Seed one ``ClipFrame`` row tied to ``clip_id`` and optionally write its JPEG to disk.
-
-    Returns the new ``ClipFrame.id``. ``frame_bytes=None`` simulates the row-without-file drift the
-    410 path covers. The relpath matches the production layout
-    (``thumbs/<cam>/<YYYY-MM-DD>/<HHMMSS>/<NN>.jpg``) so filesystem-coupled regressions surface here
-    instead of getting masked by a synthetic test path. The ordinal is pinned to 0 — sufficient for
-    the route's behavioral coverage; tests that care about multi-frame layout build their own.
+    """``frame_bytes=None`` simulates the row-without-file drift the 410 path covers. The relpath
+    matches the production layout (``thumbs/<cam>/<YYYY-MM-DD>/<HHMMSS>/<NN>.jpg``) so
+    filesystem-coupled regressions surface here instead of getting masked by a synthetic path.
     """
     rel_thumb = _frame_relpath_from_clip(db_session_factory, internal_root=internal_root, clip_id=clip_id)
     if frame_bytes is not None:
@@ -147,7 +136,6 @@ def _frame_relpath_from_clip(
     internal_root: Path,
     clip_id: int,
 ) -> str:
-    """Compute the per-frame relpath ``thumbs/<cam>/<date>/<HHMMSS>/00.jpg`` from the seeded clip."""
     with db_session_factory(internal_root) as session:
         clip = session.get(Clip, clip_id)
         assert clip is not None
@@ -166,11 +154,8 @@ def _seed_clip_frame_at(
     spec: tuple[int, float],
     score: float = 0.5,
 ) -> int:
-    """Seed one ``ClipFrame`` row at ``(ordinal, t_offset_seconds)`` with ``score``; no JPEG written.
-
-    The contact-sheet tests don't render the JPEG bytes (the ``<img>`` URL is what matters), so we
-    skip the on-disk write that :func:`_seed_clip_frame` performs and keep ``thumb_path`` distinct
-    per ordinal so a regression in the per-frame relpath would still surface.
+    """No JPEG is written — the contact-sheet tests only need the ``<img>`` URL. ``thumb_path``
+    stays distinct per ordinal so a per-frame relpath regression still surfaces.
     """
     ordinal, t_offset_seconds = spec
     rel_thumb = f"thumbs/clip-{clip_id}/{ordinal:02d}.jpg"
@@ -189,7 +174,6 @@ def _seed_extra_clip(
     start_ts: datetime,
     has_cat: bool,
 ) -> None:
-    """Add a second clip on the same (already-seeded) camera so filter tests can compare results."""
     with db_session_factory(internal_root) as session:
         cam = session.scalar(select(Camera))
         assert cam is not None
@@ -287,8 +271,8 @@ def test_clips_list_filter_by_camera_name(
         response = client.get("/clips?camera=pantry", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    # Both display names live in the filter <select> regardless of the active filter, so the
-    # actual signal is which clip-detail links land in the table body.
+    # Both display names live in the filter <select> regardless of the active filter, so the actual
+    # signal is which clip-detail links land in the table body.
     assert f"/clips/{pantry_clip_id}" in response.text
     assert f"/clips/{garage_clip_id}" not in response.text
 
@@ -315,8 +299,8 @@ def test_clips_list_filter_by_has_cat_true(
         response = client.get("/clips?has_cat=true", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    assert "064704" in response.text  # the cat-positive clip's filename
-    assert "070000" not in response.text  # the no-cat clip should be filtered out
+    assert "064704" in response.text
+    assert "070000" not in response.text
 
 
 def test_clips_list_filter_by_date_str(
@@ -431,10 +415,9 @@ def test_clip_detail_renders_manual_label_form(
         response = client.get(f"/clips/{clip_id}", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    # The action is rendered as an absolute URL by ``url_for(...)`` (Task 22 cleanup); pin the tail
-    # of the path so the test stays robust to host/port changes in the test client.
+    # The action is rendered as an absolute URL by ``url_for(...)``; pin the tail of the path so the
+    # test stays robust to host/port changes in the test client.
     assert f'/clips/{clip_id}/label"' in response.text
-    # The form must offer both has_cat values plus a notes field per Task 22's contract.
     assert 'name="has_cat"' in response.text
     assert 'name="notes"' in response.text
 
@@ -909,8 +892,8 @@ def test_clips_list_renders_in_start_ts_descending_order(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    # Insert oldest, newest, middle — different order than the expected render order so the
-    # test can't accidentally pass on insertion order alone.
+    # Insert oldest, newest, middle — different order than the expected render order so the test
+    # can't accidentally pass on insertion order alone.
     _, oldest_id = _seed_camera_and_clip(
         db_session_factory,
         internal_root=internal_root,
@@ -1019,8 +1002,8 @@ def test_clips_list_filters_compose_with_and_semantics(
 def _frame_button_slice(body: str, frame_id: int) -> str:
     """Return ``body`` between the frame's media URL and the next ``</button>``.
 
-    Slicing keeps a neighbour frame's markers from leaking into a substring check on this
-    frame's wrapper.
+    Slicing keeps a neighbour frame's markers from leaking into a substring check on this frame's
+    wrapper.
     """
     start = body.find(f"/media/frame/{frame_id}.jpg")
     return body[start : body.find("</button>", start)]
@@ -1036,8 +1019,8 @@ def test_clip_detail_renders_contact_sheet_in_ordinal_order(
 
     Frames are inserted with shuffled ordinals so the ordering signal comes from the route's
     relationship-ordered read, not insert order. Scores are mixed above/below the default 0.35
-    threshold so the same response covers ordinal ordering, ``data-seek-seconds`` carriage,
-    and the threshold-styling cue (``contact-sheet-score-below``) on a single page render.
+    threshold so the same reszponse covers ordinal ordering, ``data-seek-seconds`` carriage, and the
+    threshold-styling cue (``contact-sheet-score-below``) on a single page render.
     """
     internal_root, storage_root = storage_dirs
     _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)

@@ -89,21 +89,19 @@ class DetectionResult:
 
 
 def _yolo_factory(model_path: Path) -> YOLO:  # pragma: no cover  # boundary; tests inject mocks
-    """Load a YOLO model. Indirected through a module-level callable so tests can patch it.
+    """Load a YOLO model. Module-level callable so tests can patch it.
 
-    Imports ``ultralytics`` lazily — the package pulls in torch + torchvision (~250 MB), which isn't
-    needed by callers that only consume :class:`DetectionResult` (e.g. the web UI).
+    ``ultralytics`` is imported lazily because the package pulls torch + torchvision (~250 MB),
+    which isn't needed by callers that only consume :class:`DetectionResult` (e.g. the web UI).
     """
-    # ``ultralytics`` exposes YOLO via a module-level ``__getattr__`` lazy-loader (with the name in
-    # ``__all__``); neither basedpyright's static reachability analysis nor mypy can follow that
-    # indirection, so both flag this otherwise-canonical import.
+    # ``ultralytics`` exposes YOLO via a module-level ``__getattr__`` lazy-loader; neither
+    # basedpyright nor mypy can follow that indirection, so both flag this canonical import.
     from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]  # noqa: PLC0415
 
     return YOLO(str(model_path))
 
 
 def _hash_weights(model_path: Path) -> str:
-    """Return the hex SHA-256 digest of a weights file (streamed in 64 KiB blocks)."""
     digest = hashlib.sha256()
     with model_path.open("rb") as fh:
         for block in iter(lambda: fh.read(_HASH_BLOCK_SIZE), b""):
@@ -169,8 +167,8 @@ def _extract_frame(clip_path: Path, timestamp: float, *, width: int, height: int
             ffmpeg,
             "-loglevel",
             "error",
-            # ``-ss`` BEFORE ``-i`` for fast input-side seek; for a few-second motion clip that
-            # accuracy is sufficient and avoids decoding from frame 0.
+            # ``-ss`` BEFORE ``-i`` enables fast input-side seek; accurate enough for motion clips
+            # and avoids decoding from frame 0.
             "-ss",
             f"{timestamp:.3f}",
             "-i",
@@ -248,11 +246,11 @@ class Detector:
 
     @property
     def version(self) -> str:
-        """The string written to ``clips.detector_version`` (``<filename>@<sha256>``)."""
+        """The string written to ``clips.detector_version``: ``<filename>@<sha256>``."""
         return self._version
 
     def detect(self, clip_path: Path) -> DetectionResult:
-        """Run the full pipeline (probe -> sample -> infer) and return a :class:`DetectionResult`."""
+        """Run the full pipeline (probe -> sample -> infer)."""
         duration, width, height = _probe_video(clip_path)
         timestamps = _sample_timestamps(duration, self._frames_to_sample)
         sampled = [(ts, _extract_frame(clip_path, ts, width=width, height=height)) for ts in timestamps]
@@ -265,8 +263,8 @@ class Detector:
         scored: list[ScoredFrame] = []
 
         for ordinal, (timestamp, frame) in enumerate(sampled):
-            # ``YOLO.__call__`` is annotated as returning bare ``list`` (no element type); cast at
-            # the boundary so downstream code can access Results attributes directly.
+            # ``YOLO.__call__`` returns bare ``list`` (no element type); cast at the boundary so
+            # downstream code can access Results attributes directly.
             results = cast("list[Results]", self._model(frame, verbose=False))
             hit = self._best_cat_in_frame(results)
             score = hit.score if hit is not None else 0.0
@@ -311,8 +309,7 @@ class Detector:
             if not mask.any():
                 continue
 
-            # ``np.where(mask, conf, -1)`` masks out non-cat detections so argmax picks among
-            # only the cat-class boxes.
+            # Mask non-cat detections so argmax picks among only the cat-class boxes.
             top_idx = int(np.argmax(np.where(mask, conf, -1.0)))
 
             top_score = cast("list[float]", conf.tolist())[top_idx]

@@ -1,17 +1,17 @@
 """Structured logging setup for cat-watcher agents.
 
 Provides :class:`JsonFormatter` and :func:`setup_logging`. Each agent's ``main()`` calls
-``setup_logging(agent_name=..., internal_root=..., level=...)`` once to wire two handlers onto
-the root logger:
+``setup_logging(agent_name=..., internal_root=..., level=...)`` once to wire two handlers onto the
+root logger:
 
 * A :class:`logging.handlers.RotatingFileHandler` writing JSONL records to
   ``<internal_root>/logs/<agent>.jsonl`` (10 MB rotation, 7 backups). Every record is one line of
   JSON conforming to the schema in
   ``docs/specs/2026-05-05-structured-logging-design.md``.
-* A :class:`logging.StreamHandler` on stderr at the same ``level`` as the root logger, so
-  genuine problems hit the LaunchAgent's ``<agent>.stderr.log`` fallback even if no one is
-  reading the JSONL file. Under ``--verbose``/``level=INFO``, diagnostic detail (httpxyz
-  requests, the empty-window note from amcrest_client, retries) also surfaces on stderr.
+* A :class:`logging.StreamHandler` on stderr at the same ``level`` as the root logger, so genuine
+  problems hit the LaunchAgent's ``<agent>.stderr.log`` fallback even if no one is reading the
+  JSONL file. Under ``--verbose``/``level=INFO``, diagnostic detail (httpxyz requests, the
+  empty-window note from amcrest_client, retries) also surfaces on stderr.
 
 The formatter stamps each record with the agent slug and current PID, so existing
 ``logging.getLogger(__name__)`` call sites pick those fields up without any per-call change.
@@ -71,10 +71,8 @@ _BACKUP_COUNT: int = 7
 
 
 def _exc_type_qualname(exc: BaseException) -> str:
-    """Return ``"<module>.<class>"`` for an exception class. Builtins resolve to ``"builtins.X"``.
-
-    Classes lacking ``__module__`` resolve to ``"<unknown>.<class>"`` so the schema's ``exc_type``
-    field is always a well-formed dotted name.
+    """Return ``"<module>.<class>"``. Classes lacking ``__module__`` resolve to ``"<unknown>.<class>"``
+    so the schema's ``exc_type`` field is always a well-formed dotted name.
     """
     cls = type(exc)
     module = getattr(cls, "__module__", "<unknown>") or "<unknown>"
@@ -83,7 +81,7 @@ def _exc_type_qualname(exc: BaseException) -> str:
 
 @final
 class JsonFormatter(logging.Formatter):
-    """Format :class:`logging.LogRecord` instances as one-line JSON conforming to the schema."""
+    """Format :class:`logging.LogRecord` instances as one-line JSON per the structured-logging schema."""
 
     def __init__(self, *, agent_name: str) -> None:
         super().__init__()
@@ -101,8 +99,7 @@ class JsonFormatter(logging.Formatter):
             "msg": record.getMessage(),
         }
 
-        # Stdlib types ``record.__dict__`` as ``dict[str, Any]``; the cast forces the comprehension's
-        # value type to ``object`` so callers must narrow before use.
+        # Cast to ``dict[str, object]`` so callers must narrow before use (stdlib types it as Any).
         record_attrs = cast("dict[str, object]", record.__dict__)
         extras: dict[str, object] = {key: value for key, value in record_attrs.items() if key not in _STANDARD_LOGRECORD_ATTRS}
         if extras:
@@ -115,10 +112,8 @@ class JsonFormatter(logging.Formatter):
                 payload["exc_msg"] = str(exc)
                 payload["traceback"] = "".join(traceback.format_exception(record.exc_info[0], exc, record.exc_info[2]))
 
-        # ``ensure_ascii=False`` keeps unicode messages legible; ``default=str`` is the safety net
-        # for non-JSON-serializable objects passed via ``extra={}`` (e.g. a Path or datetime). The
-        # output is single-line because ``json.dumps`` does not embed literal newlines and any
-        # embedded ``\n`` characters in string values are escaped to ``\\n``.
+        # ``default=str`` is the safety net for non-JSON-serializable objects passed via
+        # ``extra={}`` (e.g. a Path or datetime); ``ensure_ascii=False`` keeps unicode legible.
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -157,8 +152,8 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
     stderr_handler.setFormatter(formatter)
 
     root = logging.getLogger()
-    # Clear-then-attach (rather than ``logging.basicConfig``) makes the file handler the canonical
-    # sink. ``handler.close()`` releases the open file descriptor before the handler is dropped.
+    # Clear-then-attach makes the file handler the canonical sink. ``handler.close()`` releases the
+    # open file descriptor before the handler is dropped.
     for handler in list(root.handlers):
         root.removeHandler(handler)
         handler.close()

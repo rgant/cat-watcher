@@ -42,18 +42,16 @@ if TYPE_CHECKING:
 
 @pytest.fixture(scope="session")
 def synthetic_clip_path() -> Path:
-    """A 2-second H.264 MP4 synthesized via ffmpeg's testsrc filter; built once per session."""
+    """Session-scoped synthetic mp4 path; one encode is reused across every test that needs one."""
     return make_clip()
 
 
 @pytest.fixture
 def db_engine(tmp_path: Path) -> Iterator[Engine]:
-    """Per-test file-backed SQLite engine with the schema materialized.
+    """File-backed SQLite engine — WAL-mode PRAGMA cannot be enabled on ``:memory:`` databases.
 
-    File-backed (not ``:memory:``) because some tests rely on the WAL-mode PRAGMA, which SQLite
-    cannot enable on in-memory databases. The engine is disposed in teardown so SQLAlchemy releases
-    its sqlite3 handles before pytest's ``filterwarnings = error`` escalates a ``ResourceWarning``
-    from a GC-finalized connection.
+    Disposed in teardown so SQLAlchemy releases its sqlite3 handles before pytest's
+    ``filterwarnings = error`` escalates a ``ResourceWarning`` from a GC-finalized connection.
     """
     db_path = tmp_path / "test.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
@@ -71,12 +69,9 @@ _DEFAULT_CAMERAS: tuple[CameraConfig, ...] = (
 
 @pytest.fixture
 def storage_dirs(tmp_path: Path) -> tuple[Path, Path]:
-    """Materialize ``(internal_root, storage_root)`` under ``tmp_path`` and return both paths.
-
-    Mirrors the directory layout every agent expects in production: separate roots for the local
-    SSD-backed DB / logs (``internal_root``) and the bulk-storage drive (``storage_root``). Tests
-    that exercise ``run_alerts_tick`` / ``run_tick`` / ``build_app`` / etc. need both pre-created
-    so :class:`cat_watcher.config.Config` validation and ``ensure_storage_layout`` succeed.
+    """``(internal_root, storage_root)`` pre-created so ``Config`` validation and
+    ``ensure_storage_layout`` succeed: separate roots for local SSD-backed DB / logs and the
+    bulk-storage drive.
     """
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
@@ -87,12 +82,8 @@ def storage_dirs(tmp_path: Path) -> tuple[Path, Path]:
 
 @pytest.fixture
 def make_config() -> Callable[..., Config]:
-    """Factory for a minimal valid :class:`Config` populated with one ``pantry`` camera.
-
-    The default host/port/timezone match what the e2e tests expect (respx mocks
-    ``cam.example.com:80``; the UTC timezone makes camera-local clip-path computation
-    deterministic). Tests that need a different camera topology (e.g. multi-camera
-    error-isolation) pass ``cameras=[...]`` explicitly.
+    """Default camera matches respx mocks at ``cam.example.com:80``; UTC timezone makes camera-local
+    clip-path computation deterministic. Override ``cameras=[...]`` for multi-camera topologies.
     """
 
     def _build(internal_root: Path, storage_root: Path, *, cameras: list[CameraConfig] | None = None) -> Config:
@@ -121,13 +112,8 @@ def make_config() -> Callable[..., Config]:
 
 @pytest.fixture
 def seed_camera() -> Callable[..., int]:
-    """Factory: insert a ``Camera`` row with sensible defaults; kwargs override individual fields.
-
-    Returned callable signature: ``(engine: Engine, **overrides: object) -> int``. Defaults match
-    the ``pantry`` camera in :data:`_DEFAULT_CAMERAS` (``host="cam.example.com"``,
-    ``poll_status=OK``) so the row is consistent with the rest of the test infrastructure. Tests
-    that need different state (a stale ``last_polled_at``, a non-OK ``poll_status``, etc.) pass
-    those as kwargs.
+    """Defaults match the ``pantry`` camera in :data:`_DEFAULT_CAMERAS` so the row is consistent
+    with the rest of the test infrastructure.
     """
 
     def _seed(engine: Engine, **overrides: object) -> int:
@@ -149,11 +135,8 @@ def seed_camera() -> Callable[..., int]:
 
 @pytest.fixture
 def seed_clip() -> Callable[..., None]:
-    """Factory: insert a ``Clip`` row with deterministic paths derived from ``start_ts``.
-
-    Callable signature: ``(engine, *, camera_id, start_ts, has_cat, manual_has_cat=None) -> None``.
-    File paths use the ``HHMMSS`` of ``start_ts`` so callers seeding multiple clips just vary
-    ``start_ts`` to keep ``(camera_id, source_filename)`` unique.
+    """File paths derive from the ``HHMMSS`` of ``start_ts`` so callers seeding multiple clips just
+    vary ``start_ts`` to keep ``(camera_id, source_filename)`` unique.
     """
 
     def _seed(
@@ -188,20 +171,10 @@ def seed_clip() -> Callable[..., None]:
 
 @pytest.fixture
 def web_test_client() -> Callable[[Config], AbstractContextManager[TestClient]]:
-    """Factory: materialize the SQLite schema under ``config.internal_root`` and yield a ``TestClient``.
-
-    Calling ``web_test_client(config)`` runs ``Base.metadata.create_all`` **eagerly** so the test
+    """Calling ``web_test_client(config)`` runs ``Base.metadata.create_all`` **eagerly** so tests
     can seed rows / files between the call and the ``with``-statement entry. The returned context
-    manager only runs the FastAPI lifespan (which spawns the heartbeat task) — that's what needs
-    the start-and-stop bracket. SQLite WAL mode lets the test process keep read-writing the same
-    file concurrently with the app's session.
-
-    Usage::
-
-        config = make_config(internal_root, storage_root)
-        # ... seed the DB / disk via fresh engines pointed at config.internal_root ...
-        with web_test_client(config) as client:
-            response = client.get(...)
+    manager only runs the FastAPI lifespan (which spawns the heartbeat task). SQLite WAL mode lets
+    the test process keep read-writing the same file concurrently with the app's session.
     """
 
     def _factory(config: Config) -> AbstractContextManager[TestClient]:
@@ -222,21 +195,10 @@ def web_test_client() -> Callable[[Config], AbstractContextManager[TestClient]]:
 
 @pytest.fixture
 def db_session_factory() -> Callable[[Path], AbstractContextManager[Session]]:
-    """Factory: open a Session over the test DB at ``internal_root``, materialize schema, dispose on exit.
-
-    Use when an integration test needs to seed rows BEFORE entering ``web_test_client``'s lifespan
-    — the lifespan opens its own engine on the same SQLite file, so seeding through a separate,
-    short-lived engine and disposing it before the app boots avoids cross-engine connection
-    interference. SQLite WAL mode (set on the engine by :mod:`cat_watcher.db`) keeps subsequent
-    reader/writer engines compatible.
-
-    Usage::
-
-        with db_session_factory(internal_root) as session:
-            cam = Camera(name="pantry", display_name="Pantry", host="cam.example.com")
-            session.add(cam)
-            session.flush()
-            cam_id = cam.id
+    """Use to seed rows BEFORE entering ``web_test_client``'s lifespan — the lifespan opens its own
+    engine on the same SQLite file, so seeding through a separate short-lived engine and disposing
+    it before the app boots avoids cross-engine connection interference. SQLite WAL mode keeps
+    subsequent reader/writer engines compatible.
     """
 
     @contextmanager

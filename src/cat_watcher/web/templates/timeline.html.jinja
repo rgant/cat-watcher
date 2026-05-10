@@ -59,9 +59,9 @@
           <text x="0" y="{{ lane_y + lane_height / 2 }}" dominant-baseline="middle" class="lane-label">{{ cam.name }}</text>
           <line x1="{{ label_width }}" x2="{{ viewport_width }}" y1="{{ lane_y + lane_height / 2 }}" y2="{{ lane_y + lane_height / 2 }}" class="lane-axis"></line>
           {# SVG <title> elements are intentionally omitted: the browser would render them as a
-             native hover tooltip that overlaps the custom .timeline-tooltip rendered by
-             timeline.js. Accessibility is preserved via aria-label on the focusable wrapper
-             (clips: <a>; buckets: aria-label on the rect itself). #}
+          native hover tooltip that overlaps the custom .timeline-tooltip rendered by timeline.js.
+          Accessibility is preserved via aria-label on the focusable wrapper(clips: <a>; buckets:
+          aria-label on the rect itself). #}
           {% if use_buckets %}
             {% for bucket in lanes.get(cam.id, []) %}
               {% set cell_x = label_width + bucket.x_frac * track_width %}
@@ -87,7 +87,6 @@
           <text x="{{ ax + 4 }}" y="14" class="alert-label">{{ alert.alert_type }}</text>
           </g>
         {% endfor %}
-        {# Time axis: one tick row across the full track, plus day-boundary verticals and a 'now' marker. #}
         {% set axis_y = cameras|length * lane_height %}
         <g class="time-axis">
         {% for mark in time_axis_marks %}

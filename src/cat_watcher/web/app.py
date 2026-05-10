@@ -2,20 +2,8 @@
 
 Per spec §4.7. The web agent intentionally does **not** perform the §4.13 storage-availability
 wait — its DB lives on internal storage, the UI works with the external drive offline, and
-``/media/...`` routes (Task 21) degrade gracefully (503 with a "storage offline" message) rather
-than blocking startup.
-
-Three responsibilities:
-
-* :func:`build_app` — composes the FastAPI app: lifespan + auth middleware + route registration.
-  Stores ``config`` and ``engine`` on ``app.state`` so route handlers can reach them via the
-  request without globals.
-* Lifespan — on startup, inserts ``agent_starts(agent_name='web', ...)`` and spawns a background
-  task that upserts ``heartbeats('web')`` every ``[web].heartbeat_interval_seconds``. On shutdown,
-  cancels the task and disposes the engine.
-* :func:`main` — the ``cat-watcher-web`` CLI entry. Runs uvicorn against :func:`build_app` (or
-  against the :func:`reload_app` factory in ``--reload`` dev mode, since uvicorn's reload watcher
-  needs an import string + factory rather than a pre-built app instance).
+``/media/...`` routes degrade gracefully (503 with a "storage offline" message) rather than
+blocking startup.
 """
 
 import argparse
@@ -70,8 +58,7 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     """Assemble the FastAPI application bound to ``config``.
 
     The returned app owns its own SQLAlchemy engine (disposed by the lifespan on shutdown). Auth
-    middleware sits in front of every route except ``/health``. ``dev_hot_reload`` is plumbed
-    through to :func:`_build_hotreload`.
+    middleware sits in front of every route except ``/health``.
     """
     engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
     hotreload = _build_hotreload() if dev_hot_reload else None
@@ -108,9 +95,7 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
         username=config.web_auth.username,
         password=config.web_auth.password,
     )
-    # ``/static/*`` serves the bundled CSS / JS / placeholder assets shipped under
-    # ``cat_watcher/web/static``. Mounted before the routers so a route named ``/static``
-    # would never accidentally shadow it; the auth middleware sits in front either way.
+    # Mounted before the routers so a route named ``/static`` can never shadow it.
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.include_router(health_router)
     app.include_router(timeline_router)
@@ -130,13 +115,9 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
 def _build_hotreload() -> arel.HotReload:
     """Construct the dev-mode :class:`arel.HotReload` for browser auto-reload.
 
-    Watches ``web/static`` and ``web/templates``; pushes a reload message over the WebSocket
-    mounted at :data:`_HOT_RELOAD_URL` whenever a file changes. The ``arel`` import is lazy
-    because it is a dev-only PyPI dep and a top-level import would crash production. The
-    WebSocket sits behind the loopback only — ``BaseHTTPMiddleware``-derived auth is HTTP-only
-    so the route is unauthenticated, which is fine because production never registers it.
-    Lifespan startup/shutdown call :meth:`arel.HotReload.startup` / :meth:`shutdown` to bracket
-    the watcher; the rendered script is plumbed into templates as ``dev_hot_reload_script``.
+    The ``arel`` import is lazy because it is a dev-only PyPI dep and a top-level import would crash
+    production. The hot-reload WebSocket is unauthenticated — ``BaseHTTPMiddleware``-derived auth
+    is HTTP-only — but production never registers it, so the route is loopback-only.
     """
     import arel  # noqa: PLC0415  # lazy: dev-only dep, kept out of the production import path
 
@@ -153,7 +134,7 @@ async def _heartbeat_loop(*, engine: Engine, interval_seconds: int) -> None:
     """Upsert ``heartbeats('web')`` every ``interval_seconds`` until cancelled.
 
     Writes the first heartbeat immediately so ``/health`` has something to read before the first
-    interval elapses; subsequent writes happen after each ``asyncio.sleep`` yield.
+    interval elapses.
     """
     while True:
         with get_session(engine) as session:
@@ -162,7 +143,6 @@ async def _heartbeat_loop(*, engine: Engine, interval_seconds: int) -> None:
 
 
 def _upsert_web_heartbeat(session: Session, *, now: datetime) -> None:
-    """Insert or update the ``heartbeats('web')`` row to ``now``."""
     existing = session.scalar(select(Heartbeat).where(Heartbeat.agent_name == _AGENT_NAME))
     if existing is None:
         session.add(Heartbeat(agent_name=_AGENT_NAME, last_seen_at=now))
@@ -171,16 +151,11 @@ def _upsert_web_heartbeat(session: Session, *, now: datetime) -> None:
 
 
 def reload_app() -> FastAPI:
-    """Uvicorn ``--reload`` entry point: re-loads config + builds a fresh app on each reload tick.
-
-    Production calls :func:`main` and bypasses this helper.
-    """
+    """Uvicorn ``--reload`` entry point: re-loads config + builds a fresh app on each reload tick."""
     return build_app(load_config(), dev_hot_reload=True)
 
 
 class _ParsedArgs(argparse.Namespace):
-    """Typed view over the parsed ``cat-watcher-web`` Namespace."""
-
     config: Path | None = None
     reload: bool = False
 
@@ -195,9 +170,8 @@ def _parse_args(argv: Sequence[str] | None) -> _ParsedArgs:
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the LaunchAgent + ``pixi run dev``.
 
-    In ``--reload`` mode uvicorn watches source files and re-imports the module on changes; that
-    requires an import string + factory, so we hand it ``reload_app`` rather than a pre-built app.
-    Production (LaunchAgent) takes the non-reload branch with a single :func:`build_app` call.
+    In ``--reload`` mode uvicorn needs an import string + factory rather than a pre-built app, so
+    the reload branch hands it ``reload_app``.
     """
     args = _parse_args(argv)
     config = load_config(args.config)

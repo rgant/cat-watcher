@@ -27,9 +27,8 @@ if TYPE_CHECKING:
 _INTERNAL_SUBDIRS: tuple[str, ...] = ("models", "logs")
 _STORAGE_SUBDIRS: tuple[str, ...] = ("clips", "thumbs", "backups")
 
-# Defaults mirror the ``[storage]`` section in ``Config`` (see ``cat_watcher.config``). Callers
-# typically read the live values from ``cfg.storage.wait_*_seconds`` and pass them through, but the
-# constants here keep this module independently importable + testable.
+# Mirrors the ``[storage]`` section in ``Config``; production callers pass through
+# ``cfg.storage.wait_*_seconds``. These constants keep the module independently importable.
 _DEFAULT_INTERVAL_SECONDS = 10
 _DEFAULT_TIMEOUT_SECONDS = 600
 
@@ -58,8 +57,8 @@ def ensure_storage_layout(*, internal_root: Path, storage_root: Path) -> None:
 
     Both roots must already exist as directories; this function intentionally does NOT create them.
     A missing root almost always means the operator typo'd a config path or forgot to mount the
-    external drive — auto-creating the wrong path silently writes data nowhere useful. We
-    raise :class:`StorageError` so the operator notices and fixes the root.
+    external drive — auto-creating the wrong path silently writes data nowhere useful. We raise
+    :class:`StorageError` so the operator notices and fixes the root.
 
     Subfolders created (idempotent — ``exist_ok=True``):
 
@@ -97,8 +96,7 @@ def storage_available(path: Path) -> bool:
     if not path.is_dir():
         return False
     try:
-        # ``delete=True`` (the default) cleans up the probe file when the context exits.
-        # We never read or write to it; the successful open + cleanup is the signal.
+        # The successful open + cleanup is the signal; we never read or write to the probe file.
         with tempfile.NamedTemporaryFile(dir=path, delete=True):
             pass
     except OSError:
@@ -115,8 +113,8 @@ def wait_for_storage(
     """Block until ``path`` is an available directory, or raise after ``timeout_seconds``.
 
     Polls :func:`storage_available` every ``interval_seconds``. Returns ``None`` on success.
-    Raises :class:`StorageUnavailableError` once the cumulative wait reaches
-    ``timeout_seconds`` — callers (poller, backup) catch this, log CRITICAL, and exit non-zero.
+    Raises :class:`StorageUnavailableError` once the cumulative wait reaches ``timeout_seconds`` —
+    callers (poller, backup) catch this, log CRITICAL, and exit non-zero.
 
     Uses :func:`time.monotonic` so a wall-clock jump (NTP correction, manual change) cannot shorten
     or extend the wait.
@@ -132,7 +130,7 @@ def wait_for_storage(
 
 
 def wait_for_storage_using_config(config: Config) -> None:
-    """Convenience wrapper: pulls ``storage_root`` + ``[storage]`` knobs from ``Config``."""
+    """Pull ``storage_root`` + ``[storage]`` knobs from ``Config`` and call :func:`wait_for_storage`."""
     wait_for_storage(
         config.storage_root,
         interval_seconds=config.storage.wait_interval_seconds,

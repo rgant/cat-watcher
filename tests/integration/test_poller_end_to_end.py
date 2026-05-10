@@ -33,7 +33,6 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def _seed_amcrest_mocks(payload: bytes) -> None:
-    """Stand up the respx routes the AmcrestClient walks for one recording."""
     _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(
         return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"),
     )
@@ -60,9 +59,7 @@ def _make_detector(
     has_cat: bool,
     scored_frames: tuple[ScoredFrame, ...] = (),
 ) -> MagicMock:
-    """A Detector mock that returns a canned DetectionResult.
-
-    Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
+    """Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
     per-frame thumbnail pipeline has frames to encode.
     """
     mock_detector = MagicMock(spec=Detector)
@@ -80,7 +77,6 @@ def _make_detector(
 
 
 def _stub_scored_frames(scores: tuple[float, ...]) -> tuple[ScoredFrame, ...]:
-    """Build ``ScoredFrame``s with stub ndarrays for tests that exercise the per-frame thumb path."""
     stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
     return tuple(ScoredFrame(ordinal=i, t_offset_seconds=float(i + 1), score=score, frame=stub_frame) for i, score in enumerate(scores))
 
@@ -236,11 +232,9 @@ def test_list_only_emits_per_clip_lines_and_count_to_stdout(
 ) -> None:
     """``--list-only`` must print every clip in the window to stdout, regardless of log level.
 
-    Contract under test: the listing IS the command's output, not diagnostic detail. It must
-    bypass the Python logging module (and the WARNING / INFO level threshold) entirely so that
-    ``cat-watcher-poller --list-only`` is useful as a manifest preview without any ``--verbose``
-    incantation. Regression coverage for the bug where ``logger.info("list-only: ...")`` was
-    silenced at default level — see commit-msg history if this assertion ever flips.
+    The listing IS the command's output, not diagnostic detail. It must bypass the Python logging
+    module (and the WARNING / INFO level threshold) entirely so that ``cat-watcher-poller
+    --list-only`` is useful as a manifest preview without any ``--verbose`` incantation.
     """
     # Pin the root logger at WARNING (the default) to prove per-clip stdout output is not log-gated.
     saved_level = logging.getLogger().level
@@ -290,8 +284,7 @@ def test_full_tick_default_window_advances_last_polled_at(
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = _make_detector(has_cat=False)
 
-    # PollerArgs() with no since/until/limit — runs against the default retention-derived window.
-    args = PollerArgs()
+    args = PollerArgs()  # default retention-derived window
     try:
         run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
     finally:
@@ -655,9 +648,8 @@ def test_full_tick_writes_heartbeat_and_agent_starts_row(
 
 
 def _seed_aged_camera_and_clip(engine: Engine, storage_root: Path) -> tuple[Path, Path]:
-    """Seed a Camera + a Clip + matching files dated 60 days ago (outside the default 30-day window).
-
-    Returns ``(aged_clip_path, aged_thumb_path)`` for post-sweep existence assertions.
+    """Camera + Clip + matching files dated 60 days back — outside the default 30-day retention
+    window — so the retention sweep test can assert on post-sweep absence.
     """
     aged_ts = _NOW - timedelta(days=60)
     clip_rel = "clips/pantry/2026-03-02/100000.mp4"

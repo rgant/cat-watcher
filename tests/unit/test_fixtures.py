@@ -1,9 +1,8 @@
 """Regression tests for the synthetic-clip fixture builder.
 
-The detector tests in Task 15 will treat ``synthetic_clip_path`` as an opaque "valid MP4". If a
-future ffmpeg upgrade silently changes the output framing, those tests fail with confusing
-"no frames decoded" errors. This regression test catches the framing change here, where the
-diagnostic is obvious.
+Detector tests treat ``synthetic_clip_path`` as an opaque "valid MP4". If an ffmpeg upgrade silently
+changes the output framing, those tests fail with confusing "no frames decoded" errors; this
+catches the framing change here, where the diagnostic is obvious.
 """
 
 from typing import TYPE_CHECKING

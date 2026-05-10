@@ -12,8 +12,7 @@ UID_NUM="$(id -u)"
 
 mkdir -p "${LAUNCHAGENTS_DIR}"
 
-# Render directly into ~/Library/LaunchAgents — the helper handles placeholder substitution
-# and creates internal_root/logs/ as a side effect.
+# render_plists creates internal_root/logs/ as a side effect, so no mkdir is needed here.
 (
 	cd "${REPO_DIR}" \
 		&& pixi run python -m cat_watcher.scripts.render_plists --output "${LAUNCHAGENTS_DIR}"

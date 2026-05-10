@@ -156,11 +156,7 @@ def test_iter_recordings_full_page_triggers_next_fetch() -> None:
 
 @respx.mock
 def test_iter_recordings_sends_channel_one_in_findfile_request() -> None:
-    """``condition.Channel=1`` must appear in the findFile request (PDF says channels are 1-indexed).
-
-    Guards against regressing the channel value to ``0`` (the original implementation choice that
-    was caught by reading the Amcrest spec).
-    """
+    """``condition.Channel=1`` must appear in the findFile request (PDF says channels are 1-indexed)."""
     _ = _factory_create()
     find_file = respx.get(
         _FIND_URL,
@@ -212,13 +208,9 @@ def test_iter_recordings_treats_findfile_400_as_empty_window() -> None:
     """Amcrest firmware returns HTTP 400 from findFile when the time window has zero recordings.
 
     The body is the same generic ``"Error\\r\\nBad Request!\\r\\n"`` the camera returns for any 400,
-    and there is no other discriminator — see ``docs/resources/amcrest-bracket-quirk.md`` for the
-    firmware behavior. We rely on the URL-encoding regression test
-    (``test_iter_recordings_findfile_url_uses_amcrest_quirky_encoding``) to ensure 400 here really
-    does mean "empty window" rather than a malformed query.
-
-    Behavior under test: findFile 400 yields zero ``Recording``s without raising, and findNextFile
-    is NOT called (no handle to drain).
+    and there is no other discriminator — see ``docs/resources/amcrest-bracket-quirk.md``. The
+    URL-encoding regression test ensures 400 here really does mean "empty window" rather than a
+    malformed query.
     """
     factory = _factory_create()
     find_file = respx.get(
@@ -240,11 +232,7 @@ def test_iter_recordings_treats_findfile_400_as_empty_window() -> None:
 
 @respx.mock
 def test_iter_recordings_findfile_404_still_raises() -> None:
-    """Only HTTP 400 from findFile is treated as empty-window; other 4xx still propagate.
-
-    Guard against a future regression that broadens the 4xx-swallow behavior to all client errors,
-    which would mask real bugs (e.g. a typo'd endpoint path returning 404).
-    """
+    """Only HTTP 400 from findFile is treated as empty-window; other 4xx still propagate."""
     _ = _factory_create()
     _ = respx.get(
         _FIND_URL,
@@ -261,8 +249,7 @@ def test_iter_recordings_findfile_404_still_raises() -> None:
 def test_iter_recordings_naive_since_raises_value_error() -> None:
     """``since`` must be tz-aware. A naive datetime is rejected up-front (no HTTP traffic).
 
-    Without this guard, ``datetime.astimezone`` silently treats naive values as system-local time
-    and produces wrong window bounds on any non-UTC host.
+    Without this guard, ``datetime.astimezone`` silently treats naive values as system-local time.
     """
     client = _make_client()
     naive = datetime(2026, 4, 30, 12, 0, 0)  # noqa: DTZ001  # intentionally tz-naive for the precondition

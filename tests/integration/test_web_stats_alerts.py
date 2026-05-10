@@ -2,9 +2,9 @@
 
 Covers ``GET /cameras`` (per-camera health table + recent alerts), ``GET /stats`` (30-day daily
 aggregation across all cameras with manual-label override applied via
-``COALESCE(manual_has_cat, has_cat)``), and ``GET /alerts`` (last 30 days of dispatched alerts
-with email/macOS delivery flags). Auth is exercised exhaustively in ``test_web_health.py``; this
-module attaches a constant ``Authorization`` header.
+``COALESCE(manual_has_cat, has_cat)``), and ``GET /alerts`` (last 30 days of dispatched alerts with
+email/macOS delivery flags). Auth is exercised exhaustively in ``test_web_health.py``; this module
+attaches a constant ``Authorization`` header.
 """
 
 import base64
@@ -32,7 +32,6 @@ def _persist_cameras(
     internal_root: Path,
     cameras: list[Camera],
 ) -> list[int]:
-    """Insert all rows in ``cameras`` and return their assigned ids in input order."""
     with db_session_factory(internal_root) as session:
         for cam in cameras:
             session.add(cam)
@@ -45,10 +44,6 @@ def _persist(
     internal_root: Path,
     rows: list[Clip] | list[AlertSent],
 ) -> None:
-    """Insert pre-built ORM rows. Tests construct ``Clip`` / ``AlertSent`` instances inline so each
-    test reads as a small data table — keeps helper signatures narrow (PLR0913) without forcing a
-    parameter object that just shadows the ORM constructor.
-    """
     with db_session_factory(internal_root) as session:
         for row in rows:
             session.add(row)
@@ -61,12 +56,10 @@ def _make_clip(
     has_cat: bool,
     manual_has_cat: bool | None = None,
 ) -> Clip:
-    """Build a ``Clip`` instance with the columns these tests don't care about filled with defaults.
-
-    ``source_filename`` derives from the full ``start_ts`` (date + time + microseconds) so each test
-    can mint many clips per camera by varying ``start_ts`` alone — the
-    ``(camera_id, source_filename)`` uniqueness constraint is satisfied without per-test
-    bookkeeping, even when two seeded clips share the same time-of-day across different dates.
+    """``source_filename`` derives from the full ``start_ts`` (date + time + microseconds) so each
+    test can mint many clips per camera by varying ``start_ts`` alone — the ``(camera_id,
+    source_filename)`` uniqueness constraint is satisfied without per-test bookkeeping, even when
+    two seeded clips share the same time-of-day across different dates.
     """
     fname = f"{start_ts.strftime('%Y%m%d-%H%M%S%f')}.mp4"
     return Clip(
@@ -216,8 +209,6 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
     )
     today_anchor = datetime.now(UTC).replace(microsecond=0)
     yesterday_anchor = today_anchor - timedelta(days=1)
-    # Pantry: 3 clips today, 2 cat-positive. Bath: 1 clip yesterday, detector said no but manual
-    # override says yes — the override must flip the cat-positive count to 1.
     _persist(
         db_session_factory,
         internal_root,
@@ -234,7 +225,6 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
         response = client.get("/stats", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    # Pantry today: 3 clips, 2 cat. Bath yesterday: 1 clip, 1 cat (via manual override).
     pantry_row = _row_for(response.text, "Pantry", today_anchor.date().isoformat())
     bath_row = _row_for(response.text, "Bath", yesterday_anchor.date().isoformat())
     assert pantry_row is not None, "Expected a Pantry row for today in /stats"
@@ -274,8 +264,8 @@ def test_alerts_page_lists_recent_alerts(
     """``/alerts`` lists alerts dispatched in the last 30 days with type, subject, camera, and delivery flags.
 
     The ``email_ok=True, macos_ok=False`` seed crosses the only branch in each delivery cell — one ✓
-    and one ✗ on the same row pin both states with one assertion. Without this, the route could
-    drop the delivery columns entirely and the rest of the suite would stay green.
+    and one ✗ on the same row pin both states with one assertion. Without this, the route could drop
+    the delivery columns entirely and the rest of the suite would stay green.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -307,11 +297,9 @@ def test_alerts_page_lists_recent_alerts(
     assert response.status_code == 200
     assert "INACTIVITY" in response.text
     assert "Pantry inactivity 24h" in response.text
-    # Camera display name renders in the camera column for camera-scoped alerts.
     assert "Pantry" in response.text
-    # Delivery-flag column contract: ``✓`` for True, ``✗`` for False. Asserting on the full
-    # ``<td data-label="Email">✓</td>`` substring scopes the check to the right column so a stray
-    # ``✓`` somewhere else in the page (e.g. a future status badge) can't satisfy the test.
+    # Asserting on the full ``<td data-label="Email">✓</td>`` substring scopes the check to the
+    # right column so a stray ``✓`` elsewhere in the page can't satisfy the test.
     assert '<td data-label="Email">✓</td>' in response.text
     assert '<td data-label="macOS">✗</td>' in response.text
 
@@ -473,9 +461,9 @@ def test_stats_omits_clips_older_than_30_days(
         response = client.get("/stats", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    # The stale clip's ISO date should be absent — its row was filtered out by the cutoff. The
-    # fresh clip's date must be present so the test fails if the route accidentally drops *all*
-    # clips (e.g. inverted condition).
+    # The stale clip's ISO date should be absent — its row was filtered out by the cutoff. The fresh
+    # clip's date must be present so the test fails if the route accidentally drops *all* clips
+    # (e.g. inverted condition).
     assert stale_ts.date().isoformat() not in response.text
     assert fresh_ts.date().isoformat() in response.text
 

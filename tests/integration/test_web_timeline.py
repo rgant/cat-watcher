@@ -36,7 +36,6 @@ def _seed_camera_row(
     name: str = "pantry",
     display_name: str = "Pantry",
 ) -> int:
-    """Insert one camera and return its id."""
     with db_session_factory(internal_root) as session:
         cam = Camera(name=name, display_name=display_name, host="cam.example.com")
         session.add(cam)
@@ -52,7 +51,6 @@ def _seed_clip_rows(
     start_offsets: list[timedelta],
     reference_now: datetime,
 ) -> None:
-    """Seed N clips with ``start_ts = reference_now - offset[i]`` and unique source filenames."""
     with db_session_factory(internal_root) as session:
         for i, offset in enumerate(start_offsets):
             start_ts = reference_now - offset
@@ -81,11 +79,8 @@ def _state_clip_kwargs(
     manual_has_cat: bool | None = None,
     analysis_error: str | None = None,
 ) -> dict[str, object]:
-    """Build keyword args for a ``Clip`` row exercising one detection-state variant.
-
-    The shared ``_seed_clip_rows`` helper doesn't surface ``manual_has_cat`` or ``analysis_error``;
-    callers that need those construct rows directly via this helper to keep field boilerplate out
-    of test bodies.
+    """``_seed_clip_rows`` doesn't surface ``manual_has_cat`` / ``analysis_error``; tests that need
+    those construct rows directly via this helper to keep field boilerplate out of test bodies.
     """
     start_ts = reference_now - timedelta(hours=2)
     return {
@@ -113,7 +108,6 @@ def _seed_alert_row(
     sent_at: datetime,
     alert_type: AlertType = AlertType.FREQUENCY,
 ) -> None:
-    """Insert one ``alerts_sent`` row at ``sent_at``."""
     with db_session_factory(internal_root) as session:
         session.add(
             AlertSent(
@@ -229,7 +223,6 @@ def test_timeline_buckets_clips_above_24h_threshold(
         response = client.get("/timeline?range=7d", headers=_AUTH_HEADER)
 
     assert response.status_code == 200
-    # Bucketed rendering is on — at least one bucket cell exists, and no per-clip markers.
     assert 'class="clip"' not in response.text
     assert response.text.count('class="bucket ') >= 1
     # The bucket's aria-label must encode the count for accessibility tools.
@@ -250,8 +243,8 @@ def test_bucket_opacity_scales_per_lane_at_7d(
     # relative to ``start_window = now - 7d``.
     now_ish = datetime.now(UTC)
     # 6 clips bunched into one hour-bin and a single sparse clip 5h back. The 30-minute interior
-    # anchor keeps all six clips strictly inside one hour-bin regardless of sub-second drift
-    # between test seeding and the request's ``datetime.now(UTC)`` reference.
+    # anchor keeps all six clips strictly inside one hour-bin regardless of sub-second drift between
+    # test seeding and the request's ``datetime.now(UTC)`` reference.
     bunched = [timedelta(hours=2, minutes=30, seconds=s) for s in range(0, 60, 10)]  # six clips at hour-2
     sparse = [timedelta(hours=5)]
     _seed_clip_rows(
@@ -315,10 +308,8 @@ def test_timeline_header_carries_htmx_attrs_and_banner_aria_live(
     assert response.status_code == 200
     body = response.text
     assert 'class="timeline-header"' in body
-    # Each of the four presets gets both new attributes.
     assert body.count('hx-indicator="#timeline-region"') == 4
     assert body.count('hx-push-url="true"') == 4
-    # Banner aria-live.
     assert 'aria-live="polite"' in body
     assert 'class="banner banner-offline"' in body
 
@@ -532,7 +523,6 @@ def test_timeline_empty_state_omits_next_longer_link_at_30d(
     assert response.status_code == 200
     body = response.text
     assert 'class="empty-state' in body
-    # No "next" CTA at 30d (already at the longest range).
     assert "next-longer-range" not in body
     assert "/cameras" in body
 

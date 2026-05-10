@@ -4,9 +4,8 @@ Per spec §4.7: every route except ``/health`` requires the operator credentials
 ``CAT_WATCHER_WEB_USERNAME`` / ``CAT_WATCHER_WEB_PASSWORD``. ``/health`` is intentionally bypassed
 so external uptime checks (a curl loop, a dashboard) can poll without sharing the password.
 
-Credential comparison runs through :func:`hmac.compare_digest` to keep the wall-clock cost
-constant against the username and password lengths — a naïve ``==`` comparison would let an
-attacker probe one byte at a time via response-time differences.
+Credential comparison runs through :func:`hmac.compare_digest` to keep the wall-clock cost constant
+against username and password lengths and prevent byte-at-a-time timing probes.
 """
 
 import base64
@@ -63,7 +62,6 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     def _is_authenticated(self, auth_header: str | None) -> bool:
-        """Constant-time check of the ``Authorization: Basic <base64(user:pass)>`` header."""
         if not auth_header or not auth_header.startswith(_BASIC_PREFIX):
             return False
         try:

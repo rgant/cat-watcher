@@ -30,7 +30,6 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def _setup_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Create the three roots every integration test needs: (internal, storage, source)."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     source_root = tmp_path / "sd"
@@ -41,9 +40,7 @@ def _setup_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _make_detector(*, scored_frames: tuple[ScoredFrame, ...] = ()) -> MagicMock:
-    """A Detector mock that returns a positive cat detection.
-
-    Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
+    """Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
     per-frame thumbnail pipeline has frames to encode.
     """
     detector = MagicMock(spec=Detector)
@@ -61,7 +58,6 @@ def _make_detector(*, scored_frames: tuple[ScoredFrame, ...] = ()) -> MagicMock:
 
 
 def _stub_scored_frames(scores: tuple[float, ...]) -> tuple[ScoredFrame, ...]:
-    """Build ``ScoredFrame``s with stub ndarrays for tests that exercise the per-frame thumb path."""
     stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
     return tuple(ScoredFrame(ordinal=i, t_offset_seconds=float(i + 1), score=score, frame=stub_frame) for i, score in enumerate(scores))
 
@@ -78,10 +74,8 @@ def _build_sd_tree(  # noqa: PLR0913  # pylint: disable=too-many-locals  # synth
     end_minute: int | None = None,
     thumb_seconds: tuple[int, ...] | None = (24, 25, 26),
 ) -> tuple[Path, Path | None]:
-    """Synthesize one Amcrest SD-card clip+thumb pair under ``source_root``.
-
-    Returns ``(clip_path, primary_thumb_path)``. ``primary_thumb_path`` is None when
-    ``thumb_seconds`` is None or empty (used to test the ffmpeg fallback).
+    """``primary_thumb_path`` is None when ``thumb_seconds`` is None or empty (used to test the
+    ffmpeg fallback).
     """
     end_min = end_minute if end_minute is not None else minute + 1
     fname = f"{hour:02d}.{minute:02d}.{start_sec:02d}-{hour:02d}.{end_min:02d}.{end_sec:02d}[M][0@0][0].mp4"
@@ -103,7 +97,6 @@ def _build_sd_tree(  # noqa: PLR0913  # pylint: disable=too-many-locals  # synth
 
 
 def _materialize_engine(internal_root: Path) -> None:
-    """Create the cat_watcher.sqlite database with the schema in place."""
     db_path = internal_root / "cat_watcher.sqlite"
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)

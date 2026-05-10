@@ -44,10 +44,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Amcrest event-clip filename: "HH.MM.SS-HH.MM.SS[X][0@0][0].mp4" where X is a single uppercase
-# letter for the trigger type. The Amcrest HTTP API PDF (V3.26) shows examples with [M] and [F]
-# but doesn't enumerate the letters anywhere we could find; M is presumably "motion" and F is
-# probably forced/manual based on context. All trigger types are real clips to import, so we
-# accept any letter rather than enumerating.
+# letter for the trigger type. The Amcrest HTTP API PDF (V3.26) shows examples with [M] and [F] but
+# doesn't enumerate the letters anywhere we could find; M is presumably "motion" and F is probably
+# forced/manual based on context. All trigger types are real clips to import, so we accept any
+# letter rather than enumerating.
 _DAV_FILENAME_RE = re.compile(
     r"^(?P<sh>\d{2})\.(?P<sm>\d{2})\.(?P<ss>\d{2})"
     r"-(?P<eh>\d{2})\.(?P<em>\d{2})\.(?P<es>\d{2})"
@@ -94,8 +94,8 @@ def _find_jpg_dir(mp4_path: Path, *, start_hh: int, start_mm: int) -> Path | Non
     """Locate the parallel ``<NNN>/jpg/<HH>/<MM>/`` directory for ``mp4_path``.
 
     Walks up looking for a ``dav`` ancestor; its parent is the ``<NNN>`` directory under which
-    ``jpg/<HH>/<MM>/`` lives. Returns ``None`` if the layout doesn't match (caller will fall back
-    to ffmpeg extraction).
+    ``jpg/<HH>/<MM>/`` lives. Returns ``None`` if the layout doesn't match (caller will fall back to
+    ffmpeg extraction).
     """
     for parent in mp4_path.parents:
         if parent.name == "dav":
@@ -137,9 +137,8 @@ def _parse_clip_at(path: Path, source_dir: Path, *, camera_tz: ZoneInfo) -> _Loc
 def _scan_source(source_dir: Path, *, camera_tz: ZoneInfo) -> tuple[list[_LocalClip], int]:
     """Walk ``source_dir`` for Amcrest motion clips. Returns ``(matched, skipped_count)``.
 
-    Iterates path-sorted so two runs against the same tree process duplicates in the same order
-    (matters for log readability, not correctness). For the operator's ~3 GB SD snapshot this is a
-    few hundred files — materializing the full list is fine.
+    Path-sorted iteration: log readability under repeated runs (no correctness implication).
+    Materializing the full list is fine — the operator's typical SD snapshot is a few hundred files.
     """
     matched: list[_LocalClip] = []
     skipped = 0
@@ -176,7 +175,7 @@ def _locate_sd_thumb(thumb_dir: Path, *, start_sec: int, duration_sec: int) -> P
 
 
 def _atomic_copy_with_fsync(source: Path, dest: Path) -> None:
-    """Copy ``source`` -> ``<dest>.part``, fsync, then atomic ``replace``. Mirrors poller download."""
+    """Copy ``source`` -> ``<dest>.part``, fsync, then atomic ``replace``."""
     part = dest.with_suffix(dest.suffix + ".part")
     _ = shutil.copy2(source, part)
     fd = os.open(part, os.O_RDONLY)
@@ -204,7 +203,7 @@ def _materialize_thumbnail(clip: _LocalClip, *, local_dt: datetime, clip_full: P
 
 
 def _import_one(clip: _LocalClip, *, ctx: IngestContext) -> Clip | None:
-    """Wrap the shared per-clip pipeline with copy-from-disk + sd-or-ffmpeg-thumb materializers."""
+    """Run the shared per-clip pipeline with copy-from-disk + sd-or-ffmpeg-thumb materializers."""
     local_dt = clip.start_ts.astimezone(ctx.camera_tz)
 
     def copy_clip(dest: Path) -> None:

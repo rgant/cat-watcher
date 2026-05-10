@@ -1,19 +1,6 @@
 """Tests for cat_watcher.alerts.
 
-Coverage roadmap (per Task 18 plan):
-
-* Per-rule branch verification (every branch of INACTIVITY, FREQUENCY, the watchdogs, the storage
-  rules) — each evaluator's trigger and non-trigger paths.
-* ``poll_status != ok`` immediate-fire (no time threshold).
-* Configurable thresholds (``poller_stuck_minutes`` override path).
-* Cool-down: sent path writes exactly one row; suppressed path logs INFO + writes nothing; hard-
-  coded overrides honored; non-camera cool-down key.
-* ``BACKUP_STALE`` suppression during ``STORAGE_UNAVAILABLE`` cool-down; ``DISK_LOW`` skipped when
-  storage offline.
-* Manual-label override on ``FREQUENCY``.
-* End-to-end: alerts agent runs even when ``storage_root`` is unmounted.
-
-The tests disable both notifier channels via ``EmailRulesConfig(enabled=False)`` /
+Tests disable both notifier channels via ``EmailRulesConfig(enabled=False)`` /
 ``MacOsRulesConfig(enabled=False)`` so dispatch_alert never reaches real SMTP / osascript. The
 disabled path returns ``ok=True`` per :mod:`cat_watcher.notifier`'s contract; that's plenty to
 exercise the cool-down + alerts_sent bookkeeping this module owns.
@@ -140,10 +127,9 @@ def test_inactivity_fires_when_no_clips_for_inactivity_window(db_engine: Engine,
 def test_inactivity_per_camera_ignores_stale_last_cat_seen_at(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """A stale ``last_cat_seen_at`` alone does NOT fire per-camera INACTIVITY.
 
-    The fleet-wide no-cats branch lives in :func:`evaluate_inactivity_no_cats_global`. The per-
-    camera evaluator only handles unreachable + no-clips; a camera with recent clips but stale
-    cat sightings must not fire its own per-camera INACTIVITY (otherwise a cat using only one box
-    today would alert on the other box).
+    The per-camera evaluator only handles unreachable + no-clips; a cat using only one box today
+    must not alert on the other box. The fleet-wide no-cats branch lives in
+    :func:`evaluate_inactivity_no_cats_global`.
     """
     cam_id = seed_camera(
         db_engine,
@@ -185,10 +171,7 @@ def test_inactivity_does_not_fire_within_threshold(db_engine: Engine, seed_camer
     assert cand is None
 
 
-def test_inactivity_global_no_cats_fires_when_max_last_cat_seen_at_stale(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-) -> None:
+def test_inactivity_global_no_cats_fires_when_max_last_cat_seen_at_stale(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """Two cameras with both ``last_cat_seen_at`` older than the threshold → global candidate fires."""
     _ = seed_camera(db_engine, name="pantry", display_name="Pantry", last_cat_seen_at=_NOW - timedelta(hours=14))
     _ = seed_camera(
@@ -210,10 +193,7 @@ def test_inactivity_global_no_cats_fires_when_max_last_cat_seen_at_stale(
     assert "(Bathroom)" in cand.content.body
 
 
-def test_inactivity_global_no_cats_does_not_fire_when_one_camera_recent(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-) -> None:
+def test_inactivity_global_no_cats_does_not_fire_when_one_camera_recent(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """Any camera with a recent ``last_cat_seen_at`` keeps the fleet-wide branch silent."""
     _ = seed_camera(db_engine, name="pantry", display_name="Pantry", last_cat_seen_at=_NOW - timedelta(hours=1))
     _ = seed_camera(
@@ -230,10 +210,7 @@ def test_inactivity_global_no_cats_does_not_fire_when_one_camera_recent(
     assert cand is None
 
 
-def test_inactivity_global_no_cats_does_not_fire_without_baseline(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-) -> None:
+def test_inactivity_global_no_cats_does_not_fire_without_baseline(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """No camera has ever seen a cat (fresh install before backfill) → no fire."""
     _ = seed_camera(db_engine, name="pantry", display_name="Pantry")
     _ = seed_camera(db_engine, name="bathroom", display_name="Bathroom", host="cam2.example.com")
@@ -244,10 +221,7 @@ def test_inactivity_global_no_cats_does_not_fire_without_baseline(
     assert cand is None
 
 
-def test_inactivity_global_no_cats_single_camera_still_fires(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-) -> None:
+def test_inactivity_global_no_cats_single_camera_still_fires(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """Single-camera deployments keep the same semantics: stale cat sightings fire the global branch."""
     _ = seed_camera(db_engine, last_cat_seen_at=_NOW - timedelta(hours=13))
 
@@ -691,12 +665,7 @@ def test_cooldown_for_returns_hardcoded_overrides(cfg: Config) -> None:
 
 
 def test_cooldown_for_returns_default_for_other_types(cfg: Config) -> None:
-    """Types not in the override dict fall back to ``rules.cooldown_hours``.
-
-    One camera-bound (``INACTIVITY``) and one non-camera (``POLLER_STUCK``) check covers the
-    fallback path; the helper itself is :meth:`dict.get`, not a per-type lookup, so additional
-    enum-value assertions don't add coverage.
-    """
+    """Types not in the override dict fall back to ``rules.cooldown_hours``."""
     rules = cfg.alerts.model_copy(update={"cooldown_hours": 6})
     assert cooldown_for(AlertType.INACTIVITY, rules) == 6
     assert cooldown_for(AlertType.POLLER_STUCK, rules) == 6
@@ -746,7 +715,6 @@ def test_dispatch_alert_suppressed_logs_info_and_writes_no_row(
     logging.getLogger("cat_watcher.alerts").disabled = False
 
     cam_id = seed_camera(db_engine)
-    # First dispatch at t=0 — writes a row.
     with get_session(db_engine) as session:
         dispatch_alert(
             AlertType.INACTIVITY,
@@ -755,7 +723,6 @@ def test_dispatch_alert_suppressed_logs_info_and_writes_no_row(
             env=_dispatch_env(cfg, session, now=_NOW),
         )
 
-    # Second dispatch at t=10min, cool-down still open — should suppress.
     with caplog.at_level(logging.INFO, logger="cat_watcher.alerts"), get_session(db_engine) as session:
         dispatch_alert(
             AlertType.INACTIVITY,
@@ -879,9 +846,9 @@ def test_run_alerts_tick_runs_without_external_drive(
 ) -> None:
     """Alerts agent does NOT exit when ``storage_root`` is unmounted — fires ``STORAGE_UNAVAILABLE``.
 
-    Per spec §4.5: the alerts agent's state lives on internal storage, so it skips the §4.13
-    storage wait and runs even when the drive is offline. This is what lets STORAGE_UNAVAILABLE
-    fire as a normal DB-recorded alert (no marker-file hack).
+    Per spec §4.5: the alerts agent's state lives on internal storage, so it skips the §4.13 storage
+    wait and runs even when the drive is offline. This is what lets STORAGE_UNAVAILABLE fire as a
+    normal DB-recorded alert (no marker-file hack).
     """
     storage_root = tmp_path / "external-drive-not-mounted"
     base = make_config(tmp_path, storage_root)
@@ -904,12 +871,7 @@ def test_run_alerts_tick_dispatches_inactivity_for_unreachable_camera(
     cfg: Config,
     seed_camera: Callable[..., int],
 ) -> None:
-    """End-to-end: orchestrator wires ``evaluate_inactivity`` → ``dispatch_alert`` → ``alerts_sent``.
-
-    Rule-level + dispatch-level tests exist separately; this one pins the wiring inside
-    :func:`run_alerts_tick` (``_camera_candidates`` → ``_dispatch_each``). A regression that broke
-    that orchestration would silently make the agent stop emitting per-camera alerts.
-    """
+    """End-to-end: orchestrator wires ``evaluate_inactivity`` → ``dispatch_alert`` → ``alerts_sent``."""
     cam_id = seed_camera(
         db_engine,
         poll_status=PollStatus.UNREACHABLE,
@@ -932,11 +894,7 @@ def test_dispatch_alert_records_delivery_error_when_email_fails(
     cfg: Config,
     seed_camera: Callable[..., int],
 ) -> None:
-    """A failing ``send_email`` populates ``email_ok=False`` + ``delivery_error`` on the row.
-
-    Without this test, a regression that swallowed the email error (e.g., always set ``email_ok``
-    to True) would silently break the operator-facing audit trail in ``alerts_sent``.
-    """
+    """A failing ``send_email`` populates ``email_ok=False`` + ``delivery_error`` on the row."""
     cam_id = seed_camera(db_engine)
     with (
         patch(
@@ -972,11 +930,9 @@ def test_dispatch_alert_logs_critical_when_both_channels_fail(
 ) -> None:
     """Both senders failing → CRITICAL log + ``alerts_sent`` row with both ok-flags False.
 
-    The most operationally severe failure mode (no alert reached the operator). The row is still
-    written so the failure shows up in the alerts history; the CRITICAL log surfaces it in real
-    time.
+    The row is still written so the failure shows up in the alerts history; the CRITICAL log
+    surfaces it in real time.
     """
-    # See the cool-down suppression test for why this re-enable is needed under random ordering.
     logging.getLogger("cat_watcher.alerts").disabled = False
 
     cam_id = seed_camera(db_engine)

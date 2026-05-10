@@ -158,10 +158,9 @@ def test_unknown_field_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def test_load_config_path_argument_overrides_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit ``config_path`` arg wins over ``CAT_WATCHER_CONFIG`` env var."""
-    # Env var points at a config that does NOT exist (would raise if used).
+    # Env var points at a non-existent path: would raise if the loader read it.
     bogus_env_path = tmp_path / "env_only.toml"
     monkeypatch.setenv("CAT_WATCHER_CONFIG", str(bogus_env_path))
-    # Argument points at a real, valid config.
     arg_path = tmp_path / "arg.toml"
     _ = arg_path.write_text(_VALID_TOML)
     monkeypatch.chdir(tmp_path)
@@ -209,10 +208,7 @@ def _toml_with_field(section: str, field: str, value: float) -> str:
 @pytest.mark.parametrize(
     ("spec", "should_raise"),
     [
-        # One boundary-pass per field group is kept as a regression smoke (so we notice if a
-        # constraint is accidentally dropped). Low-boundary passes that match the default value are
-        # dropped -- the happy-path test already exercises those. All wraparound-FAIL cases are
-        # retained. BackupConfig.cadence_hour bounds (ge=0, le=23) -- wraparound 24 must fail.
+        # BackupConfig.cadence_hour bounds (ge=0, le=23) -- wraparound 24 must fail.
         (("backup", "cadence_hour", 24), True),
         (("backup", "cadence_hour", 23), False),
         # BackupConfig.cadence_minute bounds (ge=0, le=59) -- wraparound 60 must fail.
@@ -248,8 +244,7 @@ def _toml_with_field(section: str, field: str, value: float) -> str:
         # DetectorConfig.frames_to_sample (ge=1) -- 0 frames means no detection.
         (("detector", "frames_to_sample", 0), True),
         (("detector", "frames_to_sample", 1), False),
-        # AlertConfig.disk_low_threshold_fraction (gt=0, lt=1) -- folded in from removed
-        # standalone test; both endpoints + above-1 must fail (open interval).
+        # AlertConfig.disk_low_threshold_fraction (gt=0, lt=1) -- both endpoints + above-1 fail.
         (("alerts", "disk_low_threshold_fraction", 0.0), True),
         (("alerts", "disk_low_threshold_fraction", 1.0), True),
         (("alerts", "disk_low_threshold_fraction", 1.5), True),
@@ -280,7 +275,6 @@ def test_cadence_and_count_field_bounds(
 
 def test_whitespace_only_env_var_falls_through_to_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A whitespace-only ``CAT_WATCHER_CONFIG`` is treated as unset."""
-    # Create a real default config in a temp cwd.
     default_path = tmp_path / "config.toml"
     _ = default_path.write_text(_VALID_TOML)
     monkeypatch.chdir(tmp_path)
@@ -330,7 +324,6 @@ def test_secret_str_masks_passwords_in_repr(tmp_path: Path, monkeypatch: pytest.
 
     cfg = load_config()
 
-    # str() of a SecretStr returns the masked placeholder (10 asterisks).
     assert str(cfg.camera_secrets.password) == "**********"
     assert str(cfg.email.gmail_app_password) == "**********"
     assert str(cfg.web_auth.password) == "**********"
@@ -347,15 +340,14 @@ def test_secret_str_masks_passwords_in_repr(tmp_path: Path, monkeypatch: pytest.
 def test_env_file_provides_secrets_when_no_environment_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``pydantic-settings`` reads ``.env`` in cwd when env vars are unset.
 
-    All other tests use ``monkeypatch.setenv`` which short-circuits the dotenv source -- this is the
-    one test that actually exercises ``env_file=".env"``.
+    Other tests use ``monkeypatch.setenv`` which short-circuits the dotenv source — this is the one
+    test that actually exercises ``env_file=".env"``.
     """
     config_path = tmp_path / "config.toml"
     _ = config_path.write_text(_VALID_TOML)
     monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
     monkeypatch.chdir(tmp_path)
-    # Explicitly clear any host-set values so the .env file is the sole source. NOTE:
-    # we deliberately do NOT call ``_set_env(monkeypatch)`` here.
+    # Clear host env so the .env file is the sole source — must not call ``_set_env`` here.
     for key in (
         "CAT_WATCHER_CAMERA_USERNAME",
         "CAT_WATCHER_CAMERA_PASSWORD",
@@ -366,7 +358,6 @@ def test_env_file_provides_secrets_when_no_environment_overrides(tmp_path: Path,
         "CAT_WATCHER_WEB_PASSWORD",
     ):
         monkeypatch.delenv(key, raising=False)
-    # Write a real .env in cwd so pydantic-settings has a source to read.
     env_file_body = textwrap.dedent("""\
         CAT_WATCHER_CAMERA_USERNAME=env-file-user
         CAT_WATCHER_CAMERA_PASSWORD=env-file-pass
@@ -417,16 +408,10 @@ def test_unknown_nested_field_raises(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_multiple_invalid_values_reported_in_one_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A config with multiple errors surfaces all of them in the ``ConfigError`` message.
-
-    Pydantic accumulates per-field validation errors and stringifies them all into the
-    ``ValidationError`` -- the wrap site in ``load_config`` preserves that message.
-    """
-    # Corrupt two unrelated fields so both errors are independent (no short-circuit).
-    # 1. detector.confidence_threshold = 1.5 (above le=1.0).
+    """A config with multiple errors surfaces all of them in the ``ConfigError`` message."""
+    # Corrupt two unrelated fields so both errors are independent (no short-circuit):
+    # detector.confidence_threshold above le=1.0, and backup.cadence_hour above le=23.
     body = _toml_with_field("detector", "confidence_threshold", 1.5)
-    # 2. backup.cadence_hour = 24 (above le=23). _VALID_TOML has no [backup] section, so append a
-    # fresh one (avoids TOML duplicate-section errors).
     body = body + "\n[backup]\ncadence_hour = 24\n"
     config_path = tmp_path / "config.toml"
     _ = config_path.write_text(body)
@@ -437,14 +422,12 @@ def test_multiple_invalid_values_reported_in_one_error(tmp_path: Path, monkeypat
     with pytest.raises(ConfigError) as exc_info:
         _ = load_config()
     msg = str(exc_info.value)
-    # Both bad fields must surface so the user can fix them in one edit pass.
     assert "confidence_threshold" in msg
     assert "cadence_hour" in msg
 
 
 def test_duplicate_camera_names_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Two ``[[cameras]]`` entries with the same name are rejected (storage slug collision)."""
-    # Replace the second camera's name with the first camera's name.
     body = _VALID_TOML.replace('name = "office"', 'name = "pantry"')
     config_path = tmp_path / "config.toml"
     _ = config_path.write_text(body)
@@ -458,8 +441,6 @@ def test_duplicate_camera_names_raise(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_empty_cameras_list_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A config with no ``[[cameras]]`` entries is rejected by ``Field(min_length=1)``."""
-    # Build a minimal config with NO [[cameras]] entries. The required structural sections
-    # (detector, alerts, web) still need to be present.
     body = textwrap.dedent("""\
         internal_root = "./data"
         storage_root = "./data"
@@ -497,7 +478,6 @@ def test_empty_cameras_list_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
     _set_env(monkeypatch)
 
-    # Match loosely on `cameras` -- the exact pydantic error message ("List should have at least 1
-    # item after validation") is library-internal and may shift across versions.
+    # Loose match: pydantic's exact "List should have at least 1 item" wording may shift versions.
     with pytest.raises(ConfigError, match=r"cameras"):
         _ = load_config()

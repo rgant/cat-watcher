@@ -20,14 +20,13 @@ if TYPE_CHECKING:
 
     from cat_watcher.config import Config
 
-# Shape of every JSON response in this file: a top-level object with string keys. Casting to this
-# at the ``response.json()`` boundary buys typed subscripts inside the test body without sprinkling
+# Shape of every JSON response in this file: a top-level object with string keys. Casting to this at
+# the ``response.json()`` boundary buys typed subscripts inside the test body without sprinkling
 # pyright suppressions across each individual field access.
 _JsonObj = dict[str, object]
 
 
 def _basic_auth_header(username: str, password: str) -> str:
-    """Encode ``Basic`` auth credentials for the ``Authorization`` header."""
     raw = f"{username}:{password}".encode()
     return f"Basic {base64.b64encode(raw).decode()}"
 
@@ -65,8 +64,8 @@ def test_health_response_includes_heartbeat_after_background_task_runs(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     with web_test_client(config) as client:
-        # The lifespan started the heartbeat loop and ran the first iteration before yielding,
-        # so by the time TestClient.__enter__ returns, the heartbeats('web') row exists.
+        # The lifespan started the heartbeat loop and ran the first iteration before yielding, so by
+        # the time TestClient.__enter__ returns, the heartbeats('web') row exists.
         response = client.get("/health")
     assert response.status_code == 200
     body = cast("_JsonObj", response.json())
@@ -93,9 +92,9 @@ def test_protected_route_with_valid_credentials_passes_auth(
     make_config: Callable[[Path, Path], Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Valid credentials let the request reach the routed handler — anything but ``401`` proves
-    the middleware passed the request through. The exact downstream status (``200``, ``404``,
-    ``500``) is the route's contract, not the middleware's, so this test only pins ``!= 401``.
+    """Valid credentials let the request reach the routed handler — anything but ``401`` proves the
+    middleware passed the request through. The exact downstream status (``200``, ``404``, ``500``)
+    is the route's contract, not the middleware's, so this test only pins ``!= 401``.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -184,7 +183,7 @@ def test_lifespan_writes_agent_starts_row_on_startup(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     with web_test_client(config):
-        pass  # entering + exiting the context fires the lifespan startup + shutdown.
+        pass
 
     engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
     try:
@@ -200,8 +199,8 @@ def test_lifespan_heartbeat_task_is_cancelled_on_shutdown(
     make_config: Callable[[Path, Path], Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Exiting the ``with web_test_client(config)`` context cleanly proves the heartbeat task
-    didn't hang on the ``asyncio.sleep`` window after cancellation. A regression that swallowed
+    """Exiting the ``with web_test_client(config)`` context cleanly proves the heartbeat task didn't
+    hang on the ``asyncio.sleep`` window after cancellation. A regression that swallowed
     ``CancelledError`` somewhere in the loop would deadlock shutdown until pytest's timeout fired.
     """
     internal_root, storage_root = storage_dirs
@@ -209,7 +208,6 @@ def test_lifespan_heartbeat_task_is_cancelled_on_shutdown(
     with web_test_client(config):
         pass
 
-    # If we reached this line, shutdown completed; also verify a heartbeat row was written.
     engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
     try:
         with get_session(engine) as session:

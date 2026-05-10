@@ -1,9 +1,7 @@
 """Shared helpers for ``test_cli*.py``.
 
-Lives under ``tests/fixtures/`` because pytest puts that directory on ``pythonpath`` (see
-``[tool.pytest.ini_options].pythonpath`` in ``pyproject.toml``); both ``tests/unit/test_cli.py``
-and ``tests/unit/test_cli_reanalyze.py`` import directly from it. The split keeps each test
-module under pylint's ``too-many-lines`` cap without duplicating seed-data builders.
+Lives under ``tests/fixtures/`` because pytest puts that directory on ``pythonpath``; both
+``tests/unit/test_cli.py`` and ``tests/unit/test_cli_reanalyze.py`` import directly from it.
 """
 
 from contextlib import contextmanager
@@ -28,11 +26,8 @@ _DB_FILENAME = "cat_watcher.sqlite"
 
 
 def init_schema(internal_root: Path) -> None:
-    """Materialize the SQLAlchemy schema at ``<internal_root>/cat_watcher.sqlite``.
-
-    The CLI handlers open their own engine via ``_open_engine(config)`` against this exact path; we
-    create + dispose a one-shot engine here so the schema exists before the handler runs without
-    leaving any pooled connections alive.
+    """Schema must exist before the CLI handler opens its own engine on the same SQLite file;
+    create + dispose a one-shot engine so no pooled connections remain.
     """
     engine = create_engine(f"sqlite:///{internal_root / _DB_FILENAME}")
     try:
@@ -42,7 +37,7 @@ def init_schema(internal_root: Path) -> None:
 
 
 def config_with_dirs(tmp_path: Path, make_config: Callable[..., Config]) -> Config:
-    """Build a Config wired to fresh internal/storage roots under ``tmp_path``."""
+    """Build a Config and create the matching internal/storage roots so it satisfies validation."""
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
     internal_root.mkdir()
@@ -51,7 +46,7 @@ def config_with_dirs(tmp_path: Path, make_config: Callable[..., Config]) -> Conf
 
 
 def make_handler_args(config_path: Path | None = None, **overrides: object) -> _ParsedArgs:
-    """Construct a typed ``_ParsedArgs`` with ``config`` pre-set; per-handler fields via kwargs."""
+    """Build a ``_ParsedArgs`` for handler tests; ``overrides`` mirror argparse field names."""
     args = _ParsedArgs()
     args.config = config_path
     for key, value in overrides.items():
@@ -61,11 +56,8 @@ def make_handler_args(config_path: Path | None = None, **overrides: object) -> _
 
 @contextmanager
 def open_seed_session(config: Config) -> Generator[Session]:
-    """Yield a writer Session against the live test DB; engine is disposed on exit.
-
-    Tests use this to seed rows BEFORE entering a CLI handler. Handlers create their own engine
-    against the same SQLite file; SQLite WAL mode lets the two engines coexist briefly. Disposing
-    here keeps the seed connection from holding a write lock when the handler opens its session.
+    """Disposing the engine here keeps the seed connection from holding a write lock when the
+    handler opens its own session against the same SQLite file.
     """
     engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
     try:
@@ -76,7 +68,7 @@ def open_seed_session(config: Config) -> Generator[Session]:
 
 
 def seed_camera(config: Config, **overrides: object) -> int:
-    """Insert one ``Camera`` row and return its id. Defaults match a single ``pantry`` camera."""
+    """Insert a Camera row in its own session so the seed connection's write lock releases before the handler opens one."""
     cam = Camera(
         **{
             "name": "pantry",
@@ -105,9 +97,7 @@ def seed_clip(  # noqa: PLR0913  # pylint: disable=too-many-arguments  # single 
     file_path: str = "clips/pantry/test.mp4",
     thumb_path: str = "thumbs/pantry/test.jpg",
 ) -> int:
-    """Insert one ``Clip`` row with deterministic defaults; return its id.
-
-    ``source_filename`` defaults to ``YYYYMMDD-HHMMSSffffff.mp4`` derived from ``start_ts`` so a
+    """``source_filename`` defaults to ``YYYYMMDD-HHMMSSffffff.mp4`` derived from ``start_ts`` so a
     test seeding multiple clips per camera only needs to vary ``start_ts`` to keep the
     ``(camera_id, source_filename)`` uniqueness constraint satisfied.
     """
@@ -135,7 +125,7 @@ def seed_clip(  # noqa: PLR0913  # pylint: disable=too-many-arguments  # single 
 
 
 def read_clip(config: Config, clip_id: int) -> Clip:
-    """Read a clip back from the DB outside the handler's session, detached on return."""
+    """Read a clip back outside the handler's session; the row is detached on return."""
     engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
     try:
         with get_session(engine) as session:
