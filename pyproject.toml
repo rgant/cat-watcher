@@ -102,11 +102,11 @@ cmd = """\
     && git pull \
     && pixi install \
     && pixi run alembic upgrade head \
-    && for a in poller alerts web backup; do
-      launchctl kickstart -k gui/$(id -u)/com.robgant.cat-watcher.$a
-    done'\
+    && pixi run install-agents \
+    && pixi run agents-status \
+    && curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health'\
   """
-description = "Pull, install, migrate, and restart all agents on media-center"
+description = "Pull, install, migrate, reload all agents (re-renders plists), and verify web /health on media-center"
 [tool.pixi.tasks.dev]
 cmd = "cat-watcher-web --reload"
 description = "Run web app with reload"
