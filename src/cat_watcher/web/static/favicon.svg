@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Cat Watcher">
+  <ellipse cx="16" cy="23" rx="7.5" ry="6" fill="oklch(60% .22 142deg)"/>
+  <ellipse cx="6.5" cy="15" rx="2.6" ry="3.2" fill="oklch(60% .22 142deg)"/>
+  <ellipse cx="12.5" cy="9" rx="2.6" ry="3.4" fill="oklch(60% .22 142deg)"/>
+  <ellipse cx="19.5" cy="9" rx="2.6" ry="3.4" fill="oklch(60% .22 142deg)"/>
+  <ellipse cx="25.5" cy="15" rx="2.6" ry="3.2" fill="oklch(60% .22 142deg)"/>
+</svg>
