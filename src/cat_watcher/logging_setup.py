@@ -162,15 +162,17 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
     root.setLevel(level)
 
 
-def setup_agent_logging(*, agent_name: str, config: Config) -> None:
-    """Convenience wrapper for non-poller agents whose level is taken from ``config.log_level``.
+def setup_agent_logging(*, agent_name: str, config: Config, verbose: bool = False) -> None:
+    """Wire structured logging for an agent's ``main()`` from its ``Config``.
 
-    Distinguishes the daemon agents (``alerts``, ``web``, ``backup`` — level driven by config) from
-    the interactive entry points (``poller``, ``cli`` — level driven by ``--verbose``), which call
-    :func:`setup_logging` directly with a numeric level.
+    The root logger level is ``config.log_level``, upgraded to at least ``INFO`` when ``verbose``
+    is true so a ``--verbose`` CLI flag can raise visibility without dropping the configured
+    baseline (e.g. a ``DEBUG`` config stays at ``DEBUG``).
     """
+    config_level = logging.getLevelNamesMapping()[config.log_level]
+    level = min(config_level, logging.INFO) if verbose else config_level
     setup_logging(
         agent_name=agent_name,
         internal_root=config.internal_root,
-        level=logging.getLevelNamesMapping()[config.log_level],
+        level=level,
     )

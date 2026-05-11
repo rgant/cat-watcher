@@ -297,7 +297,7 @@ def _print_camera_status(session: Session) -> None:
         print(f"  - {cam.name} ({cam.display_name}): poll_status={cam.poll_status.value}")
         print(
             f"      last_polled_at={_fmt(cam.last_polled_at)}  last_clip_at={_fmt(cam.last_clip_at)}"
-            "  last_cat_seen_at={_fmt(cam.last_cat_seen_at)}",
+            f"  last_cat_seen_at={_fmt(cam.last_cat_seen_at)}",
         )
         if cam.poll_status_since is not None:
             print(f"      poll_status_since={_fmt(cam.poll_status_since)}")

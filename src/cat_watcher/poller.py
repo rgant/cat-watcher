@@ -40,7 +40,7 @@ from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuth
 from cat_watcher.config import Config, load_config
 from cat_watcher.db import AgentStart, AlertType, Camera, Clip, ClipFrame, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import Detector, DetectorError
-from cat_watcher.logging_setup import setup_logging
+from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 
 if TYPE_CHECKING:
@@ -851,18 +851,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code.
 
     Stdout always carries the user-facing report — per-camera summary lines, retention sweep line,
-    and (under ``--list-only``) the per-clip manifest — independent of log level. Default log level
-    is ``WARNING`` so only genuine problems surface on stderr; ``--verbose`` raises it to ``INFO``
-    and routes diagnostic detail (httpxyz requests, empty-window notes from ``amcrest_client``) to
-    stderr and the JSONL log.
+    and (under ``--list-only``) the per-clip manifest — independent of log level. Log level comes
+    from ``config.log_level``; ``--verbose`` upgrades it to at least ``INFO`` so diagnostic detail
+    (httpxyz requests, empty-window notes from ``amcrest_client``) lands on stderr and in the JSONL
+    log even when the configured baseline is higher.
     """
     args = _parse_args(argv)
     config = load_config(args.config_path)
-    setup_logging(
-        agent_name="poller",
-        internal_root=config.internal_root,
-        level=logging.INFO if args.verbose else logging.WARNING,
-    )
+    setup_agent_logging(agent_name="poller", config=config, verbose=args.verbose)
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
 
     try:
