@@ -69,9 +69,10 @@ _DEFAULT_CAMERAS: tuple[CameraConfig, ...] = (
 
 @pytest.fixture
 def storage_dirs(tmp_path: Path) -> tuple[Path, Path]:
-    """``(internal_root, storage_root)`` pre-created so ``Config`` validation and
-    ``ensure_storage_layout`` succeed: separate roots for local SSD-backed DB / logs and the
-    bulk-storage drive.
+    """Pre-create ``(internal_root, storage_root)`` so ``Config`` validation succeeds.
+
+    Separate roots model production: local SSD-backed DB / logs vs the bulk-storage drive.
+    ``ensure_storage_layout`` also needs both to exist before it runs.
     """
     internal_root = tmp_path / "internal"
     storage_root = tmp_path / "storage"
@@ -82,8 +83,10 @@ def storage_dirs(tmp_path: Path) -> tuple[Path, Path]:
 
 @pytest.fixture
 def make_config() -> Callable[..., Config]:
-    """Default camera matches respx mocks at ``cam.example.com:80``; UTC timezone makes camera-local
-    clip-path computation deterministic. Override ``cameras=[...]`` for multi-camera topologies.
+    """Return a Config factory whose default camera matches the respx mocks at ``cam.example.com:80``.
+
+    The UTC timezone keeps camera-local clip-path computation deterministic. Override
+    ``cameras=[...]`` for multi-camera topologies.
     """
 
     def _build(internal_root: Path, storage_root: Path, *, cameras: list[CameraConfig] | None = None) -> Config:
@@ -136,8 +139,9 @@ def disable_alert_channels() -> Callable[[Config], Config]:
 
 @pytest.fixture
 def seed_camera() -> Callable[..., int]:
-    """Defaults match the ``pantry`` camera in :data:`_DEFAULT_CAMERAS` so the row is consistent
-    with the rest of the test infrastructure.
+    """Return a Camera-row seeder whose defaults match the ``pantry`` camera in :data:`_DEFAULT_CAMERAS`.
+
+    Matching defaults keep the row consistent with the rest of the test infrastructure.
     """
 
     def _seed(engine: Engine, **overrides: object) -> int:
@@ -159,8 +163,10 @@ def seed_camera() -> Callable[..., int]:
 
 @pytest.fixture
 def seed_clip() -> Callable[..., None]:
-    """File paths derive from the ``HHMMSS`` of ``start_ts`` so callers seeding multiple clips just
-    vary ``start_ts`` to keep ``(camera_id, source_filename)`` unique.
+    """Return a Clip-row seeder that derives file paths from the ``HHMMSS`` of ``start_ts``.
+
+    Callers seeding multiple clips just vary ``start_ts`` to keep ``(camera_id, source_filename)``
+    unique.
     """
 
     def _seed(
@@ -195,10 +201,11 @@ def seed_clip() -> Callable[..., None]:
 
 @pytest.fixture
 def web_test_client() -> Callable[[Config], AbstractContextManager[TestClient]]:
-    """Calling ``web_test_client(config)`` runs ``Base.metadata.create_all`` **eagerly** so tests
-    can seed rows / files between the call and the ``with``-statement entry. The returned context
-    manager only runs the FastAPI lifespan (which spawns the heartbeat task). SQLite WAL mode lets
-    the test process keep read-writing the same file concurrently with the app's session.
+    """Run ``Base.metadata.create_all`` **eagerly** so tests can seed rows/files before lifespan entry.
+
+    Calling ``web_test_client(config)`` runs the schema creation; the returned context manager only
+    runs the FastAPI lifespan (which spawns the heartbeat task). SQLite WAL mode lets the test
+    process keep read-writing the same file concurrently with the app's session.
     """
 
     def _factory(config: Config) -> AbstractContextManager[TestClient]:
@@ -219,10 +226,11 @@ def web_test_client() -> Callable[[Config], AbstractContextManager[TestClient]]:
 
 @pytest.fixture
 def db_session_factory() -> Callable[[Path], AbstractContextManager[Session]]:
-    """Use to seed rows BEFORE entering ``web_test_client``'s lifespan — the lifespan opens its own
-    engine on the same SQLite file, so seeding through a separate short-lived engine and disposing
-    it before the app boots avoids cross-engine connection interference. SQLite WAL mode keeps
-    subsequent reader/writer engines compatible.
+    """Return a short-lived Session factory for seeding rows BEFORE entering ``web_test_client``'s lifespan.
+
+    The lifespan opens its own engine on the same SQLite file, so seeding through a separate
+    short-lived engine and disposing it before the app boots avoids cross-engine connection
+    interference. SQLite WAL mode keeps subsequent reader/writer engines compatible.
     """
 
     @contextmanager

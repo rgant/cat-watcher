@@ -56,10 +56,11 @@ def _make_clip(
     has_cat: bool,
     manual_has_cat: bool | None = None,
 ) -> Clip:
-    """``source_filename`` derives from the full ``start_ts`` (date + time + microseconds) so each
-    test can mint many clips per camera by varying ``start_ts`` alone — the ``(camera_id,
-    source_filename)`` uniqueness constraint is satisfied without per-test bookkeeping, even when
-    two seeded clips share the same time-of-day across different dates.
+    """Build a Clip row; ``source_filename`` derives from the full ``start_ts`` (date + time + µs).
+
+    Each test can mint many clips per camera by varying ``start_ts`` alone — the
+    ``(camera_id, source_filename)`` uniqueness constraint is satisfied without per-test
+    bookkeeping, even when two seeded clips share the same time-of-day across different dates.
     """
     fname = f"{start_ts.strftime('%Y%m%d-%H%M%S%f')}.mp4"
     return Clip(
@@ -236,10 +237,11 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
 
 
 def _row_for(body: str, camera_display_name: str, date_iso: str) -> str | None:
-    """Find the single ``<tr>`` block on the stats page that contains both ``camera_display_name``
-    and ``date_iso`` (ISO date string). Returns the substring spanning the row, or ``None`` if no
-    matching row is found. Used to scope substring assertions to the right row instead of the whole
-    page (e.g. so a ``2`` from a different row doesn't satisfy the cat-count check).
+    """Find the single ``<tr>`` block on the stats page containing both ``camera_display_name`` and ``date_iso``.
+
+    Returns the substring spanning the row, or ``None`` if no matching row is found. Used to scope
+    substring assertions to the right row instead of the whole page (e.g. so a ``2`` from a
+    different row doesn't satisfy the cat-count check).
     """
     cursor = 0
     while True:

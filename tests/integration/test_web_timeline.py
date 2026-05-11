@@ -79,8 +79,10 @@ def _state_clip_kwargs(
     manual_has_cat: bool | None = None,
     analysis_error: str | None = None,
 ) -> dict[str, object]:
-    """``_seed_clip_rows`` doesn't surface ``manual_has_cat`` / ``analysis_error``; tests that need
-    those construct rows directly via this helper to keep field boilerplate out of test bodies.
+    """Build a Clip-row kwargs dict that includes ``manual_has_cat`` / ``analysis_error``.
+
+    ``_seed_clip_rows`` doesn't surface those fields, so tests that need them construct rows
+    directly via this helper to keep field boilerplate out of test bodies.
     """
     start_ts = reference_now - timedelta(hours=2)
     return {

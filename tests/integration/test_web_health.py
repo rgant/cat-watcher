@@ -92,9 +92,11 @@ def test_protected_route_with_valid_credentials_passes_auth(
     make_config: Callable[[Path, Path], Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Valid credentials let the request reach the routed handler — anything but ``401`` proves the
-    middleware passed the request through. The exact downstream status (``200``, ``404``, ``500``)
-    is the route's contract, not the middleware's, so this test only pins ``!= 401``.
+    """Assert valid credentials let the request through; the middleware should not return ``401``.
+
+    Anything but ``401`` proves the middleware passed the request through. The exact downstream
+    status (``200``, ``404``, ``500``) is the route's contract, not the middleware's, so this test
+    only pins ``!= 401``.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -199,7 +201,9 @@ def test_lifespan_heartbeat_task_is_cancelled_on_shutdown(
     make_config: Callable[[Path, Path], Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Exiting the ``with web_test_client(config)`` context cleanly proves the heartbeat task didn't
+    """Assert the heartbeat task is cancelled cleanly when the lifespan context exits.
+
+    Exiting the ``with web_test_client(config)`` context cleanly proves the heartbeat task didn't
     hang on the ``asyncio.sleep`` window after cancellation. A regression that swallowed
     ``CancelledError`` somewhere in the loop would deadlock shutdown until pytest's timeout fired.
     """

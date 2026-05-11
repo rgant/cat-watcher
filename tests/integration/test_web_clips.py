@@ -113,7 +113,9 @@ def _seed_clip_frame(
     clip_id: int,
     frame_bytes: bytes | None = b"\xff\xd8\xff\xe0frame-bytes",
 ) -> int:
-    """``frame_bytes=None`` simulates the row-without-file drift the 410 path covers. The relpath
+    """Seed a ClipFrame row + optional JPEG bytes for the per-clip thumbnail tests.
+
+    ``frame_bytes=None`` simulates the row-without-file drift the 410 path covers. The relpath
     matches the production layout (``thumbs/<cam>/<YYYY-MM-DD>/<HHMMSS>/<NN>.jpg``) so
     filesystem-coupled regressions surface here instead of getting masked by a synthetic path.
     """
@@ -154,8 +156,10 @@ def _seed_clip_frame_at(
     spec: tuple[int, float],
     score: float = 0.5,
 ) -> int:
-    """No JPEG is written — the contact-sheet tests only need the ``<img>`` URL. ``thumb_path``
-    stays distinct per ordinal so a per-frame relpath regression still surfaces.
+    """Seed a ClipFrame row for the contact-sheet tests without writing a JPEG.
+
+    The contact-sheet tests only need the ``<img>`` URL. ``thumb_path`` stays distinct per ordinal
+    so a per-frame relpath regression still surfaces.
     """
     ordinal, t_offset_seconds = spec
     rel_thumb = f"thumbs/clip-{clip_id}/{ordinal:02d}.jpg"
@@ -219,9 +223,10 @@ def test_clips_list_renders_start_ts_in_display_timezone(
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """Each row's ``Start`` cell renders the clip start in ``web.display_timezone``, matching the
-    OSD time burned into the video. The ``<time datetime="…">`` attribute keeps UTC ISO for HTML5
-    semantics; only the visible text is localized.
+    """Assert each row's ``Start`` cell renders the clip start in ``web.display_timezone``.
+
+    The displayed time matches the OSD time burned into the video. The ``<time datetime="…">``
+    attribute keeps UTC ISO for HTML5 semantics; only the visible text is localized.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -375,10 +380,12 @@ def test_clip_detail_heading_renders_in_display_timezone(
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """Heading time-of-day is in ``web.display_timezone``, matching the camera-OSD time burned into
-    the video. The ``<time datetime="…">`` attribute keeps UTC ISO for HTML5 semantics, but the
-    visible text uses the configured display zone — ``Clip.start_ts`` is stored UTC, so a raw
-    ``isoformat()`` would disagree with the on-screen video timestamp by the tz offset.
+    """Assert the heading's time-of-day is rendered in ``web.display_timezone``.
+
+    The displayed time matches the camera-OSD time burned into the video. The
+    ``<time datetime="…">`` attribute keeps UTC ISO for HTML5 semantics, but the visible text uses
+    the configured display zone — ``Clip.start_ts`` is stored UTC, so a raw ``isoformat()`` would
+    disagree with the on-screen video timestamp by the tz offset.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -489,9 +496,11 @@ def test_clip_detail_disables_navigation_at_endpoints(
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """The newest clip has ``← Newer`` rendered as a disabled span; the oldest clip's ``Older →``
-    is the disabled one. Asserts via the ``clip-nav-disabled`` CSS class so a refactor that drops
-    the visual cue surfaces here.
+    """Assert clip-detail navigation links render as disabled at each endpoint of the timeline.
+
+    The newest clip has ``← Newer`` rendered as a disabled span; the oldest clip's ``Older →`` is
+    the disabled one. Asserts via the ``clip-nav-disabled`` CSS class so a refactor that drops the
+    visual cue surfaces here.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)

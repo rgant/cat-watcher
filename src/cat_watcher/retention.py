@@ -65,8 +65,10 @@ def sweep(
     retention: RetentionConfig,
     now: datetime,
 ) -> RetentionReport:
-    """Apply all retention passes in order — aged clip rows, orphan files, empty date dirs, then
-    prune ``agent_starts`` and ``alerts_sent``."""
+    """Apply all retention passes in order.
+
+    Aged clip rows, orphan files, empty date dirs, then prune ``agent_starts`` and ``alerts_sent``.
+    """
     clip_cutoff = now - timedelta(days=retention.clip_days)
     starts_cutoff = now - timedelta(days=retention.agent_starts_days)
     alerts_cutoff = now - timedelta(days=retention.alerts_sent_days)

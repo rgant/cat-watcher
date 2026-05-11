@@ -71,8 +71,10 @@ _BACKUP_COUNT: int = 7
 
 
 def _exc_type_qualname(exc: BaseException) -> str:
-    """Return ``"<module>.<class>"``. Classes lacking ``__module__`` resolve to ``"<unknown>.<class>"``
-    so the schema's ``exc_type`` field is always a well-formed dotted name.
+    """Return ``"<module>.<class>"`` for ``exc``'s concrete type.
+
+    Classes lacking ``__module__`` resolve to ``"<unknown>.<class>"`` so the schema's ``exc_type``
+    field is always a well-formed dotted name.
     """
     cls = type(exc)
     module = getattr(cls, "__module__", "<unknown>") or "<unknown>"
@@ -84,6 +86,7 @@ class JsonFormatter(logging.Formatter):
     """Format :class:`logging.LogRecord` instances as one-line JSON per the structured-logging schema."""
 
     def __init__(self, *, agent_name: str) -> None:
+        """Pin ``agent_name`` into every emitted record's ``agent`` field."""
         super().__init__()
         self._agent_name = agent_name
 
@@ -133,6 +136,7 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
     level:
         Root logger level (typically ``logging.WARNING`` by default, ``logging.INFO`` under
         ``--verbose``).
+
     """
     log_dir = internal_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

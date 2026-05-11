@@ -34,8 +34,10 @@ _DEFAULT_START_TS = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
 
 
 def _seed_unlabeled_clip(db_session_factory: Callable[[Path], AbstractContextManager[Session]], internal_root: Path) -> int:
-    """``Clip.manual_has_cat`` starts ``None`` so the POST/DELETE label endpoints can transition it.
-    On-disk media isn't materialized — the label routes only mutate the row.
+    """Seed an unlabeled clip so the POST/DELETE label endpoints can transition ``manual_has_cat``.
+
+    ``Clip.manual_has_cat`` starts ``None``. On-disk media isn't materialized — the label routes
+    only mutate the row.
     """
     with db_session_factory(internal_root) as session:
         cam = Camera(name="pantry", display_name="Pantry", host="cam.example.com")

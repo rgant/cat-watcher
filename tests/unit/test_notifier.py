@@ -173,7 +173,7 @@ def test_send_macos_notification_escapes_double_quotes(monkeypatch: pytest.Monke
 
 
 def test_send_macos_notification_escapes_backslashes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A lone ``\\`` in the body must be escaped to ``\\\\`` so AppleScript doesn't parse-error.
+    r"""A lone ``\\`` in the body must be escaped to ``\\\\`` so AppleScript doesn't parse-error.
 
     Stack-trace bodies (the BACKUP_STALE alert includes the last 50 lines of ``web.stderr.log``)
     routinely contain ``\\`` from Windows paths, repr() of bytes, etc. An unescaped backslash

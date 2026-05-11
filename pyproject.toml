@@ -18,7 +18,7 @@ dependencies = [
   "pillow>=12.2.0,<13",
   "pydantic>=2.13.4,<3",
   "pydantic-settings>=2.14.1,<3",
-  "python-multipart>=0.0.27,<0.0.28",
+  "python-multipart>=0.0.28,<0.1",
   "sqlalchemy>=2.0.49,<3",
   "starlette>=0.52.1,<0.53",
   "uvicorn[standard]>=0.46.0,<0.47",
@@ -33,11 +33,11 @@ cat-watcher-backup = "cat_watcher.backup:main"
 [dependency-groups]
 dev = [
   "arel>=0.4.0,<0.5",
-  "basedpyright>=1.39.3,<2",
+  "basedpyright>=1.39.4,<2",
   "deptry>=0.25.1,<0.26",
   "detect-secrets>=1.5.0,<2",
   "djlint>=1.36.4,<2",
-  "mypy>=1.20.2,<2",
+  "mypy>=2.1.0,<3",
   "pre-commit>=4.6.0,<5",
   "pylint>=4.0.5,<5",
   "pylint-per-file-ignores>=3.2.1,<4",
@@ -204,9 +204,10 @@ line-ending = "lf"
 [tool.ruff.lint]
 select = [ "ALL" ]
 ignore = [
-  "D",      # pydocstyle - too verbose for strict typing focus
-  "FIX002", # allow TODO comments with author and link
-  "ISC001", # single-line-implicit-string-concatenation - conflicts with formatter
+  "D203",   # 1 blank line before class (incompatible with D211)
+  "D213",   # Multi-line docstring summary start on second line (incompatible with D212)
+  "FIX002", # Allow TODO comments with author and link
+  "ISC001", # Single-line-implicit-string-concatenation - conflicts with formatter
 ]
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**/*.py" = [
@@ -236,6 +237,12 @@ max-args = 5
 max-locals = 15
 max-attributes = 7
 max-statements = 50
+exclude-too-few-public-methods = [
+  "argparse\\.Namespace",
+  "sqlalchemy.orm\\.decl_api\\.DeclarativeBase",
+  "starlette\\.middleware\\.base\\.BaseHTTPMiddleware",
+  "typing\\.Protocol",
+]
 [tool.pylint.format]
 max-line-length = 140
 expected-line-ending-format = "LF"
@@ -252,252 +259,242 @@ ignore = [ ".pixi", "node_modules" ]
 [tool.pylint.messages_control]
 disable = [
   # https://github.com/astral-sh/ruff/issues/970
+  # https://gist.github.com/rgant/60ba3dcaabdf85cae9d3dcdbbe4ae016#pylint-ruff-sync.sh
   # Error
-  "assigning-non-slot",                    # Duplicated with Ruff (PLE0237)
-  "await-outside-async",                   # Duplicated with Ruff (PLE1142)
-  "bad-configuration-section",
-  "bad-format-character",                  # Duplicated with Ruff (PLE1300)
-  "bad-plugin-value",
-  "bad-str-strip-call",                    # Duplicated with Ruff (PLE1310)
-  "bad-string-format-type",                # Duplicated with Ruff (PLE1307)
-  "bidirectional-unicode",                 # Duplicated with Ruff (PLE2502)
-  "broken-collections-callable",
-  "broken-noreturn",
-  "continue-in-finally",                   # Duplicated with Ruff (PLE0116)
-  "dict-iter-missing-items",
-  "duplicate-argument-name",
-  "duplicate-bases",                       # Duplicated with Ruff (PLE0241)
-  "format-needs-mapping",                  # Duplicated with Ruff (F502)
-  "function-redefined",                    # Duplicated with Ruff (F811)
-  "init-is-generator",                     # Duplicated with Ruff (PLE0100)
-  "invalid-all-format",                    # Duplicated with Ruff (PLE0605)
-  "invalid-all-object",                    # Duplicated with Ruff (PLE0604)
-  # "invalid-bool-returned",               # Duplicated with Ruff (PLE0304)
-  "invalid-bytes-returned",                # Duplicated with Ruff (PLE0308)
-  "invalid-character-backspace",           # Duplicated with Ruff (PLE2510)
-  "invalid-character-esc",                 # Duplicated with Ruff (PLE2513)
-  "invalid-character-nul",                 # Duplicated with Ruff (PLE2514)
-  "invalid-character-sub",                 # Duplicated with Ruff (PLE2512)
-  "invalid-character-zero-width-space",    # Duplicated with Ruff (PLE2515)
-  "invalid-envvar-value",
-  "invalid-hash-returned",                 # Duplicated with Ruff (PLE0309)
-  "invalid-index-returned",                # Duplicated with Ruff (PLE0305)
-  "invalid-length-returned",               # Duplicated with Ruff (PLE0303)
-  "invalid-str-returned",
-  "logging-too-few-args",                  # Duplicated with Ruff (PLE1206)
-  "logging-too-many-args",                 # Duplicated with Ruff (PLE1205)
-  "misplaced-bare-raise",                  # Duplicated with Ruff (PLE0704)
-  "missing-format-string-key",             # Duplicated with Ruff (F524)
-  "mixed-format-string",                   # Duplicated with Ruff (F506)
-  # "modified-iterating-set",              # Duplicated with Ruff (PLE4703)
-  "no-self-argument",                      # Duplicated with Ruff (N805)
-  "nonexistent-operator",                  # Duplicated with Ruff (B002)
-  "nonlocal-and-global",                   # Duplicated with Ruff (PLE0115)
-  "nonlocal-without-binding",              # Duplicated with Ruff (PLE0117)
-  "not-in-loop",                           # Duplicated with Ruff (F701, F702)
-  "notimplemented-raised",                 # Duplicated with Ruff (F901)
-  "potential-index-error",                 # Duplicated with Ruff (PLE0643)
-  "relative-beyond-top-level",             # Duplicated with Ruff (TID252)
-  "repeated-keyword",                      # Duplicated with Ruff (PLE1132)
-  "return-arg-in-generator",
-  "return-in-init",                        # Duplicated with Ruff (PLE0101)
-  "return-outside-function",               # Duplicated with Ruff (F706)
-  "singledispatch-method",                 # Duplicated with Ruff (PLE1519)
-  "singledispatchmethod-function",         # Duplicated with Ruff (PLE1520)
-  "star-needs-assignment-target",          # Duplicated with Ruff (syntax error in preview)
-  "syntax-error",                          # Duplicated with Ruff (always enabled)
-  "too-few-format-args",                   # Duplicated with Ruff (F524)
-  "too-many-format-args",                  # Duplicated with Ruff (F522)
-  "too-many-star-expressions",             # Duplicated with Ruff (F622)
-  "truncated-format-string",               # Duplicated with Ruff (F501)
-  "undefined-all-variable",                # Duplicated with Ruff (F822)
-  "undefined-variable",                    # Duplicated with Ruff (F821)
-  "unexpected-special-method-signature",   # Duplicated with Ruff (PLE0302)
-  "used-before-assignment",                # Duplicated with Ruff (F821)
-  "used-prior-global-declaration",         # Duplicated with Ruff (PLE0118)
-  "yield-inside-async-function",           # Duplicated with Ruff (PLE1700)
-  "yield-outside-function",                # Duplicated with Ruff (F704)
+  "assigning-non-slot",                  # Duplicated with Ruff (PLE0237)
+  "await-outside-async",                 # Duplicated with Ruff (PLE1142)
+  "bad-format-character",                # Duplicated with Ruff (PLE1300)
+  "bad-str-strip-call",                  # Duplicated with Ruff (PLE1310)
+  "bad-string-format-type",              # Duplicated with Ruff (PLE1307)
+  "bidirectional-unicode",               # Duplicated with Ruff (PLE2502)
+  "continue-in-finally",                 # Duplicated with Ruff (PLE0116)
+  # "dict-iter-missing-items", # Duplicated with Ruff (PLE1141) Preview
+  "duplicate-bases",                     # Duplicated with Ruff (PLE0241)
+  "format-needs-mapping",                # Duplicated with Ruff (F502)
+  "function-redefined",                  # Duplicated with Ruff (F811)
+  "init-is-generator",                   # Duplicated with Ruff (PLE0100)
+  "invalid-all-format",                  # Duplicated with Ruff (PLE0605)
+  "invalid-all-object",                  # Duplicated with Ruff (PLE0604)
+  # "invalid-bool-returned", # Duplicated with Ruff (PLE0304) Preview
+  "invalid-bytes-returned",              # Duplicated with Ruff (PLE0308)
+  "invalid-character-backspace",         # Duplicated with Ruff (PLE2510)
+  "invalid-character-esc",               # Duplicated with Ruff (PLE2513)
+  "invalid-character-nul",               # Duplicated with Ruff (PLE2514)
+  "invalid-character-sub",               # Duplicated with Ruff (PLE2512)
+  "invalid-character-zero-width-space",  # Duplicated with Ruff (PLE2515)
+  "invalid-envvar-value",                # Duplicated with Ruff (PLE1507)
+  "invalid-hash-returned",               # Duplicated with Ruff (PLE0309)
+  "invalid-index-returned",              # Duplicated with Ruff (PLE0305)
+  "invalid-length-returned",             # Duplicated with Ruff (PLE0303)
+  "invalid-str-returned",                # Duplicated with Ruff (PLE0307)
+  "logging-too-few-args",                # Duplicated with Ruff (PLE1206)
+  "logging-too-many-args",               # Duplicated with Ruff (PLE1205)
+  "misplaced-bare-raise",                # Duplicated with Ruff (PLE0704)
+  "missing-format-string-key",           # Duplicated with Ruff (F524)
+  "mixed-format-string",                 # Duplicated with Ruff (F506)
+  # "modified-iterating-set", # Duplicated with Ruff (PLE4703) Preview
+  "no-self-argument",                    # Duplicated with Ruff (N805)
+  "nonexistent-operator",                # Duplicated with Ruff (B002)
+  "nonlocal-and-global",                 # Duplicated with Ruff (PLE0115)
+  "nonlocal-without-binding",            # Duplicated with Ruff (PLE0117)
+  "not-in-loop",                         # Duplicated with Ruff (F701, F702)
+  "notimplemented-raised",               # Duplicated with Ruff (F901)
+  "potential-index-error",               # Duplicated with Ruff (PLE0643)
+  "relative-beyond-top-level",           # Duplicated with Ruff (TID252)
+  "repeated-keyword",                    # Duplicated with Ruff (PLE1132)
+  "return-in-init",                      # Duplicated with Ruff (PLE0101)
+  "return-outside-function",             # Duplicated with Ruff (F706)
+  "singledispatch-method",               # Duplicated with Ruff (PLE1519)
+  "singledispatchmethod-function",       # Duplicated with Ruff (PLE1520)
+  "star-needs-assignment-target",        # Duplicated with Ruff (syntax error in preview)
+  "syntax-error",                        # Duplicated with Ruff (always enabled)
+  "too-few-format-args",                 # Duplicated with Ruff (F524)
+  "too-many-format-args",                # Duplicated with Ruff (F522)
+  "too-many-star-expressions",           # Duplicated with Ruff (F622)
+  "truncated-format-string",             # Duplicated with Ruff (F501)
+  "undefined-all-variable",              # Duplicated with Ruff (F822)
+  "undefined-variable",                  # Duplicated with Ruff (F821)
+  "unexpected-special-method-signature", # Duplicated with Ruff (PLE0302)
+  "used-before-assignment",              # Duplicated with Ruff (F821)
+  "used-prior-global-declaration",       # Duplicated with Ruff (PLE0118)
+  "yield-inside-async-function",         # Duplicated with Ruff (PLE1700)
+  "yield-outside-function",              # Duplicated with Ruff (F704)
   # Warning
-  "anomalous-backslash-in-string",         # Duplicated with Ruff (W605)
-  "assert-on-string-literal",              # Duplicated with Ruff (PLW0129)
-  "assert-on-tuple",                       # Duplicated with Ruff (F631)
-  # "bad-dunder-name",                     # Duplicated with Ruff (PLW3201)
-  "bad-format-string",                     # Duplicated with Ruff (F521)
-  "bad-indentation",                       # Duplicated with Ruff (E111)
-  "bad-open-mode",                         # Duplicated with Ruff (PLW1501)
-  "bad-staticmethod-argument",             # Duplicated with Ruff (PLW0211)
-  "bare-except",                           # Duplicated with Ruff (E722)
-  "binary-op-exception",                   # Duplicated with Ruff (PLW0711)
-  "boolean-datetime",
-  "broad-exception-caught",                # Duplicated with Ruff (BLE001)
-  "broad-exception-raised",                # Duplicated with Ruff (TRY002)
-  "cell-var-from-loop",                    # Duplicated with Ruff (B023)
-  "consider-ternary-expression",           # Duplicated with Ruff (SIM108)
-  "dangerous-default-value",               # Duplicated with Ruff (B006)
-  "duplicate-except",                      # Duplicated with Ruff (B014)
-  "duplicate-key",                         # Duplicated with Ruff (F601)
-  "duplicate-value",                       # Duplicated with Ruff (B033)
-  "eq-without-hash",                       # Duplicated with Ruff (PLW1641)
-  "eval-used",                             # Duplicated with Ruff (S307)
-  "exec-used",                             # Duplicated with Ruff (S102)
-  "expression-not-assigned",               # Duplicated with Ruff (B018)
-  "f-string-without-interpolation",        # Duplicated with Ruff (F541)
-  "fixme",                                 # Duplicated with Ruff (FIX001, FIX002, FIX003, FIX004)
-  "forgotten-debug-statement",             # Duplicated with Ruff (T100)
-  "format-combined-specification",         # Duplicated with Ruff (F525)
-  "format-string-without-interpolation",   # Duplicated with Ruff (F541)
-  "global-at-module-level",                # Duplicated with Ruff (PLW0604)
-  "global-statement",                      # Duplicated with Ruff (PLW0603)
-  "global-variable-not-assigned",          # Duplicated with Ruff (PLW0602)
-  "implicit-str-concat",                   # Duplicated with Ruff (ISC001)
-  "import-self",                           # Duplicated with Ruff (PLW0406)
-  "inconsistent-quotes",                   # Duplicated with Ruff (Q000)
-  "invalid-envvar-default",                # Duplicated with Ruff (PLW1508)
-  "keyword-arg-before-vararg",             # Duplicated with Ruff (B026)
-  "logging-format-interpolation",          # Duplicated with Ruff (G001)
-  "logging-fstring-interpolation",         # Duplicated with Ruff (G004)
-  "logging-not-lazy",                      # Duplicated with Ruff (G002)
-  "lost-exception",                        # Duplicated with Ruff (B012)
-  "method-cache-max-size-none",            # Duplicated with Ruff (B019)
-  "misplaced-future",                      # Duplicated with Ruff (F404)
-  "missing-format-argument-key",           # Duplicated with Ruff (F524)
-  "named-expr-without-context",            # Duplicated with Ruff (PLW0131)
-  "nan-comparison",                        # Duplicated with Ruff (PLW0177)
-  "nested-min-max",                        # Duplicated with Ruff (PLW3301)
-  "non-ascii-file-name",                   # Duplicated with Ruff (N999)
-  "pointless-exception-statement",         # Duplicated with Ruff (PLW0133)
-  "pointless-statement",                   # Duplicated with Ruff (B018)
-  "protected-access",                      # Duplicated with Ruff (SLF001)
-  "raise-missing-from",                    # Duplicated with Ruff (B904)
-  "redefined-builtin",                     # Duplicated with Ruff (A001)
-  "redefined-loop-name",                   # Duplicated with Ruff (PLW2901)
-  "redefined-slots-in-subclass",
-  "redundant-u-string-prefix",             # Duplicated with Ruff (UP025)
-  "reimported",                            # Duplicated with Ruff (F811)
-  "self-assigning-variable",               # Duplicated with Ruff (PLW0127)
-  "self-cls-assignment",
-  "shallow-copy-environ",
-  "subprocess-popen-preexec-fn",           # Duplicated with Ruff (PLW1509)
-  "subprocess-run-check",                  # Duplicated with Ruff (PLW1510)
-  "super-without-brackets",                # Duplicated with Ruff (PLW0245)
-  # "try-except-raise",                    # Duplicated with Ruff (TRY302)
-  "unknown-option-value",
-  "unnecessary-ellipsis",                  # Duplicated with Ruff (PIE790)
-  # "unnecessary-lambda",                  # Duplicated with Ruff (PLW0108)
-  "unnecessary-pass",                      # Duplicated with Ruff (PIE790)
-  "unnecessary-semicolon",                 # Duplicated with Ruff (E703)
-  # "unspecified-encoding",                # Duplicated with Ruff (PLW1514)
-  "unused-argument",                       # Duplicated with Ruff (ARG001)
-  "unused-format-string-argument",         # Duplicated with Ruff (F507)
-  "unused-format-string-key",              # Duplicated with Ruff (F504)
-  "unused-import",                         # Duplicated with Ruff (F401)
-  "unused-variable",                       # Duplicated with Ruff (F841)
-  "useless-else-on-loop",                  # Duplicated with Ruff (PLW0120)
-  "useless-with-lock",                     # Duplicated with Ruff (PLW2101)
-  "using-f-string-in-unsupported-version",
-  "wildcard-import",                       # Duplicated with Ruff (F403)
+  "anomalous-backslash-in-string",       # Duplicated with Ruff (W605)
+  "assert-on-string-literal",            # Duplicated with Ruff (PLW0129)
+  "assert-on-tuple",                     # Duplicated with Ruff (F631)
+  # "bad-dunder-name", # Duplicated with Ruff (PLW3201) Preview
+  "bad-format-string",                   # Duplicated with Ruff (F521)
+  # "bad-indentation", # Duplicated with Ruff (E111) Preview
+  "bad-open-mode",                       # Duplicated with Ruff (PLW1501)
+  "bad-staticmethod-argument",           # Duplicated with Ruff (PLW0211)
+  "bare-except",                         # Duplicated with Ruff (E722)
+  "binary-op-exception",                 # Duplicated with Ruff (PLW0711)
+  "broad-exception-caught",              # Duplicated with Ruff (BLE001)
+  "broad-exception-raised",              # Duplicated with Ruff (TRY002)
+  "cell-var-from-loop",                  # Duplicated with Ruff (B023)
+  # "consider-ternary-expression", # Duplicated with Ruff (SIM108) pylint.extensions.consider_ternary_expression not loaded
+  "dangerous-default-value",             # Duplicated with Ruff (B006)
+  "duplicate-except",                    # Duplicated with Ruff (B014)
+  "duplicate-key",                       # Duplicated with Ruff (F601)
+  "duplicate-value",                     # Duplicated with Ruff (B033)
+  "eq-without-hash",                     # Duplicated with Ruff (PLW1641)
+  "eval-used",                           # Duplicated with Ruff (S307)
+  "exec-used",                           # Duplicated with Ruff (S102)
+  "expression-not-assigned",             # Duplicated with Ruff (B018)
+  "f-string-without-interpolation",      # Duplicated with Ruff (F541)
+  "fixme",                               # Duplicated with Ruff (FIX001, FIX002, FIX003, FIX004)
+  "forgotten-debug-statement",           # Duplicated with Ruff (T100)
+  "format-combined-specification",       # Duplicated with Ruff (F525)
+  "format-string-without-interpolation", # Duplicated with Ruff (F541)
+  "global-at-module-level",              # Duplicated with Ruff (PLW0604)
+  "global-statement",                    # Duplicated with Ruff (PLW0603)
+  "global-variable-not-assigned",        # Duplicated with Ruff (PLW0602)
+  "implicit-str-concat",                 # Duplicated with Ruff (ISC001)
+  "import-self",                         # Duplicated with Ruff (PLW0406)
+  "inconsistent-quotes",                 # Duplicated with Ruff (Q000)
+  "invalid-envvar-default",              # Duplicated with Ruff (PLW1508)
+  "keyword-arg-before-vararg",           # Duplicated with Ruff (B026)
+  "logging-format-interpolation",        # Duplicated with Ruff (G001)
+  "logging-fstring-interpolation",       # Duplicated with Ruff (G004)
+  "logging-not-lazy",                    # Duplicated with Ruff (G002)
+  "lost-exception",                      # Duplicated with Ruff (B012)
+  "method-cache-max-size-none",          # Duplicated with Ruff (B019)
+  "misplaced-future",                    # Duplicated with Ruff (F404)
+  "missing-format-argument-key",         # Duplicated with Ruff (F524)
+  "named-expr-without-context",          # Duplicated with Ruff (PLW0131)
+  "nan-comparison",                      # Duplicated with Ruff (PLW0177)
+  "nested-min-max",                      # Duplicated with Ruff (PLW3301)
+  "non-ascii-file-name",                 # Duplicated with Ruff (N999)
+  "pointless-exception-statement",       # Duplicated with Ruff (PLW0133)
+  "pointless-statement",                 # Duplicated with Ruff (B018)
+  "protected-access",                    # Duplicated with Ruff (SLF001)
+  "raise-missing-from",                  # Duplicated with Ruff (B904)
+  "redefined-builtin",                   # Duplicated with Ruff (A001)
+  "redefined-loop-name",                 # Duplicated with Ruff (PLW2901)
+  # "redefined-slots-in-subclass", # Duplicated with Ruff (PLW0244) Preview
+  "redundant-u-string-prefix",           # Duplicated with Ruff (UP025)
+  "reimported",                          # Duplicated with Ruff (F811)
+  "self-assigning-variable",             # Duplicated with Ruff (PLW0127)
+  "self-cls-assignment",                 # Duplicated with Ruff (PLW0642)
+  "shallow-copy-environ",                # Duplicated with Ruff (PLW1507)
+  "subprocess-popen-preexec-fn",         # Duplicated with Ruff (PLW1509)
+  "subprocess-run-check",                # Duplicated with Ruff (PLW1510)
+  "super-without-brackets",              # Duplicated with Ruff (PLW0245)
+  # "try-except-raise", # Duplicated with Ruff (TRY203)
+  "unnecessary-ellipsis",                # Duplicated with Ruff (PIE790)
+  "unnecessary-lambda",                  # Duplicated with Ruff (PLW0108)
+  "unnecessary-pass",                    # Duplicated with Ruff (PIE790)
+  "unnecessary-semicolon",               # Duplicated with Ruff (E703)
+  # "unspecified-encoding", # Duplicated with Ruff (PLW1514) Preview
+  "unused-argument",                     # Duplicated with Ruff (ARG001)
+  "unused-format-string-argument",       # Duplicated with Ruff (F507)
+  "unused-format-string-key",            # Duplicated with Ruff (F504)
+  "unused-import",                       # Duplicated with Ruff (F401)
+  "unused-variable",                     # Duplicated with Ruff (F841)
+  "useless-else-on-loop",                # Duplicated with Ruff (PLW0120)
+  "useless-with-lock",                   # Duplicated with Ruff (PLW2101)
+  "wildcard-import",                     # Duplicated with Ruff (F403)
   # Convention
-  "bad-classmethod-argument",              # Duplicated with Ruff (N804)
-  "bad-docstring-quotes",                  # Duplicated with Ruff (Q002)
-  # "compare-to-empty-string",             # Duplicated with Ruff (PLC1901)
-  "consider-iterating-dictionary",         # Duplicated with Ruff (SIM118)
-  # "consider-using-any-or-all",           # Duplicated with Ruff (SIM110, SIM111)
-  "consider-using-dict-items",             # Duplicated with Ruff (PLC0206)
-  # "docstring-first-line-empty",          # Duplicated with Ruff (D210)
-  # "empty-docstring",                     # Duplicated with Ruff (D419)
-  "import-outside-toplevel",               # Duplicated with Ruff (PLC0415)
-  # "import-private-name",                 # Duplicated with Ruff (PLC2701)
-  "invalid-name",                          # Duplicated with Ruff (N815)
-  "line-too-long",                         # Duplicated with Ruff (E501)
-  "misplaced-comparison-constant",         # Duplicated with Ruff (SIM300)
-  # "missing-class-docstring",             # Duplicated with Ruff (D101)
-  "missing-final-newline",                 # Duplicated with Ruff (W292)
-  # "missing-function-docstring",          # Duplicated with Ruff (D103)
-  # "missing-module-docstring",            # Duplicated with Ruff (D100)
-  "multiple-imports",                      # Duplicated with Ruff (E401)
-  "multiple-statements",                   # Duplicated with Ruff (E701, E702)
-  "non-ascii-module-import",               # Duplicated with Ruff (PLC2403)
-  "non-ascii-name",                        # Duplicated with Ruff (PLC2401)
-  "single-string-used-for-slots",          # Duplicated with Ruff (PLC0205)
-  "singleton-comparison",                  # Duplicated with Ruff (E711, E712)
-  # "trailing-newlines",                   # Duplicated with Ruff (W391)
-  "trailing-whitespace",                   # Duplicated with Ruff (W291)
-  "typevar-double-variance",               # Duplicated with Ruff (PLC0131)
-  "typevar-name-incorrect-variance",       # Duplicated with Ruff (PLC0105)
-  "typevar-name-mismatch",                 # Duplicated with Ruff (PLC0132)
-  "ungrouped-imports",                     # Duplicated with Ruff (I001)
-  "unidiomatic-typecheck",                 # Duplicated with Ruff (E721)
-  "unnecessary-direct-lambda-call",        # Duplicated with Ruff (PLC3002)
-  # "unnecessary-dunder-call",             # Duplicated with Ruff (PLC2801)
-  "unnecessary-lambda-assignment",         # Duplicated with Ruff (E731)
-  "unneeded-not",                          # Duplicated with Ruff (SIM208)
-  "use-implicit-booleaness-not-len",       # Duplicated with Ruff (PLC1802)
-  # "use-maxsplit-arg",                    # Duplicated with Ruff (PLC0207)
-  "use-sequence-for-iteration",            # Duplicated with Ruff (PLC0208)
-  "useless-import-alias",                  # Duplicated with Ruff (PLC0414)
-  "wrong-import-order",                    # Duplicated with Ruff (I001)
-  "wrong-import-position",                 # Duplicated with Ruff (E402)
+  "bad-classmethod-argument",            # Duplicated with Ruff (N804)
+  # "bad-docstring-quotes", # Duplicated with Ruff (Q002) pylint.extensions.docstyle not loaded
+  # "compare-to-empty-string", # Duplicated with Ruff (PLC1901) Preview
+  "consider-iterating-dictionary",       # Duplicated with Ruff (SIM118)
+  # "consider-using-any-or-all", # Duplicated with Ruff (SIM110) pylint.extensions.for_any_all not loaded
+  "consider-using-dict-items",           # Duplicated with Ruff (PLC0206)
+  # "docstring-first-line-empty", # Duplicated with Ruff (D210) pylint.extensions.docstyle not loaded
+  "empty-docstring",                     # Duplicated with Ruff (D419)
+  "import-outside-toplevel",             # Duplicated with Ruff (PLC0415)
+  # "import-private-name", # Duplicated with Ruff (PLC2701) Preview
+  "invalid-name",                        # Duplicated with Ruff (N815)
+  "line-too-long",                       # Duplicated with Ruff (E501)
+  # "misplaced-comparison-constant", # Duplicated with Ruff (SIM300) pylint.extensions.comparison_placement not loaded
+  "missing-class-docstring",             # Duplicated with Ruff (D101)
+  "missing-final-newline",               # Duplicated with Ruff (W292)
+  "missing-function-docstring",          # Duplicated with Ruff (D103)
+  "missing-module-docstring",            # Duplicated with Ruff (D100)
+  "multiple-imports",                    # Duplicated with Ruff (E401)
+  "multiple-statements",                 # Duplicated with Ruff (E701, E702)
+  "non-ascii-module-import",             # Duplicated with Ruff (PLC2403)
+  "non-ascii-name",                      # Duplicated with Ruff (PLC2401)
+  "single-string-used-for-slots",        # Duplicated with Ruff (PLC0205)
+  "singleton-comparison",                # Duplicated with Ruff (E711, E712)
+  # "trailing-newlines", # Duplicated with Ruff (W391) Preview
+  "trailing-whitespace",                 # Duplicated with Ruff (W291)
+  "typevar-double-variance",             # Duplicated with Ruff (PLC0131)
+  "typevar-name-incorrect-variance",     # Duplicated with Ruff (PLC0105)
+  "typevar-name-mismatch",               # Duplicated with Ruff (PLC0132)
+  "ungrouped-imports",                   # Duplicated with Ruff (I001)
+  "unidiomatic-typecheck",               # Duplicated with Ruff (E721)
+  "unnecessary-direct-lambda-call",      # Duplicated with Ruff (PLC3002)
+  # "unnecessary-dunder-call", # Duplicated with Ruff (PLC2801) Preview
+  "unnecessary-lambda-assignment",       # Duplicated with Ruff (E731)
+  "unneeded-not",                        # Duplicated with Ruff (SIM208)
+  "use-implicit-booleaness-not-len",     # Duplicated with Ruff (PLC1802)
+  "use-maxsplit-arg",                    # Duplicated with Ruff (PLC0207)
+  "use-sequence-for-iteration",          # Duplicated with Ruff (PLC0208)
+  "useless-import-alias",                # Duplicated with Ruff (PLC0414)
+  "wrong-import-order",                  # Duplicated with Ruff (I001)
+  "wrong-import-position",               # Duplicated with Ruff (E402)
   # Refactor
-  "comparison-of-constants",               # Duplicated with Ruff (PLR0133)
-  "comparison-with-itself",                # Duplicated with Ruff (PLR0124)
-  "consider-alternative-union-syntax",     # Duplicated with Ruff (UP007)
-  "consider-merging-isinstance",           # Duplicated with Ruff (SIM101)
-  "consider-swap-variables",               # Duplicated with Ruff (PLR1712)
-  "consider-using-alias",                  # Duplicated with Ruff (UP006)
-  # "consider-using-augmented-assign",     # Duplicated with Ruff (PLR6104)
-  "consider-using-dict-comprehension",     # Duplicated with Ruff (C402)
-  "consider-using-from-import",            # Duplicated with Ruff (PLR0402)
-  "consider-using-generator",              # Duplicated with Ruff (C417)
-  "consider-using-get",                    # Duplicated with Ruff (SIM401)
-  "consider-using-in",                     # Duplicated with Ruff (PLR1714)
-  "consider-using-min-builtin",            # Duplicated with Ruff (PLR1730)
-  "consider-using-max-builtin",            # Duplicated with Ruff (PLR1730)
-  "consider-using-set-comprehension",      # Duplicated with Ruff (C401)
-  "consider-using-sys-exit",               # Duplicated with Ruff (PLR1722)
-  # "consider-using-ternary",              # Duplicated with Ruff (PLR1706)
-  "consider-using-with",                   # Duplicated with Ruff (SIM115)
-  "else-if-used",                          # Duplicated with Ruff (PLR5501)
-  "empty-comment",                         # Duplicated with Ruff (PLR2044)
-  "inconsistent-return-statements",        # Duplicated with Ruff (RET501, RET502)
-  "literal-comparison",                    # Duplicated with Ruff (F632)
-  "magic-value-comparison",                # Duplicated with Ruff (PLR2004)
-  # "no-classmethod-decorator",            # Duplicated with Ruff (PLR0202)
-  "no-else-break",                         # Duplicated with Ruff (RET508)
-  "no-else-continue",                      # Duplicated with Ruff (RET507)
-  "no-else-raise",                         # Duplicated with Ruff (RET506)
-  "no-else-return",                        # Duplicated with Ruff (RET505)
-  # "no-self-use",                         # Duplicated with Ruff (PLR6301)
-  # "no-staticmethod-decorator",           # Duplicated with Ruff (PLR0203)
-  "property-with-parameters",              # Duplicated with Ruff (PLR0206)
-  "redefined-argument-from-local",         # Duplicated with Ruff (PLR1704)
-  "simplifiable-if-expression",            # Duplicated with Ruff (SIM210, SIM211)
-  "simplifiable-if-statement",             # Duplicated with Ruff (SIM108)
-  "stop-iteration-return",
-  "super-with-arguments",                  # Duplicated with Ruff (UP008)
-  "too-complex",                           # Duplicated with Ruff (C901)
-  "too-many-arguments",                    # Duplicated with Ruff (PLR0913)
-  # "too-many-boolean-expressions",        # Duplicated with Ruff (PLR0916)
-  # "too-many-positional-arguments",       # Duplicated with Ruff (PLR0917)
-  "too-many-branches",                     # Duplicated with Ruff (PLR0912)
-  # "too-many-locals",                     # Duplicated with Ruff (PLR0914)
-  "too-many-nested-blocks",                # Duplicated with Ruff (PLR1702)
-  # "too-many-public-methods",             # Duplicated with Ruff (PLR0904)
-  "too-many-return-statements",            # Duplicated with Ruff (PLR0911)
-  "too-many-statements",                   # Duplicated with Ruff (PLR0915)
-  "trailing-comma-tuple",                  # Duplicated with Ruff (COM818)
-  "unnecessary-comprehension",             # Duplicated with Ruff (C416)
-  "use-a-generator",                       # Duplicated with Ruff (C419)
-  "unnecessary-dict-index-lookup",         # Duplicated with Ruff (PLR1733)
-  "use-list-literal",                      # Duplicated with Ruff (C405)
-  "use-dict-literal",                      # Duplicated with Ruff (C406)
-  "unnecessary-list-index-lookup",         # Duplicated with Ruff (PLR1736)
-  "use-yield-from",                        # Duplicated with Ruff (UP028)
-  "use-set-for-membership",                # Duplicated with Ruff (PLR6201)
-  "useless-object-inheritance",            # Duplicated with Ruff (UP004)
-  "useless-option-value",
-  "useless-return",                        # Duplicated with Ruff (PLR1711)
+  "comparison-of-constants",             # Duplicated with Ruff (PLR0133)
+  "comparison-with-itself",              # Duplicated with Ruff (PLR0124)
+  "consider-alternative-union-syntax",   # Duplicated with Ruff (UP007)
+  "consider-merging-isinstance",         # Duplicated with Ruff (SIM101)
+  # "consider-swap-variables", # Duplicated with Ruff (PLR1712) Preview
+  "consider-using-alias",                # Duplicated with Ruff (UP006)
+  # "consider-using-augmented-assign", # Duplicated with Ruff (PLR6104) Preview
+  "consider-using-dict-comprehension",   # Duplicated with Ruff (C402)
+  "consider-using-from-import",          # Duplicated with Ruff (PLR0402)
+  "consider-using-generator",            # Duplicated with Ruff (C417)
+  "consider-using-get",                  # Duplicated with Ruff (SIM401)
+  "consider-using-in",                   # Duplicated with Ruff (PLR1714)
+  "consider-using-min-builtin",          # Duplicated with Ruff (PLR1730)
+  "consider-using-max-builtin",          # Duplicated with Ruff (PLR1730)
+  "consider-using-set-comprehension",    # Duplicated with Ruff (C401)
+  "consider-using-sys-exit",             # Duplicated with Ruff (PLR1722)
+  # "consider-using-ternary", # Duplicated with Ruff (PLR1706) Removed
+  "consider-using-with",                 # Duplicated with Ruff (SIM115)
+  "else-if-used",                        # Duplicated with Ruff (PLR5501)
+  # "empty-comment", # Duplicated with Ruff (PLR2044) pylint.extensions.empty_comment not loaded
+  "inconsistent-return-statements",      # Duplicated with Ruff (RET501, RET502)
+  "literal-comparison",                  # Duplicated with Ruff (F632)
+  # "magic-value-comparison", # Duplicated with Ruff (PLR2004) pylint.extensions.magic_value not loaded
+  # "no-classmethod-decorator", # Duplicated with Ruff (PLR0202) Preview
+  "no-else-break",                       # Duplicated with Ruff (RET508)
+  "no-else-continue",                    # Duplicated with Ruff (RET507)
+  "no-else-raise",                       # Duplicated with Ruff (RET506)
+  "no-else-return",                      # Duplicated with Ruff (RET505)
+  # "no-self-use", # Duplicated with Ruff (PLR6301) Preview
+  # "no-staticmethod-decorator", # Duplicated with Ruff (PLR0203) Preview
+  "property-with-parameters",            # Duplicated with Ruff (PLR0206)
+  "redefined-argument-from-local",       # Duplicated with Ruff (PLR1704)
+  "simplifiable-if-expression",          # Duplicated with Ruff (SIM210, SIM211)
+  "simplifiable-if-statement",           # Duplicated with Ruff (SIM108)
+  "stop-iteration-return",               # Duplicated with Ruff (PLR1708)
+  "super-with-arguments",                # Duplicated with Ruff (UP008)
+  # "too-complex", # Duplicated with Ruff (C901) pylint.extensions.mccabe not loaded
+  "too-many-arguments",                  # Duplicated with Ruff (PLR0913)
+  # "too-many-boolean-expressions", # Duplicated with Ruff (PLR0916) Preview
+  # "too-many-positional-arguments", # Duplicated with Ruff (PLR0917) Preview
+  "too-many-branches",                   # Duplicated with Ruff (PLR0912)
+  # "too-many-locals", # Duplicated with Ruff (PLR0914) Preview
+  # "too-many-nested-blocks", # Duplicated with Ruff (PLR1702) Preview
+  # "too-many-public-methods", # Duplicated with Ruff (PLR0904) Preview
+  "too-many-return-statements",          # Duplicated with Ruff (PLR0911)
+  "too-many-statements",                 # Duplicated with Ruff (PLR0915)
+  "trailing-comma-tuple",                # Duplicated with Ruff (COM818)
+  "unnecessary-comprehension",           # Duplicated with Ruff (C416)
+  "use-a-generator",                     # Duplicated with Ruff (C419)
+  "unnecessary-dict-index-lookup",       # Duplicated with Ruff (PLR1733)
+  "use-list-literal",                    # Duplicated with Ruff (C405)
+  "use-dict-literal",                    # Duplicated with Ruff (C406)
+  "unnecessary-list-index-lookup",       # Duplicated with Ruff (PLR1736)
+  "use-yield-from",                      # Duplicated with Ruff (UP028)
+  # "use-set-for-membership", # Duplicated with Ruff (PLR6201) Preview
+  "useless-object-inheritance",          # Duplicated with Ruff (UP004)
+  "useless-return",                      # Duplicated with Ruff (PLR1711)
   # Project Customizations
-  "too-few-public-methods",                # Data classes don't need methods
 ]
 enable = [ "c-extension-no-member", "useless-suppression" ]
 # Test files routinely access private members and use late imports for patching.
@@ -537,6 +534,7 @@ collapse_tables = [ "project.authors" ]
 
 [tool.mypy]
 disallow_any_unimported = true
+enable_error_code = "ignore-without-code"
 files = [ "src", "tests" ]
 # ``tests/fixtures`` mirrors ``[tool.pytest.ini_options].pythonpath`` so mypy resolves
 # ``from make_clip import make_clip`` in tests/conftest.py the same way pytest does.

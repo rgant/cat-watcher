@@ -33,8 +33,10 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def _seed_amcrest_mocks(payload: bytes) -> None:
-    """Default one-clip mock for tests whose Clip-row assertions hardcode the 2026-05-01 06:47:04
-    timestamp + 1m54s duration. New tests should pass ``start_ts`` to :func:`_seed_amcrest_mocks_for_clip`.
+    """Seed the default one-clip Amcrest mock at 2026-05-01 06:47:04 with a 1m54s duration.
+
+    Existing tests assert on those hardcoded values. New tests should pass ``start_ts`` to
+    :func:`_seed_amcrest_mocks_for_clip` instead of this convenience wrapper.
     """
     _seed_amcrest_mocks_for_clip(
         start_ts=datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC),
@@ -49,8 +51,9 @@ def _make_detector(
     has_cat: bool,
     scored_frames: tuple[ScoredFrame, ...] = (),
 ) -> MagicMock:
-    """Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
-    per-frame thumbnail pipeline has frames to encode.
+    """Build a Detector mock; pass ``scored_frames`` to populate ``DetectionResult.scored_frames``.
+
+    Tests that exercise the success-path per-frame thumbnail pipeline need frames to encode.
     """
     mock_detector = MagicMock(spec=Detector)
     mock_detector.version = "yolo11n.pt@deadbeef"
@@ -643,8 +646,10 @@ def test_full_tick_writes_heartbeat_and_agent_starts_row(
 
 
 def _seed_aged_camera_and_clip(engine: Engine, storage_root: Path) -> tuple[Path, Path]:
-    """Camera + Clip + matching files dated 60 days back — outside the default 30-day retention
-    window — so the retention sweep test can assert on post-sweep absence.
+    """Seed a Camera + Clip + matching files dated 60 days back for the retention-sweep test.
+
+    The age is outside the default 30-day retention window so the sweep test can assert on
+    post-sweep absence.
     """
     aged_ts = _NOW - timedelta(days=60)
     clip_rel = "clips/pantry/2026-03-02/100000.mp4"
@@ -861,8 +866,10 @@ def test_safety_net_fires_poller_empty_after_quiet_when_amcrest_returns_zero_row
     disable_alert_channels: Callable[[Config], Config],
     seed_camera: Callable[..., int],
 ) -> None:
-    """End-to-end: a camera quiet beyond ``safety_net_hours`` whose ``findFile`` returns zero rows
-    writes exactly one ``POLLER_EMPTY_AFTER_QUIET`` row to ``alerts_sent``.
+    """End-to-end test of the empty-after-quiet alert.
+
+    A camera quiet beyond ``safety_net_hours`` whose ``findFile`` returns zero rows writes exactly
+    one ``POLLER_EMPTY_AFTER_QUIET`` row to ``alerts_sent``.
     """
     internal_root, storage_root = storage_dirs
     config = disable_alert_channels(make_config(internal_root, storage_root))
@@ -895,10 +902,10 @@ def test_overlap_zone_clip_is_ingested_via_extended_query_window(
     make_config: Callable[..., Config],
     seed_camera: Callable[..., int],
 ) -> None:
-    """Steady-state recovery: a clip whose ``start_ts`` falls in the trailing overlap zone is
-    ingested by the next tick despite the prior tick's wall-clock having advanced past it.
+    """Test steady-state recovery of a clip whose ``start_ts`` falls in the trailing overlap zone.
 
-    Setup represents the post-prior-tick cursor state: with ``cadence_seconds=300`` and
+    The clip is ingested by the next tick despite the prior tick's wall-clock having advanced past
+    it. Setup represents the post-prior-tick cursor state: with ``cadence_seconds=300`` and
     ``overlap_minutes=15``, a prior tick at ``now - 5min`` would have set the cursor to
     ``(now - 5min) - 15min = now - 20min``. A clip with ``start_ts = now - 7min`` is outside the
     cadence-only window ``[now - 5min, now]`` (the pre-fix bug path that lost clips) but inside
@@ -946,9 +953,11 @@ def test_safety_net_widening_recovers_clip_and_suppresses_alert(
     disable_alert_channels: Callable[[Config], Config],
     seed_camera: Callable[..., int],
 ) -> None:
-    """Safety-net happy path: a camera quiet beyond ``safety_net_hours`` whose widened ``findFile``
-    query returns a clip ingests that clip, advances ``last_clip_at``, and does NOT fire
-    ``POLLER_EMPTY_AFTER_QUIET`` (alert suppression is row-count-keyed, not ingest-count-keyed).
+    """Test the safety-net happy path: a widened ``findFile`` recovers a clip and suppresses the alert.
+
+    A camera quiet beyond ``safety_net_hours`` whose widened ``findFile`` query returns a clip
+    ingests that clip, advances ``last_clip_at``, and does NOT fire ``POLLER_EMPTY_AFTER_QUIET``
+    (alert suppression is row-count-keyed, not ingest-count-keyed).
     """
     internal_root, storage_root = storage_dirs
     config = disable_alert_channels(make_config(internal_root, storage_root))

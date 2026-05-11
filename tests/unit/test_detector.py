@@ -284,7 +284,7 @@ def test_detect_raises_on_non_positive_duration(synthetic_clip_path: Path, monke
 
 
 def test_detect_raises_on_short_ffmpeg_output(synthetic_clip_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """ffmpeg returning fewer bytes than ``width*height*3`` is treated as a decode failure."""
+    """Ffmpeg returning fewer bytes than ``width*height*3`` is treated as a decode failure."""
     detector, _ = _make_detector(return_value=_fake_results(cls_ids=[], confidences=[], boxes=[]))
     real_run = subprocess.run
 
@@ -352,7 +352,7 @@ def test_scored_frame_carries_frame_ndarray(synthetic_clip_path: Path) -> None:
 
 
 def test_detect_samples_frames_at_distinct_timestamps(synthetic_clip_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """ffmpeg is invoked with N distinct ``-ss <timestamp>`` values for ``frames_to_sample=N``."""
+    """Ffmpeg is invoked with N distinct ``-ss <timestamp>`` values for ``frames_to_sample=N``."""
     per_frame = _fake_results(cls_ids=[], confidences=[], boxes=[])
     detector, _ = _make_detector(return_value=per_frame, frames_to_sample=3)
     real_run = subprocess.run

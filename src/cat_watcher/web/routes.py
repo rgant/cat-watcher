@@ -285,10 +285,12 @@ def _clip_thumb_relpath(clip: Clip) -> str:
 
 @media_router.get("/media/clip/{clip_id}.mp4")
 async def media_clip(request: Request, clip_id: int) -> FileResponse:
-    """Serve the MP4 file for ``clip_id``. ``FileResponse`` handles HTTP byte-Range itself
-    (``<video>`` seeking, RFC 7233 § 4): ``200`` for no Range header, ``206`` with a correct
-    ``Content-Range`` for valid ranges, ``400`` for malformed Range syntax, ``416`` for ranges that
-    fall past EOF. Plus our 404/503/410 from :func:`_resolve_media_path`.
+    """Serve the MP4 file for ``clip_id``.
+
+    ``FileResponse`` handles HTTP byte-Range itself (``<video>`` seeking, RFC 7233 § 4): ``200``
+    for no Range header, ``206`` with a correct ``Content-Range`` for valid ranges, ``400`` for
+    malformed Range syntax, ``416`` for ranges that fall past EOF. Plus our 404/503/410 from
+    :func:`_resolve_media_path`.
     """
     state = _state(request)
     file_path = _resolve_media_path(engine=state.engine, clip_id=clip_id, get_relpath=_clip_video_relpath, config=state.config)

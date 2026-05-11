@@ -387,7 +387,7 @@ def _fmt_delta(delta: timedelta) -> str:
 
 
 def _run_inspect(args: _ParsedArgs) -> int:
-    """Returns 0 / 3 (not found)."""
+    """Return 0 on success, 3 when the clip id is not found."""
     config = load_config(args.config)
     engine = _open_engine(config)
     try:
@@ -671,8 +671,11 @@ def _reanalyze_loop(
     detector: Detector,
     args: _ParsedArgs,
 ) -> tuple[_ReanalyzeReport, dict[int, str]]:
-    """Process qualifying clips one at a time; commit per clip so concurrent writers (web/poller
-    heartbeats) aren't starved while YOLO + JPEG encoding holds the per-clip session."""
+    """Process qualifying clips one at a time, committing per clip.
+
+    Per-clip commits prevent concurrent writers (web/poller heartbeats) from being starved while
+    YOLO + JPEG encoding holds the per-clip session.
+    """
     report = _ReanalyzeReport()
     stmt = select(Clip.id).order_by(Clip.start_ts.asc())
     if not args.all:

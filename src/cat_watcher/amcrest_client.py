@@ -97,6 +97,7 @@ class CameraAPIError(CameraError):
     status: int | None
 
     def __init__(self, message: str, *, status: int | None = None) -> None:
+        """Construct with ``message`` and an optional HTTP ``status`` for status-based dispatch."""
         super().__init__(message)
         self.status = status
 
@@ -165,6 +166,7 @@ class AmcrestClient:
         retry_attempts: int = _DEFAULT_RETRY_ATTEMPTS,
         retry_delay_seconds: float = _DEFAULT_RETRY_DELAY_SECONDS,
     ) -> None:
+        """Open one digest-auth ``httpxyz.Client`` bound to ``camera.host``; reused across requests."""
         self._camera = camera
         self._tz = camera_tz
         self._retry_attempts = retry_attempts
@@ -176,9 +178,11 @@ class AmcrestClient:
         )
 
     def __enter__(self) -> Self:
+        """Return self so callers can use ``with AmcrestClient(...) as client``."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Close the underlying ``httpxyz.Client`` on context exit."""
         self.close()
 
     def close(self) -> None:

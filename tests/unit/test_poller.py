@@ -619,7 +619,7 @@ def test_extract_thumbnail_raises_when_ffmpeg_missing(synthetic_clip_path: Path,
 
 
 def test_extract_thumbnail_raises_on_ffmpeg_failure(tmp_path: Path) -> None:
-    """ffmpeg's non-zero exit (bogus input) surfaces as ``PollerError`` rather than a raw stderr."""
+    """Ffmpeg's non-zero exit (bogus input) surfaces as ``PollerError`` rather than a raw stderr."""
     bogus = tmp_path / "not-a-video.txt"
     _ = bogus.write_text("definitely not an mp4")
     with pytest.raises(PollerError, match="thumbnail failed"):
@@ -1073,9 +1073,11 @@ def test_run_tick_preserves_cursor_on_unexpected_exception(
     make_config: Callable[..., Config],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An exception not caught inside ``_poll_camera`` (e.g. a programming bug) still preserves the
-    cursor via the bare ``except Exception`` handler in ``run_tick``; error message is the generic
-    ``"unexpected exception"`` sentinel so logs (not the DB row) carry the traceback detail.
+    """Assert an uncaught exception in ``_poll_camera`` still preserves the cursor.
+
+    The bare ``except Exception`` handler in ``run_tick`` catches it; the error message is the
+    generic ``"unexpected exception"`` sentinel so logs (not the DB row) carry the traceback
+    detail.
     """
     config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
     prior = _NOW - timedelta(hours=1)
@@ -1139,8 +1141,10 @@ def test_run_tick_advances_cursor_on_successful_recovery_after_failure(
 
 
 def _seed_pantry_with_cursor(engine: Engine, last_polled_at: datetime) -> None:
-    """Insert a ``pantry`` row with the given cursor — used by the structured-logging tests to set
-    up the prior ``last_polled_at`` without paying the 6-fixture cost of ``seed_camera``.
+    """Insert a ``pantry`` row with the given cursor.
+
+    Used by the structured-logging tests to set up the prior ``last_polled_at`` without paying the
+    6-fixture cost of ``seed_camera``.
     """
     with get_session(engine) as session:
         session.add(
@@ -1226,7 +1230,8 @@ def test_run_tick_emits_poll_tick_failed_warning_on_unexpected_exception(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Bare-``except`` path emits ``poll_tick_failed`` with the exception class name and message;
+    """Assert the bare-``except`` path emits ``poll_tick_failed`` with the exception class + message.
+
     ``window_since`` / ``window_until`` are ``None`` because ``_poll_camera`` raised before the
     window resolved.
     """

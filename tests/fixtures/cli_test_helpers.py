@@ -26,8 +26,9 @@ _DB_FILENAME = "cat_watcher.sqlite"
 
 
 def init_schema(internal_root: Path) -> None:
-    """Schema must exist before the CLI handler opens its own engine on the same SQLite file;
-    create + dispose a one-shot engine so no pooled connections remain.
+    """Create the SQLite schema via a one-shot engine, then dispose so no pooled connections remain.
+
+    The schema must exist before the CLI handler opens its own engine on the same SQLite file.
     """
     engine = create_engine(f"sqlite:///{internal_root / _DB_FILENAME}")
     try:
@@ -56,8 +57,10 @@ def make_handler_args(config_path: Path | None = None, **overrides: object) -> _
 
 @contextmanager
 def open_seed_session(config: Config) -> Generator[Session]:
-    """Disposing the engine here keeps the seed connection from holding a write lock when the
-    handler opens its own session against the same SQLite file.
+    """Yield a session and dispose its engine on exit so no write lock leaks into the handler's session.
+
+    The handler opens its own session against the same SQLite file; a lingering pooled connection
+    here would block it.
     """
     engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
     try:
@@ -97,8 +100,9 @@ def seed_clip(  # noqa: PLR0913  # pylint: disable=too-many-arguments  # single 
     file_path: str = "clips/pantry/test.mp4",
     thumb_path: str = "thumbs/pantry/test.jpg",
 ) -> int:
-    """``source_filename`` defaults to ``YYYYMMDD-HHMMSSffffff.mp4`` derived from ``start_ts`` so a
-    test seeding multiple clips per camera only needs to vary ``start_ts`` to keep the
+    """Insert a Clip row; default ``source_filename`` is ``YYYYMMDD-HHMMSSffffff.mp4`` from ``start_ts``.
+
+    A test seeding multiple clips per camera only needs to vary ``start_ts`` to keep the
     ``(camera_id, source_filename)`` uniqueness constraint satisfied.
     """
     start = start_ts or datetime.now(UTC)

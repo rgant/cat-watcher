@@ -105,11 +105,11 @@ class AlertCandidate:
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DispatchEnv:
-    """External dependencies for :func:`dispatch_alert` — config + infrastructure, separate from
-    the per-call alert identity (``alert_type`` + ``camera_id`` + ``content``).
+    """External dependencies for :func:`dispatch_alert`.
 
-    ``now`` is optional so production callers omit it and get :func:`datetime.now(UTC)`; tests pin
-    it to keep cool-down assertions deterministic.
+    Config + infrastructure, separate from the per-call alert identity (``alert_type`` +
+    ``camera_id`` + ``content``). ``now`` is optional so production callers omit it and get
+    :func:`datetime.now(UTC)`; tests pin it to keep cool-down assertions deterministic.
     """
 
     secrets: EmailSecrets

@@ -218,6 +218,7 @@ class Detector:
         frames_to_sample: int,
         confidence_threshold: float,
     ) -> None:
+        """Store an already-loaded ``YOLO`` model and the per-clip detection knobs."""
         self._model = model
         self._version = version
         self._frames_to_sample = frames_to_sample

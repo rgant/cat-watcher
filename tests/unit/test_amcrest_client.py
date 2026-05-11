@@ -205,7 +205,7 @@ def test_iter_recordings_findfile_url_uses_amcrest_quirky_encoding() -> None:
 
 @respx.mock
 def test_iter_recordings_treats_findfile_400_as_empty_window() -> None:
-    """Amcrest firmware returns HTTP 400 from findFile when the time window has zero recordings.
+    r"""Amcrest firmware returns HTTP 400 from findFile when the time window has zero recordings.
 
     The body is the same generic ``"Error\\r\\nBad Request!\\r\\n"`` the camera returns for any 400,
     and there is no other discriminator — see ``docs/resources/amcrest-bracket-quirk.md``. The

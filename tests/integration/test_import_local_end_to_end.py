@@ -40,8 +40,9 @@ def _setup_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _make_detector(*, scored_frames: tuple[ScoredFrame, ...] = ()) -> MagicMock:
-    """Pass ``scored_frames`` to populate ``DetectionResult.scored_frames`` so the success-path
-    per-frame thumbnail pipeline has frames to encode.
+    """Build a Detector mock; pass ``scored_frames`` to populate ``DetectionResult.scored_frames``.
+
+    Tests that exercise the success-path per-frame thumbnail pipeline need frames to encode.
     """
     detector = MagicMock(spec=Detector)
     detector.version = "yolo11n.pt@deadbeef"
@@ -74,8 +75,10 @@ def _build_sd_tree(  # noqa: PLR0913  # pylint: disable=too-many-locals  # synth
     end_minute: int | None = None,
     thumb_seconds: tuple[int, ...] | None = (24, 25, 26),
 ) -> tuple[Path, Path | None]:
-    """``primary_thumb_path`` is None when ``thumb_seconds`` is None or empty (used to test the
-    ffmpeg fallback).
+    """Build a synthetic Amcrest SD-card tree under ``source_root`` for one clip.
+
+    ``primary_thumb_path`` is ``None`` when ``thumb_seconds`` is ``None`` or empty (used to test
+    the ffmpeg fallback).
     """
     end_min = end_minute if end_minute is not None else minute + 1
     fname = f"{hour:02d}.{minute:02d}.{start_sec:02d}-{hour:02d}.{end_min:02d}.{end_sec:02d}[M][0@0][0].mp4"

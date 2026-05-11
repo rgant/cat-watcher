@@ -21,7 +21,9 @@ _DEFAULT_HEIGHT = 266
 
 
 def make_clip(duration_seconds: float = 2.0, *, fps: int = 5, width: int = _DEFAULT_WIDTH, height: int = _DEFAULT_HEIGHT) -> Path:
-    """Default ``fps=5`` matches the detector's default ``frames_to_sample=5``: a 2-second clip at 5
+    """Build a synthetic H.264 MP4 cached on disk; rebuilds only when the inputs change.
+
+    Default ``fps=5`` matches the detector's default ``frames_to_sample=5``: a 2-second clip at 5
     fps yields 10 frames, of which the detector samples 5. The cache key is a sha256 of
     ``(duration, fps, width, height)``.
     """

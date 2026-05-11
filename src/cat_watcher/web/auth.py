@@ -41,6 +41,7 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
     _password: str
 
     def __init__(self, app: ASGIApp, *, username: str, password: SecretStr) -> None:
+        """Capture the operator credentials checked against incoming ``Authorization`` headers."""
         super().__init__(app)
         self._username = username
         self._password = password.get_secret_value()

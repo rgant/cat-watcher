@@ -252,8 +252,9 @@ def test_heartbeat_round_trip(db_engine: Engine) -> None:
 
 
 def test_naive_datetime_is_rejected_on_insert(db_engine: Engine) -> None:
-    """Binding a naive datetime to a UTC column raises ``ValueError`` — a stray ``datetime.now()``
-    without ``tz=UTC`` must not quietly land labeled as UTC.
+    """Assert binding a naive datetime to a UTC column raises ``ValueError``.
+
+    A stray ``datetime.now()`` without ``tz=UTC`` must not quietly land labeled as UTC.
     """
     naive = datetime(2026, 5, 3, 12, 0, 0, tzinfo=None)  # noqa: DTZ001  # intentional: this is the failure path under test
     camera = Camera(

@@ -197,9 +197,10 @@ class PollerConfig(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def _overlap_within_soft_cap(self) -> PollerConfig:
-        """Cap ``overlap_minutes`` at 12 ticks of cadence so misconfiguration can't grow the
-        per-tick query window unboundedly. Cap = ``cadence_seconds * 12 // 60``; with the default
-        cadence (300s), the cap is 60 minutes.
+        """Cap ``overlap_minutes`` at 12 ticks of cadence.
+
+        Prevents misconfiguration from growing the per-tick query window unboundedly. Cap =
+        ``cadence_seconds * 12 // 60``; with the default cadence (300s), the cap is 60 minutes.
         """
         cap = (self.cadence_seconds * 12) // 60
         if self.overlap_minutes > cap:
@@ -235,7 +236,7 @@ class Config(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def _unique_camera_names(self) -> Config:
-        """The storage slug is derived from name, so duplicates would collide on disk."""
+        """Reject duplicate camera names so derived storage slugs cannot collide on disk."""
         seen: set[str] = set()
         duplicates: list[str] = []
         for cam in self.cameras:

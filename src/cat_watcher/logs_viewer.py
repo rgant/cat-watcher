@@ -215,7 +215,7 @@ class _Filters:
     grep: str | None
 
     def passes(self, record: LogRecordDict) -> bool:
-        """True iff ``record`` satisfies every active filter (``None`` filters skip)."""
+        """Return ``True`` iff ``record`` satisfies every active filter (``None`` filters skip)."""
         if self.since is not None and not _record_after(record, self.since):
             return False
         if self.level is not None and not _record_at_level(record, self.level):

@@ -293,8 +293,10 @@ def detection_for(detector: Detector | None, clip_full: Path) -> tuple[Detection
 
 
 def detection_fields_for(detector: Detector | None, clip_full: Path) -> DetectionFields:
-    """Run the detector and return the Clip kwargs; thin shim around :func:`detection_for` for callers
-    (reanalyze CLI, unit tests) that don't need the per-frame buffer.
+    """Run the detector and return the Clip kwargs.
+
+    Thin shim around :func:`detection_for` for callers (reanalyze CLI, unit tests) that don't need
+    the per-frame buffer.
     """
     fields, _ = detection_for(detector, clip_full)
     return fields
@@ -370,7 +372,7 @@ def _materialize_thumbs(  # noqa: PLR0913  # explicit args trace the IO surface;
 
 
 def _clip_already_ingested(ctx: IngestContext, source_filename: str) -> bool:
-    """True iff a Clip row already exists for ``(ctx.cam_id, source_filename)`` (idempotency guard)."""
+    """Return ``True`` iff a Clip row already exists for ``(ctx.cam_id, source_filename)`` (idempotency guard)."""
     with get_session(ctx.engine) as session:
         existing = session.scalar(select(Clip.id).where(Clip.camera_id == ctx.cam_id, Clip.source_filename == source_filename))
     return existing is not None
@@ -469,11 +471,12 @@ class PollerArgs:  # pylint: disable=too-many-instance-attributes  # flat CLI-ar
 
     @property
     def truncates_default_window(self) -> bool:
-        """True when ``--since`` / ``--until`` / ``--limit`` narrow the search below the full
-        ``[last_polled_at, now]`` default. ``run_tick`` reads this to decide whether to advance
-        ``cameras.last_polled_at`` after a successful (or failed) tick: a scoped query cannot prove
-        it covered the full window, so the resume cursor must stay where it is — otherwise the next
-        default tick would skip whatever the scoped run missed. ``--list-only`` is handled
+        """Report whether ``--since`` / ``--until`` / ``--limit`` narrow the default search window.
+
+        ``run_tick`` reads this to decide whether to advance ``cameras.last_polled_at`` after a
+        successful (or failed) tick: a scoped query cannot prove it covered the full
+        ``[last_polled_at, now]`` window, so the resume cursor must stay where it is — otherwise
+        the next default tick would skip whatever the scoped run missed. ``--list-only`` is handled
         separately (entire DB-write block is gated upstream).
         """
         return self.since is not None or self.until is not None or self.limit is not None
@@ -887,8 +890,7 @@ def _dispatch_poller_empty_after_quiet(
     outcome: _CameraTickResult,
     now: datetime,
 ) -> None:
-    """Render and dispatch ``POLLER_EMPTY_AFTER_QUIET`` for a camera whose safety-net widened query
-    returned zero ``findFile`` rows.
+    """Render and dispatch ``POLLER_EMPTY_AFTER_QUIET`` for a quiet camera with no widened findFile rows.
 
     The poller knows the safety-net inputs directly (last_clip_at + the resolved query window) so it
     builds the candidate inline rather than going through an :mod:`cat_watcher.alerts` evaluator;
