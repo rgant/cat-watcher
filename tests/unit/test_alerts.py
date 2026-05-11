@@ -30,7 +30,6 @@ from cat_watcher.alerts import (
     evaluate_web_flapping,
     run_alerts_tick,
 )
-from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
 from cat_watcher.db import (
     AgentStart,
     AlertSent,
@@ -57,24 +56,14 @@ _URL = "http://localhost:8000"
 _TRIVIAL_CONTENT = AlertContent(subject="subj", body="body", macos_summary="summary")
 
 
-def _channels_disabled(base_config: Config) -> Config:
-    """Return a copy of ``base_config`` with email + macos channels disabled (no real I/O)."""
-    return base_config.model_copy(
-        update={
-            "alerts": base_config.alerts.model_copy(
-                update={
-                    "email": EmailRulesConfig(enabled=False),
-                    "macos": MacOsRulesConfig(enabled=False),
-                },
-            ),
-        },
-    )
-
-
 @pytest.fixture
-def cfg(make_config: Callable[..., Config], tmp_path: Path) -> Config:
+def cfg(
+    make_config: Callable[..., Config],
+    disable_alert_channels: Callable[[Config], Config],
+    tmp_path: Path,
+) -> Config:
     """Disabled-channels config for tests that exercise dispatch_alert / run_alerts_tick."""
-    return _channels_disabled(make_config(tmp_path, tmp_path))
+    return disable_alert_channels(make_config(tmp_path, tmp_path))
 
 
 def _dispatch_env(cfg: Config, session: Session, *, now: datetime) -> DispatchEnv:  # pylint: disable=redefined-outer-name
@@ -841,6 +830,7 @@ def test_run_alerts_tick_inserts_agent_starts_and_heartbeat(db_engine: Engine, c
 
 def test_run_alerts_tick_runs_without_external_drive(
     make_config: Callable[..., Config],
+    disable_alert_channels: Callable[[Config], Config],
     tmp_path: Path,
     db_engine: Engine,
 ) -> None:
@@ -852,7 +842,7 @@ def test_run_alerts_tick_runs_without_external_drive(
     """
     storage_root = tmp_path / "external-drive-not-mounted"
     base = make_config(tmp_path, storage_root)
-    cfg_disabled = _channels_disabled(base)
+    cfg_disabled = disable_alert_channels(base)
 
     run_alerts_tick(config=cfg_disabled, engine=db_engine, now=_NOW)
 

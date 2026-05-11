@@ -189,9 +189,27 @@ class BackupConfig(BaseModel, extra="forbid"):
 
 
 class PollerConfig(BaseModel, extra="forbid"):
-    """Poller LaunchAgent cadence."""
+    """Poller LaunchAgent cadence + cursor advancement guards."""
 
     cadence_seconds: Annotated[int, Field(gt=0)] = 300
+    overlap_minutes: Annotated[int, Field(ge=0)] = 15
+    safety_net_hours: Annotated[int, Field(ge=1, le=168)] = 6
+
+    @model_validator(mode="after")
+    def _overlap_within_soft_cap(self) -> PollerConfig:
+        """Cap ``overlap_minutes`` at 12 ticks of cadence so misconfiguration can't grow the
+        per-tick query window unboundedly. Cap = ``cadence_seconds * 12 // 60``; with the default
+        cadence (300s), the cap is 60 minutes.
+        """
+        cap = (self.cadence_seconds * 12) // 60
+        if self.overlap_minutes > cap:
+            msg = (
+                f"overlap_minutes={self.overlap_minutes} exceeds soft cap {cap} for "
+                f"cadence_seconds={self.cadence_seconds} (cap = cadence_seconds * 12 / 60); "
+                f"lower overlap_minutes or raise cadence_seconds."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class Config(BaseModel, extra="forbid"):

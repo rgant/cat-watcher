@@ -80,7 +80,7 @@ _CLOCK_DRIFT_WARN_SECONDS = 60
 _CLOCK_DRIFT_LOUD_FAIL_SECONDS = 5 * 60
 _RECENT_ALERTS_PER_TYPE = 5
 # Backstop on the status query's recent-alerts fetch. Big enough that 5 alerts/type fits even under
-# a worst-case mix of all 9 AlertType values; small enough that one tick scans bounded I/O.
+# a worst-case mix of all 10 AlertType values; small enough that one tick scans bounded I/O.
 _RECENT_ALERTS_QUERY_LIMIT = 500
 _RECENT_ALERTS_WINDOW_DAYS = 30
 _AGENT_STARTS_WINDOW_HOURS = 24

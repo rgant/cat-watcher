@@ -24,6 +24,8 @@ frames_to_sample = 5
 
 [poller]
 cadence_seconds = 300 # how often the poller LaunchAgent fires (rendered into the plist at install)
+overlap_minutes = 15 # how far behind now the steady-state cursor lags so transient findFile lag is tolerated
+safety_net_hours = 6 # quiet duration after which the next tick widens its window to [last_clip_at - overlap_minutes, now]
 
 [storage]
 wait_interval_seconds = 10 # poll interval while waiting for the external drive to mount

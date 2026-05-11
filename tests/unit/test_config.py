@@ -218,7 +218,17 @@ def _toml_with_field(section: str, field: str, value: float) -> str:
         (("backup", "keep_count", 0), True),
         # PollerConfig.cadence_seconds (gt=0) -- 0 is a tight loop.
         (("poller", "cadence_seconds", 0), True),
-        (("poller", "cadence_seconds", 1), False),
+        # Lowest cadence compatible with the default overlap_minutes=15 under the soft cap
+        # (overlap_minutes <= (cadence_seconds * 12) // 60, i.e. ceil(15 * 60 / 12) = 75).
+        (("poller", "cadence_seconds", 75), False),
+        # PollerConfig.overlap_minutes (ge=0) -- negative rejected; 0 is the inclusive floor.
+        (("poller", "overlap_minutes", -1), True),
+        (("poller", "overlap_minutes", 0), False),
+        # PollerConfig.safety_net_hours (ge=1, le=168) -- one week ceiling; 0 would fire every tick.
+        (("poller", "safety_net_hours", 0), True),
+        (("poller", "safety_net_hours", 1), False),
+        (("poller", "safety_net_hours", 168), False),
+        (("poller", "safety_net_hours", 200), True),
         # AlertConfig.cadence_seconds (gt=0).
         (("alerts", "cadence_seconds", 0), True),
         # One representative _count field (ge=1).
@@ -250,14 +260,14 @@ def _toml_with_field(section: str, field: str, value: float) -> str:
         (("alerts", "disk_low_threshold_fraction", 1.5), True),
     ],
 )
-def test_cadence_and_count_field_bounds(
+def test_field_bound_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     spec: tuple[str, str, float],
     *,
     should_raise: bool,
 ) -> None:
-    """Cadence/clock/count fields enforce bounds that prevent LaunchAgent footguns."""
+    """Numeric fields enforce ``Field``-declared bounds that prevent LaunchAgent footguns."""
     section, field, value = spec
     body = _toml_with_field(section, field, value)
     config_path = tmp_path / "config.toml"
@@ -437,6 +447,79 @@ def test_duplicate_camera_names_raise(tmp_path: Path, monkeypatch: pytest.Monkey
 
     with pytest.raises(ConfigError, match=r"duplicate camera name"):
         _ = load_config()
+
+
+def test_poller_cursor_guards_default_when_keys_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``[poller]`` omitting ``overlap_minutes`` / ``safety_net_hours`` falls back to defaults."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_VALID_TOML)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.poller.overlap_minutes == 15
+    assert cfg.poller.safety_net_hours == 6
+
+
+def test_poller_cursor_guards_custom_values_honored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom ``overlap_minutes`` + ``safety_net_hours`` round-trip through the loader."""
+    body = _VALID_TOML + "\n[poller]\noverlap_minutes = 5\nsafety_net_hours = 12\n"
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(body)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.poller.overlap_minutes == 5
+    assert cfg.poller.safety_net_hours == 12
+
+
+def test_poller_overlap_minutes_above_soft_cap_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``overlap_minutes`` well above the soft cap raises ``ConfigError`` mentioning the cap."""
+    body = _toml_with_field("poller", "overlap_minutes", 9999)
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(body)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    with pytest.raises(ConfigError, match=r"soft cap"):
+        _ = load_config()
+
+
+@pytest.mark.parametrize(
+    ("overlap_minutes", "should_raise"),
+    [
+        # cadence_seconds=600 -> cap = (600 * 12) // 60 = 120.
+        (120, False),
+        (121, True),
+    ],
+)
+def test_poller_overlap_soft_cap_scales_with_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overlap_minutes: int,
+    *,
+    should_raise: bool,
+) -> None:
+    """The soft cap on ``overlap_minutes`` scales linearly with ``cadence_seconds``."""
+    body = _VALID_TOML + f"\n[poller]\ncadence_seconds = 600\noverlap_minutes = {overlap_minutes}\n"
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(body)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    if should_raise:
+        with pytest.raises(ConfigError):
+            _ = load_config()
+    else:
+        cfg = load_config()
+        assert cfg.poller.overlap_minutes == overlap_minutes
 
 
 def test_empty_cameras_list_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

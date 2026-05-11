@@ -201,6 +201,39 @@ def render_heartbeat_watchdog(  # noqa: PLR0913  # spec §4.14 POLLER_STUCK / WE
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
+def render_poller_empty_after_quiet(  # noqa: PLR0913  # body has camera + 3 timestamps + 1 derived duration + tz + clock
+    *,
+    camera_display_name: str,
+    last_clip_at: datetime,
+    queried_since: datetime,
+    queried_until: datetime,
+    public_url: str,
+    tz_name: str,
+    now: datetime,
+) -> AlertContent:
+    """Render ``POLLER_EMPTY_AFTER_QUIET``: safety-net widened query returned zero rows.
+
+    Fired by the poller (not the alerts agent) when a camera has been quiet for
+    ``safety_net_hours``, the poller widens its query to ``[last_clip_at - overlap_minutes, now]``,
+    and Amcrest's ``findFile`` returns zero rows. Indicates the camera is alive enough to answer
+    the query but is not surfacing recordings: firmware/index issue, SD card filled or failed,
+    camera rebooted without preserving recordings, or the camera is not recording.
+    """
+    subject = f"[cat-watcher] POLLER_EMPTY_AFTER_QUIET: {camera_display_name}"
+    body = (
+        f"Camera:         {camera_display_name}\n"
+        f"Last clip:      {_fmt_with_relative(last_clip_at, tz_name, now)}\n"
+        f"Quiet for:      {_ago(last_clip_at, now).removesuffix(' ago')}\n"
+        f"Queried since:  {_fmt(queried_since, tz_name)}\n"
+        f"Queried until:  {_fmt(queried_until, tz_name)}\n"
+        f"Result:         findFile returned 0 rows\n"
+        f"What to check:  camera power, SD card health, camera's own recording UI\n"
+        f"Web UI:         {public_url}\n"
+    )
+    summary = _capped_summary(f"{camera_display_name}: no clips after {_ago(last_clip_at, now).removesuffix(' ago')} quiet")
+    return AlertContent(subject=subject, body=body, macos_summary=summary)
+
+
 def render_web_flapping(  # noqa: PLR0913  # spec §4.14 WEB_FLAPPING body has 7 distinct fields
     *,
     restart_count: int,

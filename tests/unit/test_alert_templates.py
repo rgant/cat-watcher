@@ -21,6 +21,7 @@ from cat_watcher.alert_templates import (
     render_heartbeat_watchdog,
     render_inactivity,
     render_inactivity_no_cats_global,
+    render_poller_empty_after_quiet,
     render_storage_unavailable,
     render_web_flapping,
 )
@@ -200,6 +201,34 @@ def test_web_flapping_includes_log_tail_section() -> None:
     assert content.macos_summary == "web: 6 restarts in last 30m"
 
 
+def test_poller_empty_after_quiet_renders_window_and_quiet_duration() -> None:
+    """Body carries camera, last clip with relative age, quiet duration, queried window, and pointer."""
+    last_clip = datetime(2026, 4, 30, 23, 42, 11, tzinfo=UTC)  # 19:42:11 EDT — 14h ago
+    queried_since = last_clip - timedelta(minutes=15)
+    queried_until = _NOW
+
+    content = render_poller_empty_after_quiet(
+        camera_display_name="Pantry Litter Box Camera",
+        last_clip_at=last_clip,
+        queried_since=queried_since,
+        queried_until=queried_until,
+        public_url=_PUBLIC_URL,
+        tz_name=_TZ_NY,
+        now=_NOW,
+    )
+
+    assert content.subject == "[cat-watcher] POLLER_EMPTY_AFTER_QUIET: Pantry Litter Box Camera"
+    assert "Camera:         Pantry Litter Box Camera\n" in content.body
+    assert "Last clip:      2026-04-30 19:42:11 EDT (-04:00) — 14h 0m ago\n" in content.body
+    assert "Quiet for:      14h 0m\n" in content.body
+    assert "Queried since:  2026-04-30 19:27:11 EDT (-04:00)\n" in content.body
+    assert "Queried until:  2026-05-01 09:42:11 EDT (-04:00)\n" in content.body
+    assert "Result:         findFile returned 0 rows\n" in content.body
+    assert "What to check:" in content.body
+    assert f"Web UI:         {_PUBLIC_URL}\n" in content.body
+    assert content.macos_summary == "Pantry Litter Box Camera: no clips after 14h 0m quiet"
+
+
 def test_disk_low_renders_fraction_and_threshold() -> None:
     """``Free`` line prints ``GB / GB (fraction%)``; subject embeds ``%`` and ``storage_root``."""
     free = 164 * 1_000_000_000
@@ -311,6 +340,15 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
             tz_name=_TZ_NY,
             now=_NOW,
         ),
+        render_poller_empty_after_quiet(
+            camera_display_name="D" * 200,
+            last_clip_at=_NOW - timedelta(hours=14),
+            queried_since=_NOW - timedelta(hours=14, minutes=15),
+            queried_until=_NOW,
+            public_url=_PUBLIC_URL,
+            tz_name=_TZ_NY,
+            now=_NOW,
+        ),
         render_web_flapping(
             restart_count=5,
             window_minutes=30,
@@ -347,6 +385,7 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
         "inactivity_no_cats_global",
         "frequency",
         "heartbeat",
+        "poller_empty_after_quiet",
         "web_flapping",
         "disk_low",
         "storage_unavailable",

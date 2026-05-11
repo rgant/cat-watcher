@@ -18,6 +18,10 @@ schedules a tick every ``[poller].cadence_seconds``. A tick:
    via :func:`cat_watcher.alerts.dispatch_alert`).
 """
 
+# pylint: disable=too-many-lines
+# Per-tick state machine + alert dispatch + structured logging — splitting purely for line count
+# would fragment closely-coupled tick orchestration.
+
 import argparse
 import contextlib
 import fcntl
@@ -35,7 +39,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 
 from cat_watcher import retention, thumbnails
-from cat_watcher.alerts import dispatch_candidate, evaluate_heartbeat_watchdog
+from cat_watcher.alert_templates import render_poller_empty_after_quiet
+from cat_watcher.alerts import AlertCandidate, dispatch_candidate, evaluate_heartbeat_watchdog
 from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuthError, CameraUnreachableError
 from cat_watcher.config import Config, load_config
 from cat_watcher.db import AgentStart, AlertType, Camera, Clip, ClipFrame, Heartbeat, PollStatus, create_engine, get_session
@@ -100,20 +105,24 @@ def pid_lock(internal_root: Path) -> Generator[None]:
         fp.close()
 
 
-def update_camera_state_success(
+def update_camera_state_success(  # noqa: PLR0913  # state-update sibling of update_camera_state_failure; same kw-only-args rationale
     session: Session,
     *,
     camera_id: int,
     ingested_clips: Sequence[Clip],
     now: datetime,
+    overlap_minutes: int,
     advance_cursor: bool = True,
 ) -> None:
     """Apply per-field preservation semantics for a successful tick (per spec §4.4 step 5).
 
-    - ``last_polled_at`` advances to ``now`` only when ``advance_cursor`` is true. Scoped queries
-      (``--since`` / ``--until`` / ``--limit``) cannot prove they covered the full
-      ``[last_polled_at, now]`` window and so must leave the resume cursor untouched — otherwise the
-      next default tick would skip whatever the scoped run did not cover.
+    - ``last_polled_at`` advances to ``max(now - overlap_minutes, previous_last_polled_at)`` when
+      ``advance_cursor`` is true. The overlap keeps the next tick's query window reaching back into
+      already-covered ground so a recording whose ``findFile`` indexing lags clip finalization is
+      still surfaced; duplicate ingest is prevented by the ``(camera_id, source_filename)`` check.
+      The ``max`` floor never rewinds the cursor — if the prior value is already further forward
+      (e.g. clock skew, manual edit), it wins. Scoped queries (``--since`` / ``--until`` /
+      ``--limit``) pass ``advance_cursor=False`` and leave the cursor untouched.
     - ``last_clip_at`` advances to ``max(start_ts of new clips)`` only if any clips were ingested.
     - ``last_cat_seen_at`` advances to the latest ``COALESCE(manual_has_cat, has_cat) = true`` clip
       only if at least one new clip is cat-positive (model or operator override).
@@ -125,7 +134,8 @@ def update_camera_state_success(
         msg = f"camera {camera_id!r} not found"
         raise ValueError(msg)
     if advance_cursor:
-        cam.last_polled_at = now
+        target = now - timedelta(minutes=overlap_minutes)
+        cam.last_polled_at = target if cam.last_polled_at is None else max(target, cam.last_polled_at)
     if ingested_clips:
         cam.last_clip_at = max(clip.start_ts for clip in ingested_clips)
     cat_positive_starts = [
@@ -149,8 +159,9 @@ def update_camera_state_failure(  # noqa: PLR0913  # state-update sibling of upd
 ) -> None:
     """Apply per-field semantics for a failed tick.
 
-    - ``last_polled_at`` advances to ``now`` only when ``advance_cursor`` is true (same window-
-      coverage rule as :func:`update_camera_state_success`). Scoped queries leave it in place.
+    - ``last_polled_at`` advances to ``now`` only when ``advance_cursor`` is true. :func:`run_tick`
+      always passes ``False`` on failure — a failed tick has not proved it covered the window, so
+      the next tick re-attempts the same range. The parameter is retained for test isolation.
     - ``poll_status`` -> the supplied non-OK status.
     - ``poll_status_since`` is set to ``now`` only on the transition from OK to non-OK; if the
       camera is already non-OK, the original transition timestamp is preserved.
@@ -495,14 +506,32 @@ class _PollWindow:
     tz_name: str
 
 
+@dataclass(frozen=True)
+class _QueryReport:
+    """What the camera-side query resolved to and what it returned, for post-tick branching.
+
+    ``find_file_row_count`` counts raw rows from ``findFile`` regardless of duplicate filtering —
+    the safety-net alert checks zero rows from the camera, not zero new ingests. ``skipped_duplicates``
+    counts rows that mapped onto an existing ``(camera_id, source_filename)`` and were not re-ingested.
+    """
+
+    queried_since: datetime
+    queried_until: datetime
+    safety_net_triggered: bool
+    find_file_row_count: int
+    skipped_duplicates: int
+
+
 @dataclass
-class _CameraTickResult:
+class _CameraTickResult:  # pylint: disable=too-many-instance-attributes  # flat tick-result bag; the rule targets behavior-rich classes, not data containers
     """Outcome of one camera's tick — what state to apply afterwards."""
 
     success: bool
     window: _PollWindow
+    query: _QueryReport
     # Only consulted when ``success=False``.
     status_on_failure: PollStatus = PollStatus.OK
+    error_type: str = ""
     error_msg: str = ""
     ingested: list[Clip] = field(default_factory=list)
     # Only meaningful under ``--list-only``; mutually exclusive with ``ingested``.
@@ -527,6 +556,19 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
     tz_name = cam_cfg.timezone or config.web.display_timezone
     camera_tz = ZoneInfo(tz_name)
     since, until = _resolve_window(db_camera=db_camera, args=args, retention_days=config.retention.clip_days, now=now)
+    # Safety-net override: if the camera has been quiet for longer than ``safety_net_hours`` and the
+    # operator did not scope this run, widen the window to anchor on the last known-good clip (with
+    # ``overlap_minutes`` of padding for camera-clock drift). A confirmed-empty result over that
+    # window is then a positive "the camera index is broken" signal, not a missed tick.
+    safety_net_triggered = False
+    if (
+        db_camera.last_clip_at is not None
+        and not args.truncates_default_window
+        and (now - db_camera.last_clip_at) > timedelta(hours=config.poller.safety_net_hours)
+    ):
+        safety_net_triggered = True
+        since = db_camera.last_clip_at - timedelta(minutes=config.poller.overlap_minutes)
+        until = now
     window = _PollWindow(
         local_since=since.astimezone(camera_tz).strftime("%Y-%m-%d %H:%M:%S"),
         local_until=until.astimezone(camera_tz).strftime("%Y-%m-%d %H:%M:%S"),
@@ -545,22 +587,39 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
     client = AmcrestClient(cam_cfg, config.camera_secrets, camera_tz=camera_tz)
     ingested: list[Clip] = []
     listed = 0
+    find_file_row_count = 0
+    skipped_duplicates = 0
+
+    def _report() -> _QueryReport:
+        return _QueryReport(
+            queried_since=since,
+            queried_until=until,
+            safety_net_triggered=safety_net_triggered,
+            find_file_row_count=find_file_row_count,
+            skipped_duplicates=skipped_duplicates,
+        )
+
     try:
         with client:
             for rec in _limited(client.iter_recordings(since=since, until=until), args.limit):
+                find_file_row_count += 1
                 if args.list_only:
                     _emit(f"  {rec.start_ts.isoformat()}  {rec.source_filename}")
                     listed += 1
                     continue
                 clip = _ingest_recording(rec, client=client, ctx=ctx)
-                if clip is not None:
+                if clip is None:
+                    skipped_duplicates += 1
+                else:
                     ingested.append(clip)
     except CameraUnreachableError as exc:
         logger.warning("camera %s unreachable: %s", cam_cfg.name, exc)
         return _CameraTickResult(
             success=False,
             window=window,
+            query=_report(),
             status_on_failure=PollStatus.UNREACHABLE,
+            error_type=type(exc).__name__,
             error_msg=str(exc),
             ingested=ingested,
             listed=listed,
@@ -570,12 +629,14 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
         return _CameraTickResult(
             success=False,
             window=window,
+            query=_report(),
             status_on_failure=PollStatus.ERROR,
+            error_type=type(exc).__name__,
             error_msg=str(exc),
             ingested=ingested,
             listed=listed,
         )
-    return _CameraTickResult(success=True, window=window, ingested=ingested, listed=listed)
+    return _CameraTickResult(success=True, window=window, query=_report(), ingested=ingested, listed=listed)
 
 
 def _limited[ItemT](items: Iterable[ItemT], limit: int | None) -> Iterator[ItemT]:
@@ -729,6 +790,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
 
     for cam_cfg in cameras_to_poll:
         db_camera = ensure_db_camera(engine, cam_cfg)
+        cursor_before = db_camera.last_polled_at
         try:
             outcome = _poll_camera(
                 config=config,
@@ -739,7 +801,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                 detector=detector,
                 now=now,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("unexpected failure polling camera %s", cam_cfg.name)
             _emit(f"{cam_cfg.name}: tick failed (error) — unexpected exception (re-run with --verbose for traceback)")
             if not args.list_only:
@@ -750,8 +812,9 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                         status=PollStatus.ERROR,
                         error="unexpected exception",
                         now=now,
-                        advance_cursor=not args.truncates_default_window,
+                        advance_cursor=False,
                     )
+                _emit_tick_log_unexpected(cam_cfg=cam_cfg, cursor=cursor_before, exc=exc)
             continue
         _print_camera_summary(cam_cfg=cam_cfg, outcome=outcome, list_only=args.list_only)
         if not args.list_only:
@@ -762,6 +825,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                         camera_id=db_camera.id,
                         ingested_clips=outcome.ingested,
                         now=now,
+                        overlap_minutes=config.poller.overlap_minutes,
                         advance_cursor=not args.truncates_default_window,
                     )
                 else:
@@ -771,8 +835,18 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                         status=outcome.status_on_failure,
                         error=outcome.error_msg,
                         now=now,
-                        advance_cursor=not args.truncates_default_window,
+                        advance_cursor=False,
                     )
+                cursor_after = (session.get(Camera, db_camera.id) or db_camera).last_polled_at
+            if outcome.success and outcome.query.safety_net_triggered and outcome.query.find_file_row_count == 0:
+                _dispatch_poller_empty_after_quiet(
+                    config=config,
+                    engine=engine,
+                    db_camera=db_camera,
+                    outcome=outcome,
+                    now=now,
+                )
+            _emit_tick_log(cam_cfg=cam_cfg, outcome=outcome, cursor_before=cursor_before, cursor_after=cursor_after)
 
     if not args.list_only:
         report = retention.sweep(engine=engine, storage_root=config.storage_root, retention=config.retention, now=now)
@@ -803,6 +877,92 @@ def _check_alerts_stuck(*, config: Config, engine: Engine, now: datetime) -> Non
     if cand is None:
         return
     dispatch_candidate(cand, config=config, engine=engine, now=now)
+
+
+def _dispatch_poller_empty_after_quiet(
+    *,
+    config: Config,
+    engine: Engine,
+    db_camera: Camera,
+    outcome: _CameraTickResult,
+    now: datetime,
+) -> None:
+    """Render and dispatch ``POLLER_EMPTY_AFTER_QUIET`` for a camera whose safety-net widened query
+    returned zero ``findFile`` rows.
+
+    The poller knows the safety-net inputs directly (last_clip_at + the resolved query window) so it
+    builds the candidate inline rather than going through an :mod:`cat_watcher.alerts` evaluator;
+    routing still funnels through :func:`dispatch_candidate` so cool-down state stays uniform.
+    """
+    last_clip_at = db_camera.last_clip_at
+    if last_clip_at is None:
+        # The safety-net guard in ``_poll_camera`` requires a non-None ``last_clip_at`` to trigger,
+        # so reaching here means the outcome flag was set without a clip-anchor — a programming bug.
+        msg = f"safety-net dispatch reached with no last_clip_at on camera {db_camera.name!r}"
+        raise PollerError(msg)
+    content = render_poller_empty_after_quiet(
+        camera_display_name=db_camera.display_name,
+        last_clip_at=last_clip_at,
+        queried_since=outcome.query.queried_since,
+        queried_until=outcome.query.queried_until,
+        public_url=config.web.public_url,
+        tz_name=config.web.display_timezone,
+        now=now,
+    )
+    cand = AlertCandidate(alert_type=AlertType.POLLER_EMPTY_AFTER_QUIET, camera_id=db_camera.id, content=content)
+    dispatch_candidate(cand, config=config, engine=engine, now=now)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    """ISO-8601 string for ``value``, or ``None`` for unset cursor timestamps."""
+    return value.isoformat() if value is not None else None
+
+
+def _emit_tick_log(
+    *,
+    cam_cfg: CameraConfig,
+    outcome: _CameraTickResult,
+    cursor_before: datetime | None,
+    cursor_after: datetime | None,
+) -> None:
+    """``poll_tick`` (INFO) on success / ``poll_tick_failed`` (WARNING) on typed failure."""
+    extras: dict[str, object | None] = {
+        "camera_name": cam_cfg.name,
+        "window_since": outcome.query.queried_since.isoformat(),
+        "window_until": outcome.query.queried_until.isoformat(),
+        "cursor_before": _iso_or_none(cursor_before),
+        "cursor_after": _iso_or_none(cursor_after),
+    }
+    if outcome.success:
+        extras["findFile_rows"] = outcome.query.find_file_row_count
+        extras["ingested_clips"] = len(outcome.ingested)
+        extras["skipped_duplicates"] = outcome.query.skipped_duplicates
+        extras["safety_net_triggered"] = outcome.query.safety_net_triggered
+        logger.info("poll_tick", extra=extras)
+        return
+    extras["error_type"] = outcome.error_type
+    extras["error_msg"] = outcome.error_msg
+    logger.warning("poll_tick_failed", extra=extras)
+
+
+def _emit_tick_log_unexpected(*, cam_cfg: CameraConfig, cursor: datetime | None, exc: BaseException) -> None:
+    """``poll_tick_failed`` for the bare-``except`` path where no ``_CameraTickResult`` exists.
+
+    The resolved window is unknown (``_poll_camera`` raised before computing it) so ``window_since``
+    / ``window_until`` are ``None``; cursor doesn't advance on failure per Task 5 semantics.
+    """
+    logger.warning(
+        "poll_tick_failed",
+        extra={
+            "camera_name": cam_cfg.name,
+            "window_since": None,
+            "window_until": None,
+            "cursor_before": _iso_or_none(cursor),
+            "cursor_after": _iso_or_none(cursor),
+            "error_type": type(exc).__name__,
+            "error_msg": str(exc),
+        },
+    )
 
 
 def _emit(line: str) -> None:

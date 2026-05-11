@@ -228,7 +228,16 @@ Then per camera, on each tick:
       pointing at a partial file.
 5. Update camera state with **preservation semantics** (only overwrite when
    there is new information):
-   - `cameras.last_polled_at = now` — always.
+   - `cameras.last_polled_at = max(now - [poller].overlap_minutes, previous)` —
+     advanced on every successful tick, but held back from `now` by
+     `overlap_minutes` (default 15) so the next tick's window reaches back into
+     already-covered ground. This absorbs Amcrest `findFile` indexing lag: a
+     recording finalized between two ticks but not yet surfaced by `findFile` is
+     still discoverable on subsequent ticks within the overlap. Duplicate ingest
+     is prevented by the `UNIQUE(camera_id, source_filename)` check. The
+     `max(...)` floor ensures the cursor never rewinds (defensive against clock
+     skew). When `previous` is NULL (first tick), the cursor lands at
+     `now - overlap_minutes`.
    - `cameras.last_clip_at = max(start_ts of new clips)` — only if clips were
      ingested this tick; otherwise preserve the previous value.
    - `cameras.last_cat_seen_at = max(start_ts where has_cat=true)` — only if any
@@ -953,17 +962,17 @@ Constraints / indices:
 
 #### `alerts_sent`
 
-| col              | type     | notes                                                                                                                                            |
-| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `id`             | int PK   |                                                                                                                                                  |
-| `alert_type`     | enum     | `INACTIVITY` / `FREQUENCY` / `POLLER_STUCK` / `WEB_DOWN` / `WEB_FLAPPING` / `ALERTS_STUCK` / `DISK_LOW` / `STORAGE_UNAVAILABLE` / `BACKUP_STALE` |
-| `camera_id`      | int? FK  | null for non-camera alerts                                                                                                                       |
-| `sent_at`        | datetime |                                                                                                                                                  |
-| `subject`        | str      | rendered subject line (see §4.14)                                                                                                                |
-| `body`           | str      | rendered body                                                                                                                                    |
-| `email_ok`       | bool     |                                                                                                                                                  |
-| `macos_ok`       | bool     |                                                                                                                                                  |
-| `delivery_error` | str?     | if any sender failed                                                                                                                             |
+| col              | type     | notes                                                                                                                                                                         |
+| ---------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`             | int PK   |                                                                                                                                                                               |
+| `alert_type`     | enum     | `INACTIVITY` / `FREQUENCY` / `POLLER_STUCK` / `POLLER_EMPTY_AFTER_QUIET` / `WEB_DOWN` / `WEB_FLAPPING` / `ALERTS_STUCK` / `DISK_LOW` / `STORAGE_UNAVAILABLE` / `BACKUP_STALE` |
+| `camera_id`      | int? FK  | null for non-camera alerts                                                                                                                                                    |
+| `sent_at`        | datetime |                                                                                                                                                                               |
+| `subject`        | str      | rendered subject line (see §4.14)                                                                                                                                             |
+| `body`           | str      | rendered body                                                                                                                                                                 |
+| `email_ok`       | bool     |                                                                                                                                                                               |
+| `macos_ok`       | bool     |                                                                                                                                                                               |
+| `delivery_error` | str?     | if any sender failed                                                                                                                                                          |
 
 Index on `(camera_id, alert_type, sent_at)` for cool-down lookups.
 

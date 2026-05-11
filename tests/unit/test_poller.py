@@ -6,14 +6,16 @@ poll-tick exercise lives in tests/integration/test_poller_end_to_end.py.
 """
 
 import fcntl
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations are evaluated by collectors
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self, final
 from unittest.mock import MagicMock
 
 import pytest
 
+from cat_watcher.amcrest_client import CameraUnreachableError, Recording
 from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
 from cat_watcher.db import AlertSent, AlertType, Camera, Clip, Heartbeat, PollStatus, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError
@@ -25,6 +27,7 @@ from cat_watcher.poller import (
     _limited,
     _parse_args,
     _parse_iso_datetime,
+    _poll_camera,
     _resolve_window,
     detection_fields_for,
     extract_thumbnail,
@@ -51,13 +54,13 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def test_update_state_success_advances_last_polled_when_no_clips(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """Empty ingest still bumps ``last_polled_at`` so the heartbeat advances even on quiet polls."""
+    """Empty ingest still bumps ``last_polled_at`` (minus the overlap) so the heartbeat advances even on quiet polls."""
     cam_id = seed_camera(db_engine, last_clip_at=_NOW - timedelta(days=2), last_cat_seen_at=_NOW - timedelta(days=3))
     previous_clip_at = _NOW - timedelta(days=2)
     previous_cat_at = _NOW - timedelta(days=3)
 
     with get_session(db_engine) as session:
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=[], now=_NOW)
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=[], now=_NOW, overlap_minutes=0)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -85,7 +88,7 @@ def test_update_state_success_advances_last_clip_at_when_clips_ingested(
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).order_by(Clip.start_ts).all()
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW)
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -109,7 +112,7 @@ def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).order_by(Clip.start_ts).all()
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW)
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -131,7 +134,7 @@ def test_update_state_success_preserves_last_cat_seen_when_no_cat_positive(
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).all()
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW)
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -152,7 +155,7 @@ def test_update_state_success_respects_manual_has_cat_override(
 
     with get_session(db_engine) as session:
         clips = session.query(Clip).all()
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW)
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -170,7 +173,7 @@ def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: En
     )
 
     with get_session(db_engine) as session:
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=[], now=_NOW)
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=[], now=_NOW, overlap_minutes=0)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -178,6 +181,78 @@ def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: En
         assert cam.poll_status == PollStatus.OK
         assert cam.poll_status_since is None
         assert cam.poll_error is None
+
+
+# --- update_camera_state_success: overlap_minutes cursor semantics --------------------------------
+
+
+def test_update_state_success_advances_cursor_by_cadence_minus_overlap(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+    """Steady-state: with cadence 5min and overlap 15min, the cursor net-advances 5min per 20min wall-clock.
+
+    Two consecutive ticks at ``T`` and ``T + 5min`` with ``overlap_minutes = 15`` move the cursor
+    from ``T - 15min`` to ``T + 5min - 15min``: a 5-minute net advance per tick, which is exactly
+    ``cadence - overlap = 20 - 15``. The window's left edge keeps reaching back into already-covered
+    ground so a delayed ``findFile`` index does not silently drop the clip.
+    """
+    cam_id = seed_camera(db_engine, last_polled_at=None)
+    overlap_minutes = 15
+
+    tick1 = _NOW
+    with get_session(db_engine) as session:
+        update_camera_state_success(
+            session,
+            camera_id=cam_id,
+            ingested_clips=[],
+            now=tick1,
+            overlap_minutes=overlap_minutes,
+        )
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == tick1 - timedelta(minutes=overlap_minutes)
+
+    tick2 = _NOW + timedelta(minutes=5)
+    with get_session(db_engine) as session:
+        update_camera_state_success(
+            session,
+            camera_id=cam_id,
+            ingested_clips=[],
+            now=tick2,
+            overlap_minutes=overlap_minutes,
+        )
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        cursor_after_tick2 = cam.last_polled_at
+        assert cursor_after_tick2 is not None
+        assert cursor_after_tick2 == tick2 - timedelta(minutes=overlap_minutes)
+        # Net advance from tick1's cursor to tick2's cursor equals cadence (5min), not cadence + overlap.
+        assert cursor_after_tick2 - (tick1 - timedelta(minutes=overlap_minutes)) == timedelta(minutes=5)
+
+
+def test_update_state_success_never_rewinds_cursor(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+    """If the prior cursor is already further forward than ``now - overlap``, the cursor stays put.
+
+    Defensive against clock skew, manual DB edits, or a prior tick that landed cursor unusually
+    forward. The cursor only ever moves forward in time on success.
+    """
+    overlap_minutes = 15
+    already_forward = _NOW - timedelta(minutes=5)  # newer than _NOW - 15min
+    cam_id = seed_camera(db_engine, last_polled_at=already_forward)
+
+    with get_session(db_engine) as session:
+        update_camera_state_success(
+            session,
+            camera_id=cam_id,
+            ingested_clips=[],
+            now=_NOW,
+            overlap_minutes=overlap_minutes,
+        )
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == already_forward  # NOT rewound to _NOW - 15min
 
 
 # --- update_camera_state_failure ------------------------------------------------------------------
@@ -262,6 +337,7 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(
             camera_id=cam_id,
             ingested_clips=clips,
             now=_NOW,
+            overlap_minutes=15,
             advance_cursor=False,
         )
 
@@ -518,7 +594,7 @@ def test_detection_fields_for_records_detector_error(tmp_path: Path) -> None:
 def test_update_state_success_raises_when_camera_missing(db_engine: Engine) -> None:
     """Missing ``camera_id`` is a programming error, not a soft skip."""
     with pytest.raises(ValueError, match="not found"), get_session(db_engine) as session:
-        update_camera_state_success(session, camera_id=99999, ingested_clips=[], now=_NOW)
+        update_camera_state_success(session, camera_id=99999, ingested_clips=[], now=_NOW, overlap_minutes=0)
 
 
 def test_update_state_failure_raises_when_camera_missing(db_engine: Engine) -> None:
@@ -715,3 +791,463 @@ def test_check_alerts_stuck_silent_when_heartbeat_missing(
     with get_session(db_engine) as session:
         rows = session.query(AlertSent).all()
     assert rows == []
+
+
+# --- safety-net override: _poll_camera + run_tick -------------------------------------------------
+
+
+@final
+class _StubAmcrestClient:
+    """Drop-in stub for :class:`cat_watcher.amcrest_client.AmcrestClient` in poller-tick tests.
+
+    Records the ``(since, until)`` each call resolved to so the test can assert on the window after
+    the safety-net override fires. ``recordings`` is the canned ``findFile`` result the iterator
+    yields. ``raises`` is a queue of exceptions consumed in order — the Nth call raises the Nth
+    queued exception (instead of yielding ``recordings``); when the queue empties, subsequent calls
+    fall back to yielding ``recordings``. The queue model lets one stub drive a multi-tick recovery
+    test (fail once, succeed after) without re-monkeypatching.
+    """
+
+    recordings: tuple[Recording, ...]
+    calls: list[tuple[datetime, datetime]]
+    pending_raises: list[Exception]
+
+    def __init__(self, recordings: tuple[Recording, ...] = (), *, raises: tuple[Exception, ...] = ()) -> None:
+        self.recordings = recordings
+        self.calls = []
+        self.pending_raises = list(raises)
+
+    def __call__(self, *_args: object, **_kwargs: object) -> Self:
+        return self
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def iter_recordings(self, *, since: datetime, until: datetime) -> list[Recording]:
+        """Record the window; raise the next queued exception if any, else yield ``recordings``."""
+        self.calls.append((since, until))
+        if self.pending_raises:
+            raise self.pending_raises.pop(0)
+        return list(self.recordings)
+
+
+def test_safety_net_not_triggered_at_exact_threshold(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``last_clip_at`` exactly ``safety_net_hours`` ago: strict ``>`` inequality means no trigger."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    safety_hours = config.poller.safety_net_hours
+    cam_id = seed_camera(
+        db_engine,
+        last_clip_at=_NOW - timedelta(hours=safety_hours),
+        last_polled_at=_NOW - timedelta(minutes=5),
+    )
+    stub = _StubAmcrestClient()
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        outcome = _poll_camera(
+            config=config,
+            db_camera=cam,
+            cam_cfg=config.cameras[0],
+            engine=db_engine,
+            args=PollerArgs(),
+            detector=None,
+            now=_NOW,
+        )
+    assert outcome.query.safety_net_triggered is False
+    # Default window: since = cam.last_polled_at, until = now.
+    assert stub.calls == [(_NOW - timedelta(minutes=5), _NOW)]
+
+
+def test_safety_net_triggers_just_past_threshold_and_overrides_window(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``last_clip_at`` ``safety_net_hours + 1min`` ago: trigger fires, window anchors on last clip."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    safety_hours = config.poller.safety_net_hours
+    overlap_minutes = config.poller.overlap_minutes
+    last_clip_at = _NOW - timedelta(hours=safety_hours, minutes=1)
+    cam_id = seed_camera(db_engine, last_clip_at=last_clip_at, last_polled_at=_NOW - timedelta(minutes=5))
+    stub = _StubAmcrestClient()
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        outcome = _poll_camera(
+            config=config,
+            db_camera=cam,
+            cam_cfg=config.cameras[0],
+            engine=db_engine,
+            args=PollerArgs(),
+            detector=None,
+            now=_NOW,
+        )
+    assert outcome.query.safety_net_triggered is True
+    expected_since = last_clip_at - timedelta(minutes=overlap_minutes)
+    assert stub.calls == [(expected_since, _NOW)]
+    assert outcome.query.queried_since == expected_since
+    assert outcome.query.queried_until == _NOW
+
+
+def test_safety_net_does_not_apply_when_last_clip_at_is_none(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A never-seen-a-clip camera has no clip-anchor; safety net does not apply, default window used."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_clip_at=None, last_polled_at=None)
+    stub = _StubAmcrestClient()
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        outcome = _poll_camera(
+            config=config,
+            db_camera=cam,
+            cam_cfg=config.cameras[0],
+            engine=db_engine,
+            args=PollerArgs(),
+            detector=None,
+            now=_NOW,
+        )
+    assert outcome.query.safety_net_triggered is False
+    # Default first-run window: since = now - retention.clip_days.
+    expected_since = _NOW - timedelta(days=config.retention.clip_days)
+    assert stub.calls == [(expected_since, _NOW)]
+
+
+def test_safety_net_does_not_override_scoped_since_query(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--since`` (and any scoped query) wins over the safety-net override."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    safety_hours = config.poller.safety_net_hours
+    last_clip_at = _NOW - timedelta(hours=safety_hours + 2)
+    cam_id = seed_camera(db_engine, last_clip_at=last_clip_at)
+    stub = _StubAmcrestClient()
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+    scoped_since = _NOW - timedelta(hours=1)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        outcome = _poll_camera(
+            config=config,
+            db_camera=cam,
+            cam_cfg=config.cameras[0],
+            engine=db_engine,
+            args=PollerArgs(since=scoped_since),
+            detector=None,
+            now=_NOW,
+        )
+    assert outcome.query.safety_net_triggered is False
+    assert stub.calls == [(scoped_since, _NOW)]
+
+
+def test_safety_net_no_alert_when_find_file_returns_rows(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Safety net triggered + ``findFile`` returned ≥ 1 row → no ``POLLER_EMPTY_AFTER_QUIET`` alert.
+
+    Duplicate-row paths (all rows already ingested) take this branch too; the contract checks rows
+    returned by ``findFile``, not new clips ingested.
+    """
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    safety_hours = config.poller.safety_net_hours
+    last_clip_at = _NOW - timedelta(hours=safety_hours + 2)
+    cam_id = seed_camera(db_engine, last_clip_at=last_clip_at)
+    # Pre-seed the existing clip as a duplicate so _ingest_recording skips it (`find_file_row_count`
+    # increments but `len(ingested) == 0`); the safety-net alert must still NOT fire.
+    existing = Recording(
+        source_filename="duplicate.mp4",
+        camera_path="/path/duplicate.mp4",
+        start_ts=last_clip_at,
+        end_ts=last_clip_at + timedelta(seconds=10),
+        file_size_bytes=10,
+    )
+    with get_session(db_engine) as session:
+        session.add(
+            Clip(
+                camera_id=cam_id,
+                source_filename="duplicate.mp4",
+                start_ts=last_clip_at,
+                end_ts=last_clip_at + timedelta(seconds=10),
+                duration_seconds=10.0,
+                file_path="clips/pantry/x.mp4",
+                thumb_path="thumbs/pantry/x.jpg",
+                file_size_bytes=10,
+                detector_version="test",
+                ingested_at=last_clip_at,
+            ),
+        )
+    stub = _StubAmcrestClient(recordings=(existing,))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.POLLER_EMPTY_AFTER_QUIET).all()
+    assert rows == []
+
+
+def test_safety_net_fires_alert_when_find_file_returns_zero_rows_and_honors_cooldown(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Safety net triggered + zero rows: alert fires once; a second tick inside the cool-down does not re-fire."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    safety_hours = config.poller.safety_net_hours
+    last_clip_at = _NOW - timedelta(hours=safety_hours + 2)
+    cam_id = seed_camera(db_engine, last_clip_at=last_clip_at)
+    stub = _StubAmcrestClient()
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW + timedelta(minutes=5))
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.POLLER_EMPTY_AFTER_QUIET).all()
+    assert len(rows) == 1
+    assert rows[0].camera_id == cam_id
+    assert rows[0].subject.startswith("[cat-watcher] POLLER_EMPTY_AFTER_QUIET")
+
+
+# --- run_tick: cursor preservation on failure -----------------------------------------------------
+
+
+def test_run_tick_preserves_cursor_on_camera_unreachable(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CameraUnreachableError`` keeps ``last_polled_at`` at its prior value; status -> UNREACHABLE."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    prior = _NOW - timedelta(hours=1)
+    cam_id = seed_camera(db_engine, last_polled_at=prior)
+    stub = _StubAmcrestClient(raises=(CameraUnreachableError("connect refused"),))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == prior  # cursor preserved — failed tick proves no window coverage
+        assert cam.poll_status == PollStatus.UNREACHABLE
+        assert cam.poll_status_since == _NOW
+        assert cam.poll_error == "connect refused"
+
+
+def test_run_tick_preserves_cursor_on_unexpected_exception(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception not caught inside ``_poll_camera`` (e.g. a programming bug) still preserves the
+    cursor via the bare ``except Exception`` handler in ``run_tick``; error message is the generic
+    ``"unexpected exception"`` sentinel so logs (not the DB row) carry the traceback detail.
+    """
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    prior = _NOW - timedelta(hours=1)
+    cam_id = seed_camera(db_engine, last_polled_at=prior)
+    stub = _StubAmcrestClient(raises=(RuntimeError("boom"),))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == prior
+        assert cam.poll_status == PollStatus.ERROR
+        assert cam.poll_status_since == _NOW
+        assert cam.poll_error == "unexpected exception"
+
+
+def test_run_tick_advances_cursor_on_successful_recovery_after_failure(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed tick at T1 keeps cursor at T0; successful tick at T2 jumps cursor to ``T2 - overlap``.
+
+    Single-tick cursor jump from ``T0`` to ``T2 - overlap`` is intentional: the recovery tick's
+    ``findFile`` query covers ``[T0, T2]`` (since the cursor was never advanced), so its successful
+    completion proves coverage of the whole stretch — the cursor catches up in one move.
+    """
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    t0 = _NOW - timedelta(hours=2)
+    t1 = _NOW - timedelta(hours=1)
+    t2 = _NOW
+    cam_id = seed_camera(db_engine, last_polled_at=t0)
+    stub = _StubAmcrestClient(raises=(CameraUnreachableError("transient"),))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=t1)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == t0  # unchanged after failed tick
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=t2)
+
+    expected_cursor = t2 - timedelta(minutes=config.poller.overlap_minutes)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_polled_at == expected_cursor
+        assert cam.poll_status == PollStatus.OK
+        assert cam.poll_status_since is None
+        assert cam.poll_error is None
+    # Recovery tick's query covered the full lagged window [t0, t2].
+    assert stub.calls[-1] == (t0, t2)
+
+
+# --- run_tick: structured per-tick INFO logging ---------------------------------------------------
+
+
+def _seed_pantry_with_cursor(engine: Engine, last_polled_at: datetime) -> None:
+    """Insert a ``pantry`` row with the given cursor — used by the structured-logging tests to set
+    up the prior ``last_polled_at`` without paying the 6-fixture cost of ``seed_camera``.
+    """
+    with get_session(engine) as session:
+        session.add(
+            Camera(
+                name="pantry",
+                display_name="Pantry",
+                host="cam.example.com",
+                poll_status=PollStatus.OK,
+                last_polled_at=last_polled_at,
+            ),
+        )
+
+
+def test_run_tick_emits_poll_tick_info_on_success(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One INFO ``poll_tick`` record per successful camera tick, with the full ``extras`` schema."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    # Prior cursor lags far enough back that the new cursor will be ``now - overlap_minutes``
+    # rather than clamped to ``prior`` by the no-rewind ``max(target, prior)`` rule.
+    prior = _NOW - timedelta(hours=1)
+    _seed_pantry_with_cursor(db_engine, last_polled_at=prior)
+    stub = _StubAmcrestClient()
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    logging.getLogger("cat_watcher.poller").disabled = False
+    with caplog.at_level(logging.INFO, logger="cat_watcher.poller"):
+        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+
+    records = [r for r in caplog.records if r.message == "poll_tick"]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.levelno == logging.INFO
+    assert vars(rec)["camera_name"] == "pantry"
+    assert vars(rec)["window_since"] == prior.isoformat()
+    assert vars(rec)["window_until"] == _NOW.isoformat()
+    assert vars(rec)["findFile_rows"] == 0
+    assert vars(rec)["ingested_clips"] == 0
+    assert vars(rec)["skipped_duplicates"] == 0
+    assert vars(rec)["safety_net_triggered"] is False
+    assert vars(rec)["cursor_before"] == prior.isoformat()
+    assert vars(rec)["cursor_after"] == (_NOW - timedelta(minutes=config.poller.overlap_minutes)).isoformat()
+
+
+def test_run_tick_emits_poll_tick_failed_warning_on_typed_amcrest_failure(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One WARNING ``poll_tick_failed`` record per failed tick, with ``error_type`` and ``error_msg``."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    prior = _NOW - timedelta(hours=1)
+    _seed_pantry_with_cursor(db_engine, last_polled_at=prior)
+    stub = _StubAmcrestClient(raises=(CameraUnreachableError("connect refused"),))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    logging.getLogger("cat_watcher.poller").disabled = False
+    with caplog.at_level(logging.WARNING, logger="cat_watcher.poller"):
+        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+
+    records = [r for r in caplog.records if r.message == "poll_tick_failed"]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.levelno == logging.WARNING
+    assert vars(rec)["camera_name"] == "pantry"
+    assert vars(rec)["error_type"] == "CameraUnreachableError"
+    assert vars(rec)["error_msg"] == "connect refused"
+    # Cursor preserved per Task 5.
+    assert vars(rec)["cursor_before"] == prior.isoformat()
+    assert vars(rec)["cursor_after"] == prior.isoformat()
+
+
+def test_run_tick_emits_poll_tick_failed_warning_on_unexpected_exception(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Bare-``except`` path emits ``poll_tick_failed`` with the exception class name and message;
+    ``window_since`` / ``window_until`` are ``None`` because ``_poll_camera`` raised before the
+    window resolved.
+    """
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    prior = _NOW - timedelta(hours=1)
+    _seed_pantry_with_cursor(db_engine, last_polled_at=prior)
+    stub = _StubAmcrestClient(raises=(RuntimeError("boom"),))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    logging.getLogger("cat_watcher.poller").disabled = False
+    with caplog.at_level(logging.WARNING, logger="cat_watcher.poller"):
+        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+
+    records = [r for r in caplog.records if r.message == "poll_tick_failed"]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.levelno == logging.WARNING
+    assert vars(rec)["camera_name"] == "pantry"
+    assert vars(rec)["window_since"] is None
+    assert vars(rec)["window_until"] is None
+    assert vars(rec)["error_type"] == "RuntimeError"
+    assert vars(rec)["error_msg"] == "boom"
+    assert vars(rec)["cursor_before"] == prior.isoformat()
+    assert vars(rec)["cursor_after"] == prior.isoformat()

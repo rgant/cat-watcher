@@ -20,7 +20,7 @@ from sqlalchemy.engine import Engine  # noqa: TC002  # runtime: Engine-annotated
 from sqlalchemy.orm import Session
 
 from cat_watcher.config import CameraConfig, Config
-from cat_watcher.db import AgentStart, Base, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
+from cat_watcher.db import AgentStart, AlertSent, AlertType, Base, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
 from cat_watcher.poller import PollerArgs, run_tick
 
@@ -33,25 +33,15 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def _seed_amcrest_mocks(payload: bytes) -> None:
-    _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(
-        return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"),
+    """Default one-clip mock for tests whose Clip-row assertions hardcode the 2026-05-01 06:47:04
+    timestamp + 1m54s duration. New tests should pass ``start_ts`` to :func:`_seed_amcrest_mocks_for_clip`.
+    """
+    _seed_amcrest_mocks_for_clip(
+        start_ts=datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC),
+        end_ts=datetime(2026, 5, 1, 6, 48, 58, tzinfo=UTC),
+        file_path=_DOWNLOAD_PATH,
+        payload=payload,
     )
-    _ = respx.get(_FIND_URL, params__contains={"action": "findFile", "object": _FIND_HANDLE}).mock(
-        return_value=httpx.Response(200, text="OK\r\n"),
-    )
-    page = (
-        "found=1\r\n"
-        f"items[0].FilePath={_DOWNLOAD_PATH}\r\n"
-        "items[0].StartTime=2026-05-01 06:47:04\r\n"
-        "items[0].EndTime=2026-05-01 06:48:58\r\n"
-        f"items[0].Length={len(payload)}\r\n"
-    )
-    _ = respx.get(_FIND_URL, params={"action": "findNextFile", "object": _FIND_HANDLE, "count": "100"}).mock(
-        return_value=httpx.Response(200, text=page),
-    )
-    _ = respx.get(_FIND_URL, params={"action": "close", "object": _FIND_HANDLE}).mock(return_value=httpx.Response(200, text="OK\r\n"))
-    _ = respx.get(_FIND_URL, params={"action": "destroy", "object": _FIND_HANDLE}).mock(return_value=httpx.Response(200, text="OK\r\n"))
-    _ = respx.get(_DOWNLOAD_URL).mock(return_value=httpx.Response(200, content=payload))
 
 
 def _make_detector(
@@ -269,14 +259,17 @@ def test_full_tick_default_window_advances_last_polled_at(
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
-    """A default-window tick (no ``--since`` / ``--until`` / ``--limit``) advances the cursor.
+    """A default-window tick (no ``--since`` / ``--until`` / ``--limit``) advances the cursor with overlap.
 
     Complement to ``test_full_tick_ingests_clip_to_canonical_layout`` which uses ``--since``.
     Together they pin the contract: ``last_polled_at`` advances only when the run can prove it
-    covered the full ``[last_polled_at, now]`` window.
+    covered the full ``[last_polled_at, now]`` window. The cursor lands at ``now - overlap_minutes``
+    so the next tick's ``[last_polled_at, now2]`` window reaches back into already-covered ground
+    by ``overlap_minutes``, tolerating ``findFile`` index lag up to that bound.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
+    overlap_minutes = config.poller.overlap_minutes
 
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
     Base.metadata.create_all(engine)
@@ -294,7 +287,9 @@ def test_full_tick_default_window_advances_last_polled_at(
     try:
         with get_session(engine) as session:
             cam = session.query(Camera).filter_by(name="pantry").one()
-            assert cam.last_polled_at == _NOW  # cursor advanced — default-window tick
+            # Tightened: cursor lands at now - overlap, not at now. The next tick's window
+            # therefore overlaps this tick's by overlap_minutes.
+            assert cam.last_polled_at == _NOW - timedelta(minutes=overlap_minutes)
     finally:
         engine.dispose()
 
@@ -798,6 +793,189 @@ def test_poller_no_detect_falls_back_to_single_thumb(
             clip = session.query(Clip).one()
             assert clip.thumb_path == "thumbs/pantry/2026-05-01/064704.jpg"
             assert len(clip.frames) == 0
+    finally:
+        engine.dispose()
+
+
+def _seed_amcrest_mocks_for_clip(
+    *,
+    start_ts: datetime,
+    payload: bytes,
+    end_ts: datetime | None = None,
+    file_path: str | None = None,
+) -> None:
+    """Mock the Amcrest API to return one clip starting at ``start_ts``.
+
+    Defaults: ``end_ts = start_ts + 90s``, and ``file_path`` is synthesized from ``start_ts`` in the
+    camera-side ``HH.MM.SS-HH.MM.SS[M][0@0][0].mp4`` shape. The default ``pantry`` camera's
+    timezone is UTC (per :data:`tests.conftest._DEFAULT_CAMERAS`) so ``start_ts`` doubles as the
+    camera-local clock the API surfaces. Explicit overrides are for tests pinned to specific
+    legacy values.
+    """
+    if end_ts is None:
+        end_ts = start_ts + timedelta(seconds=90)
+    if file_path is None:
+        fname = f"{start_ts:%H.%M.%S}-{end_ts:%H.%M.%S}[M][0@0][0].mp4"
+        file_path = f"/mnt/sd/{start_ts:%Y-%m-%d}/001/dav/{start_ts:%H}/{fname}"
+    download_url = f"{_BASE_URL}/cgi-bin/RPC_Loadfile{file_path}"
+    _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(
+        return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"),
+    )
+    _ = respx.get(_FIND_URL, params__contains={"action": "findFile", "object": _FIND_HANDLE}).mock(
+        return_value=httpx.Response(200, text="OK\r\n"),
+    )
+    page = (
+        "found=1\r\n"
+        f"items[0].FilePath={file_path}\r\n"
+        f"items[0].StartTime={start_ts:%Y-%m-%d %H:%M:%S}\r\n"
+        f"items[0].EndTime={end_ts:%Y-%m-%d %H:%M:%S}\r\n"
+        f"items[0].Length={len(payload)}\r\n"
+    )
+    _ = respx.get(_FIND_URL, params={"action": "findNextFile", "object": _FIND_HANDLE, "count": "100"}).mock(
+        return_value=httpx.Response(200, text=page),
+    )
+    _ = respx.get(_FIND_URL, params={"action": "close", "object": _FIND_HANDLE}).mock(return_value=httpx.Response(200, text="OK\r\n"))
+    _ = respx.get(_FIND_URL, params={"action": "destroy", "object": _FIND_HANDLE}).mock(return_value=httpx.Response(200, text="OK\r\n"))
+    _ = respx.get(download_url).mock(return_value=httpx.Response(200, content=payload))
+
+
+def _seed_empty_amcrest_mocks() -> None:
+    """Wire respx so ``findFile`` returns ``found=0`` (zero rows)."""
+    _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(
+        return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"),
+    )
+    _ = respx.get(_FIND_URL, params__contains={"action": "findFile", "object": _FIND_HANDLE}).mock(
+        return_value=httpx.Response(200, text="OK\r\n"),
+    )
+    _ = respx.get(_FIND_URL, params={"action": "findNextFile", "object": _FIND_HANDLE, "count": "100"}).mock(
+        return_value=httpx.Response(200, text="found=0\r\n"),
+    )
+    _ = respx.get(_FIND_URL, params={"action": "close", "object": _FIND_HANDLE}).mock(return_value=httpx.Response(200, text="OK\r\n"))
+    _ = respx.get(_FIND_URL, params={"action": "destroy", "object": _FIND_HANDLE}).mock(return_value=httpx.Response(200, text="OK\r\n"))
+
+
+@respx.mock
+def test_safety_net_fires_poller_empty_after_quiet_when_amcrest_returns_zero_rows(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    disable_alert_channels: Callable[[Config], Config],
+    seed_camera: Callable[..., int],
+) -> None:
+    """End-to-end: a camera quiet beyond ``safety_net_hours`` whose ``findFile`` returns zero rows
+    writes exactly one ``POLLER_EMPTY_AFTER_QUIET`` row to ``alerts_sent``.
+    """
+    internal_root, storage_root = storage_dirs
+    config = disable_alert_channels(make_config(internal_root, storage_root))
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+    last_clip_at = _NOW - timedelta(hours=config.poller.safety_net_hours + 1)
+    cam_id = seed_camera(engine, last_clip_at=last_clip_at)
+    _seed_empty_amcrest_mocks()
+
+    try:
+        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, now=_NOW)
+    finally:
+        engine.dispose()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.POLLER_EMPTY_AFTER_QUIET).all()
+        assert len(rows) == 1
+        assert rows[0].camera_id == cam_id
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_overlap_zone_clip_is_ingested_via_extended_query_window(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[..., Config],
+    seed_camera: Callable[..., int],
+) -> None:
+    """Steady-state recovery: a clip whose ``start_ts`` falls in the trailing overlap zone is
+    ingested by the next tick despite the prior tick's wall-clock having advanced past it.
+
+    Setup represents the post-prior-tick cursor state: with ``cadence_seconds=300`` and
+    ``overlap_minutes=15``, a prior tick at ``now - 5min`` would have set the cursor to
+    ``(now - 5min) - 15min = now - 20min``. A clip with ``start_ts = now - 7min`` is outside the
+    cadence-only window ``[now - 5min, now]`` (the pre-fix bug path that lost clips) but inside
+    the overlap-extended window ``[now - 20min, now]``.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    cursor_after_prior_tick = _NOW - timedelta(minutes=20)
+    _ = seed_camera(
+        engine,
+        last_polled_at=cursor_after_prior_tick,
+        last_clip_at=_NOW - timedelta(hours=1),  # < safety_net_hours, so no widening
+    )
+
+    clip_start_ts = _NOW - timedelta(minutes=7)
+    _seed_amcrest_mocks_for_clip(start_ts=clip_start_ts, payload=synthetic_clip_path.read_bytes())
+
+    try:
+        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, now=_NOW)
+    finally:
+        engine.dispose()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            clips = session.query(Clip).all()
+            assert len(clips) == 1
+            assert clips[0].start_ts == clip_start_ts
+            cam = session.query(Camera).filter_by(name="pantry").one()
+            # Next tick's cursor lands at ``now - overlap_minutes`` (prior cursor was further back).
+            assert cam.last_polled_at == _NOW - timedelta(minutes=config.poller.overlap_minutes)
+            assert cam.last_clip_at == clip_start_ts
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_safety_net_widening_recovers_clip_and_suppresses_alert(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[..., Config],
+    disable_alert_channels: Callable[[Config], Config],
+    seed_camera: Callable[..., int],
+) -> None:
+    """Safety-net happy path: a camera quiet beyond ``safety_net_hours`` whose widened ``findFile``
+    query returns a clip ingests that clip, advances ``last_clip_at``, and does NOT fire
+    ``POLLER_EMPTY_AFTER_QUIET`` (alert suppression is row-count-keyed, not ingest-count-keyed).
+    """
+    internal_root, storage_root = storage_dirs
+    config = disable_alert_channels(make_config(internal_root, storage_root))
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    Base.metadata.create_all(engine)
+
+    cam_id = seed_camera(engine, last_clip_at=_NOW - timedelta(hours=config.poller.safety_net_hours + 1))
+    # Clip arrives in the safety-net-widened window (2h ago, well after the stale last_clip_at).
+    clip_start_ts = _NOW - timedelta(hours=2)
+    _seed_amcrest_mocks_for_clip(start_ts=clip_start_ts, payload=synthetic_clip_path.read_bytes())
+
+    try:
+        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, now=_NOW)
+    finally:
+        engine.dispose()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            clips = session.query(Clip).all()
+            assert len(clips) == 1
+            assert clips[0].start_ts == clip_start_ts
+            cam = session.get(Camera, cam_id)
+            assert cam is not None
+            assert cam.last_clip_at == clip_start_ts
+            alerts = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.POLLER_EMPTY_AFTER_QUIET).all()
+            assert alerts == []
     finally:
         engine.dispose()
 

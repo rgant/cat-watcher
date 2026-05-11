@@ -111,6 +111,30 @@ def make_config() -> Callable[..., Config]:
 
 
 @pytest.fixture
+def disable_alert_channels() -> Callable[[Config], Config]:
+    """Return a transformer that disables ``alerts.email`` and ``alerts.macos`` on a ``Config``.
+
+    The :class:`AlertConfig` wires both channels enabled by default; tests that exercise the alert
+    pipeline rely on :mod:`cat_watcher.notifier`'s ``enabled=False`` short-circuit (returns
+    ``ok=True``) to avoid real SMTP / osascript I/O.
+    """
+
+    def _apply(base_config: Config) -> Config:
+        return base_config.model_copy(
+            update={
+                "alerts": base_config.alerts.model_copy(
+                    update={
+                        "email": EmailRulesConfig(enabled=False),
+                        "macos": MacOsRulesConfig(enabled=False),
+                    },
+                ),
+            },
+        )
+
+    return _apply
+
+
+@pytest.fixture
 def seed_camera() -> Callable[..., int]:
     """Defaults match the ``pantry`` camera in :data:`_DEFAULT_CAMERAS` so the row is consistent
     with the rest of the test infrastructure.
