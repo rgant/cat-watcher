@@ -33,7 +33,7 @@ cat-watcher-backup = "cat_watcher.backup:main"
 [dependency-groups]
 dev = [
   "arel>=0.4.0,<0.5",
-  "basedpyright>=1.39.4,<2",
+  "basedpyright>=1.39.5,<2",
   "deptry>=0.25.1,<0.26",
   "detect-secrets>=1.5.0,<2",
   "djlint>=1.36.4,<2",
@@ -48,7 +48,7 @@ dev = [
   "pytest-cov>=7.1.0,<8",
   "pytest-randomly>=4.1.0,<5",
   "respx>=0.23.1,<0.24",
-  "ruff>=0.15.12,<0.16",
+  "ruff>=0.15.13,<0.16",
 ]
 
 [tool.pixi.dependencies]
@@ -57,13 +57,13 @@ actionlint = ">=1.7.12,<2"
 dprint = ">=0.50.0,<0.51"
 ffmpeg = ">=8.1.1,<9"
 markdownlint-cli = ">=0.48.0,<0.49"
-numpy = ">=2.4.3,<3"
+numpy = ">=2.4.5,<3"
 opencv = ">=4.13.0,<5"
 pytorch = ">=2.10.0,<3"
 shellcheck = ">=0.11.0,<0.12"
 torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
-ultralytics = ">=8.4.48,<9"
-zizmor = ">=1.24.1,<2"
+ultralytics = ">=8.4.51,<9"
+zizmor = ">=1.25.2,<2"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
 [tool.pixi.pypi-dependencies]
@@ -268,14 +268,14 @@ disable = [
   "bad-string-format-type",              # Duplicated with Ruff (PLE1307)
   "bidirectional-unicode",               # Duplicated with Ruff (PLE2502)
   "continue-in-finally",                 # Duplicated with Ruff (PLE0116)
-  # "dict-iter-missing-items", # Duplicated with Ruff (PLE1141) Preview
+  # "dict-iter-missing-items",           # Duplicated with Ruff (PLE1141) Preview
   "duplicate-bases",                     # Duplicated with Ruff (PLE0241)
   "format-needs-mapping",                # Duplicated with Ruff (F502)
   "function-redefined",                  # Duplicated with Ruff (F811)
   "init-is-generator",                   # Duplicated with Ruff (PLE0100)
   "invalid-all-format",                  # Duplicated with Ruff (PLE0605)
   "invalid-all-object",                  # Duplicated with Ruff (PLE0604)
-  # "invalid-bool-returned", # Duplicated with Ruff (PLE0304) Preview
+  # "invalid-bool-returned",             # Duplicated with Ruff (PLE0304) Preview
   "invalid-bytes-returned",              # Duplicated with Ruff (PLE0308)
   "invalid-character-backspace",         # Duplicated with Ruff (PLE2510)
   "invalid-character-esc",               # Duplicated with Ruff (PLE2513)
@@ -292,7 +292,7 @@ disable = [
   "misplaced-bare-raise",                # Duplicated with Ruff (PLE0704)
   "missing-format-string-key",           # Duplicated with Ruff (F524)
   "mixed-format-string",                 # Duplicated with Ruff (F506)
-  # "modified-iterating-set", # Duplicated with Ruff (PLE4703) Preview
+  # "modified-iterating-set",            # Duplicated with Ruff (PLE4703) Preview
   "no-self-argument",                    # Duplicated with Ruff (N805)
   "nonexistent-operator",                # Duplicated with Ruff (B002)
   "nonlocal-and-global",                 # Duplicated with Ruff (PLE0115)
@@ -323,9 +323,9 @@ disable = [
   "anomalous-backslash-in-string",       # Duplicated with Ruff (W605)
   "assert-on-string-literal",            # Duplicated with Ruff (PLW0129)
   "assert-on-tuple",                     # Duplicated with Ruff (F631)
-  # "bad-dunder-name", # Duplicated with Ruff (PLW3201) Preview
+  # "bad-dunder-name",                   # Duplicated with Ruff (PLW3201) Preview
   "bad-format-string",                   # Duplicated with Ruff (F521)
-  # "bad-indentation", # Duplicated with Ruff (E111) Preview
+  # "bad-indentation",                   # Duplicated with Ruff (E111) Preview
   "bad-open-mode",                       # Duplicated with Ruff (PLW1501)
   "bad-staticmethod-argument",           # Duplicated with Ruff (PLW0211)
   "bare-except",                         # Duplicated with Ruff (E722)
@@ -333,7 +333,7 @@ disable = [
   "broad-exception-caught",              # Duplicated with Ruff (BLE001)
   "broad-exception-raised",              # Duplicated with Ruff (TRY002)
   "cell-var-from-loop",                  # Duplicated with Ruff (B023)
-  # "consider-ternary-expression", # Duplicated with Ruff (SIM108) pylint.extensions.consider_ternary_expression not loaded
+  # "consider-ternary-expression",       # Duplicated with Ruff (SIM108) pylint.extensions.consider_ternary_expression not loaded
   "dangerous-default-value",             # Duplicated with Ruff (B006)
   "duplicate-except",                    # Duplicated with Ruff (B014)
   "duplicate-key",                       # Duplicated with Ruff (F601)
@@ -372,7 +372,7 @@ disable = [
   "raise-missing-from",                  # Duplicated with Ruff (B904)
   "redefined-builtin",                   # Duplicated with Ruff (A001)
   "redefined-loop-name",                 # Duplicated with Ruff (PLW2901)
-  # "redefined-slots-in-subclass", # Duplicated with Ruff (PLW0244) Preview
+  # "redefined-slots-in-subclass",       # Duplicated with Ruff (PLW0244) Preview
   "redundant-u-string-prefix",           # Duplicated with Ruff (UP025)
   "reimported",                          # Duplicated with Ruff (F811)
   "self-assigning-variable",             # Duplicated with Ruff (PLW0127)
@@ -381,12 +381,12 @@ disable = [
   "subprocess-popen-preexec-fn",         # Duplicated with Ruff (PLW1509)
   "subprocess-run-check",                # Duplicated with Ruff (PLW1510)
   "super-without-brackets",              # Duplicated with Ruff (PLW0245)
-  # "try-except-raise", # Duplicated with Ruff (TRY203)
+  # "try-except-raise",                  # Duplicated with Ruff (TRY203)
   "unnecessary-ellipsis",                # Duplicated with Ruff (PIE790)
   "unnecessary-lambda",                  # Duplicated with Ruff (PLW0108)
   "unnecessary-pass",                    # Duplicated with Ruff (PIE790)
   "unnecessary-semicolon",               # Duplicated with Ruff (E703)
-  # "unspecified-encoding", # Duplicated with Ruff (PLW1514) Preview
+  # "unspecified-encoding",              # Duplicated with Ruff (PLW1514) Preview
   "unused-argument",                     # Duplicated with Ruff (ARG001)
   "unused-format-string-argument",       # Duplicated with Ruff (F507)
   "unused-format-string-key",            # Duplicated with Ruff (F504)
@@ -397,18 +397,18 @@ disable = [
   "wildcard-import",                     # Duplicated with Ruff (F403)
   # Convention
   "bad-classmethod-argument",            # Duplicated with Ruff (N804)
-  # "bad-docstring-quotes", # Duplicated with Ruff (Q002) pylint.extensions.docstyle not loaded
-  # "compare-to-empty-string", # Duplicated with Ruff (PLC1901) Preview
+  # "bad-docstring-quotes",              # Duplicated with Ruff (Q002) pylint.extensions.docstyle not loaded
+  # "compare-to-empty-string",           # Duplicated with Ruff (PLC1901) Preview
   "consider-iterating-dictionary",       # Duplicated with Ruff (SIM118)
-  # "consider-using-any-or-all", # Duplicated with Ruff (SIM110) pylint.extensions.for_any_all not loaded
+  # "consider-using-any-or-all",         # Duplicated with Ruff (SIM110) pylint.extensions.for_any_all not loaded
   "consider-using-dict-items",           # Duplicated with Ruff (PLC0206)
-  # "docstring-first-line-empty", # Duplicated with Ruff (D210) pylint.extensions.docstyle not loaded
+  # "docstring-first-line-empty",        # Duplicated with Ruff (D210) pylint.extensions.docstyle not loaded
   "empty-docstring",                     # Duplicated with Ruff (D419)
   "import-outside-toplevel",             # Duplicated with Ruff (PLC0415)
-  # "import-private-name", # Duplicated with Ruff (PLC2701) Preview
+  # "import-private-name",               # Duplicated with Ruff (PLC2701) Preview
   "invalid-name",                        # Duplicated with Ruff (N815)
   "line-too-long",                       # Duplicated with Ruff (E501)
-  # "misplaced-comparison-constant", # Duplicated with Ruff (SIM300) pylint.extensions.comparison_placement not loaded
+  # "misplaced-comparison-constant",     # Duplicated with Ruff (SIM300) pylint.extensions.comparison_placement not loaded
   "missing-class-docstring",             # Duplicated with Ruff (D101)
   "missing-final-newline",               # Duplicated with Ruff (W292)
   "missing-function-docstring",          # Duplicated with Ruff (D103)
@@ -419,7 +419,7 @@ disable = [
   "non-ascii-name",                      # Duplicated with Ruff (PLC2401)
   "single-string-used-for-slots",        # Duplicated with Ruff (PLC0205)
   "singleton-comparison",                # Duplicated with Ruff (E711, E712)
-  # "trailing-newlines", # Duplicated with Ruff (W391) Preview
+  # "trailing-newlines",                 # Duplicated with Ruff (W391) Preview
   "trailing-whitespace",                 # Duplicated with Ruff (W291)
   "typevar-double-variance",             # Duplicated with Ruff (PLC0131)
   "typevar-name-incorrect-variance",     # Duplicated with Ruff (PLC0105)
@@ -427,7 +427,7 @@ disable = [
   "ungrouped-imports",                   # Duplicated with Ruff (I001)
   "unidiomatic-typecheck",               # Duplicated with Ruff (E721)
   "unnecessary-direct-lambda-call",      # Duplicated with Ruff (PLC3002)
-  # "unnecessary-dunder-call", # Duplicated with Ruff (PLC2801) Preview
+  # "unnecessary-dunder-call",           # Duplicated with Ruff (PLC2801) Preview
   "unnecessary-lambda-assignment",       # Duplicated with Ruff (E731)
   "unneeded-not",                        # Duplicated with Ruff (SIM208)
   "use-implicit-booleaness-not-len",     # Duplicated with Ruff (PLC1802)
@@ -441,9 +441,9 @@ disable = [
   "comparison-with-itself",              # Duplicated with Ruff (PLR0124)
   "consider-alternative-union-syntax",   # Duplicated with Ruff (UP007)
   "consider-merging-isinstance",         # Duplicated with Ruff (SIM101)
-  # "consider-swap-variables", # Duplicated with Ruff (PLR1712) Preview
+  # "consider-swap-variables",           # Duplicated with Ruff (PLR1712) Preview
   "consider-using-alias",                # Duplicated with Ruff (UP006)
-  # "consider-using-augmented-assign", # Duplicated with Ruff (PLR6104) Preview
+  # "consider-using-augmented-assign",   # Duplicated with Ruff (PLR6104) Preview
   "consider-using-dict-comprehension",   # Duplicated with Ruff (C402)
   "consider-using-from-import",          # Duplicated with Ruff (PLR0402)
   "consider-using-generator",            # Duplicated with Ruff (C417)
@@ -453,34 +453,34 @@ disable = [
   "consider-using-max-builtin",          # Duplicated with Ruff (PLR1730)
   "consider-using-set-comprehension",    # Duplicated with Ruff (C401)
   "consider-using-sys-exit",             # Duplicated with Ruff (PLR1722)
-  # "consider-using-ternary", # Duplicated with Ruff (PLR1706) Removed
+  # "consider-using-ternary",            # Duplicated with Ruff (PLR1706) Removed
   "consider-using-with",                 # Duplicated with Ruff (SIM115)
   "else-if-used",                        # Duplicated with Ruff (PLR5501)
-  # "empty-comment", # Duplicated with Ruff (PLR2044) pylint.extensions.empty_comment not loaded
+  # "empty-comment",                     # Duplicated with Ruff (PLR2044) pylint.extensions.empty_comment not loaded
   "inconsistent-return-statements",      # Duplicated with Ruff (RET501, RET502)
   "literal-comparison",                  # Duplicated with Ruff (F632)
-  # "magic-value-comparison", # Duplicated with Ruff (PLR2004) pylint.extensions.magic_value not loaded
-  # "no-classmethod-decorator", # Duplicated with Ruff (PLR0202) Preview
+  # "magic-value-comparison",            # Duplicated with Ruff (PLR2004) pylint.extensions.magic_value not loaded
+  # "no-classmethod-decorator",          # Duplicated with Ruff (PLR0202) Preview
   "no-else-break",                       # Duplicated with Ruff (RET508)
   "no-else-continue",                    # Duplicated with Ruff (RET507)
   "no-else-raise",                       # Duplicated with Ruff (RET506)
   "no-else-return",                      # Duplicated with Ruff (RET505)
-  # "no-self-use", # Duplicated with Ruff (PLR6301) Preview
-  # "no-staticmethod-decorator", # Duplicated with Ruff (PLR0203) Preview
+  # "no-self-use",                       # Duplicated with Ruff (PLR6301) Preview
+  # "no-staticmethod-decorator",         # Duplicated with Ruff (PLR0203) Preview
   "property-with-parameters",            # Duplicated with Ruff (PLR0206)
   "redefined-argument-from-local",       # Duplicated with Ruff (PLR1704)
   "simplifiable-if-expression",          # Duplicated with Ruff (SIM210, SIM211)
   "simplifiable-if-statement",           # Duplicated with Ruff (SIM108)
   "stop-iteration-return",               # Duplicated with Ruff (PLR1708)
   "super-with-arguments",                # Duplicated with Ruff (UP008)
-  # "too-complex", # Duplicated with Ruff (C901) pylint.extensions.mccabe not loaded
+  # "too-complex",                       # Duplicated with Ruff (C901) pylint.extensions.mccabe not loaded
   "too-many-arguments",                  # Duplicated with Ruff (PLR0913)
-  # "too-many-boolean-expressions", # Duplicated with Ruff (PLR0916) Preview
-  # "too-many-positional-arguments", # Duplicated with Ruff (PLR0917) Preview
+  # "too-many-boolean-expressions",      # Duplicated with Ruff (PLR0916) Preview
+  # "too-many-positional-arguments",     # Duplicated with Ruff (PLR0917) Preview
   "too-many-branches",                   # Duplicated with Ruff (PLR0912)
-  # "too-many-locals", # Duplicated with Ruff (PLR0914) Preview
-  # "too-many-nested-blocks", # Duplicated with Ruff (PLR1702) Preview
-  # "too-many-public-methods", # Duplicated with Ruff (PLR0904) Preview
+  # "too-many-locals",                   # Duplicated with Ruff (PLR0914) Preview
+  # "too-many-nested-blocks",            # Duplicated with Ruff (PLR1702) Preview
+  # "too-many-public-methods",           # Duplicated with Ruff (PLR0904) Preview
   "too-many-return-statements",          # Duplicated with Ruff (PLR0911)
   "too-many-statements",                 # Duplicated with Ruff (PLR0915)
   "trailing-comma-tuple",                # Duplicated with Ruff (COM818)
@@ -491,7 +491,7 @@ disable = [
   "use-dict-literal",                    # Duplicated with Ruff (C406)
   "unnecessary-list-index-lookup",       # Duplicated with Ruff (PLR1736)
   "use-yield-from",                      # Duplicated with Ruff (UP028)
-  # "use-set-for-membership", # Duplicated with Ruff (PLR6201) Preview
+  # "use-set-for-membership",            # Duplicated with Ruff (PLR6201) Preview
   "useless-object-inheritance",          # Duplicated with Ruff (UP004)
   "useless-return",                      # Duplicated with Ruff (PLR1711)
   # Project Customizations
