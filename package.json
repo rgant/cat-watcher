@@ -6,16 +6,16 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@stylistic/stylelint-config": "^5.0.0",
-    "eslint": "^10.3.0",
+    "eslint": "^10.4.0",
     "globals": "^17.6.0",
-    "stylelint": "^17.11.0",
+    "stylelint": "^17.11.1",
     "stylelint-config-clean-order": "^8.0.1",
     "stylelint-config-standard": "^40.0.0",
     "stylelint-declaration-block-no-ignored-properties": "^3.0.0",
     "stylelint-order": "^8.1.1",
-    "stylelint-plugin-defensive-css": "^2.9.1",
+    "stylelint-plugin-defensive-css": "^2.9.2",
     "stylelint-plugin-logical-css": "^2.1.0",
-    "stylelint-plugin-use-baseline": "^1.4.1",
+    "stylelint-plugin-use-baseline": "^1.4.2",
     "stylelint-use-nesting": "^6.0.2"
   },
   "engines": {
