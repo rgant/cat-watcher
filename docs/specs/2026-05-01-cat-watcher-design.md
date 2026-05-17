@@ -457,8 +457,8 @@ file handles hover preview and click navigation. No SPA framework.
 ### 4.8. `cat_watcher.db`
 
 SQLAlchemy 2.0 with `DeclarativeBase`. WAL mode enabled at connection time.
-Alembic migrations in `alembic/versions/`. `get_session()` context manager. No
-raw SQL outside of migrations and one or two optimized aggregate queries.
+Alembic migrations in `migrations/versions/`. `get_session()` context manager.
+No raw SQL outside of migrations and one or two optimized aggregate queries.
 
 ### 4.9. `cat_watcher.retention`
 

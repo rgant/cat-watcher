@@ -12,7 +12,6 @@ Create Date: 2026-05-10 21:54:25.996824
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-
 from alembic import op
 
 if TYPE_CHECKING:

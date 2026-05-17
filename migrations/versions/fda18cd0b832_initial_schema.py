@@ -12,9 +12,9 @@ Create Date: 2026-05-03 15:23:44.344876
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
+from alembic import op
 
 import cat_watcher.db
-from alembic import op
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

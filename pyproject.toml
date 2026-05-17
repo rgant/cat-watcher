@@ -187,9 +187,9 @@ target-version = "py314"
 line-length = 140
 indent-width = 4
 namespace-packages = [
-  # The alembic/ tree is also a namespace package (env.py + versions/*.py are loaded by alembic, not
-  # imported as a normal package).
-  "alembic",
+  # The migrations/ tree is also a namespace package (env.py + versions/*.py are loaded by alembic,
+  # not imported as a normal package).
+  "migrations",
   # Test directories are PEP 420 namespace packages (no __init__.py) because pytest runs under
   # --import-mode=importlib.
   "tests",

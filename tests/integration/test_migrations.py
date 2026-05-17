@@ -40,12 +40,12 @@ def alembic_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     """Build an Alembic ``Config`` pointed at a tmp_path SQLite via ``CAT_WATCHER_DB_URL``.
 
     Setting the env var (rather than mutating the Config object) exercises the same precedence
-    branch in ``alembic/env.py`` that integration tests will use everywhere else.
+    branch in ``migrations/env.py`` that integration tests will use everywhere else.
     """
     db_path = tmp_path / "round.sqlite"
     monkeypatch.setenv("CAT_WATCHER_DB_URL", f"sqlite:///{db_path}")
     cfg = Config("alembic.ini")
-    cfg.set_main_option("script_location", "alembic")
+    cfg.set_main_option("script_location", "migrations")
     return cfg
 
 
