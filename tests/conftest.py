@@ -2,6 +2,7 @@
 
 import respx_httpxyz  # noqa: F401, I001  # pyright: ignore[reportUnusedImport]  # side-effect import; must run first; registers HTTPCoreXYZMocker + repoints respx.mock default.
 
+import logging
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -44,6 +45,27 @@ if TYPE_CHECKING:
 def synthetic_clip_path() -> Path:
     """Session-scoped synthetic mp4 path; one encode is reused across every test that needs one."""
     return make_clip()
+
+
+@pytest.fixture
+def restore_root_logger() -> Iterator[logging.Logger]:
+    """Snapshot and restore the root logger's level + handlers around a test.
+
+    Yields the root logger so tests that exercise ``setup_agent_logging`` (or any other
+    handler-attaching code) can assert on it without leaking handler state to other tests.
+    """
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    try:
+        yield root
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+            handler.close()
+        for handler in saved_handlers:
+            root.addHandler(handler)
+        root.setLevel(saved_level)
 
 
 @pytest.fixture

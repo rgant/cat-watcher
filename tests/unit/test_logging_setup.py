@@ -11,26 +11,19 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from cat_watcher import logging_setup
-from cat_watcher.logging_setup import JsonFormatter, setup_logging
+from cat_watcher.logging_setup import JsonFormatter, setup_agent_logging, setup_logging
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable
     from pathlib import Path
+
+    from cat_watcher.config import Config
 
 
 @pytest.fixture(autouse=True)
-def reset_root_logger() -> Iterator[None]:
-    """Snapshot the root logger's handlers + level so cross-test leakage can't mask bugs."""
-    root = logging.getLogger()
-    saved_handlers = list(root.handlers)
-    saved_level = root.level
-    yield
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-        handler.close()
-    for handler in saved_handlers:
-        root.addHandler(handler)
-    root.setLevel(saved_level)
+def autouse_restore_root_logger(restore_root_logger: logging.Logger) -> None:
+    """Apply the root-logger snapshot/restore to every test in this file."""
+    _ = restore_root_logger
 
 
 type ExcInfoTuple = tuple[type[BaseException], BaseException, TracebackType | None] | tuple[None, None, None] | None
@@ -219,3 +212,82 @@ def test_extras_with_non_serializable_value_falls_back_to_str(tmp_path: Path) ->
     extras = parsed["extras"]
     assert isinstance(extras, dict)
     assert extras["path"] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# setup_agent_logging — level resolution
+# ---------------------------------------------------------------------------
+
+
+def _config_with_level(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path], log_level: str) -> Config:
+    """Build a ``Config`` with ``log_level`` overridden."""
+    internal_root, storage_root = storage_dirs
+    base = make_config(internal_root, storage_root)
+    return base.model_copy(update={"log_level": log_level})
+
+
+def test_config_debug_without_verbose_sets_debug_level(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``config.log_level="DEBUG"`` with ``verbose=False`` sets root logger to DEBUG."""
+    config = _config_with_level(make_config, storage_dirs, "DEBUG")
+    setup_agent_logging(agent_name="poller", config=config, verbose=False)
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_config_info_without_verbose_sets_info_level(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``config.log_level="INFO"`` with ``verbose=False`` sets root logger to INFO."""
+    config = _config_with_level(make_config, storage_dirs, "INFO")
+    setup_agent_logging(agent_name="poller", config=config, verbose=False)
+    assert logging.getLogger().level == logging.INFO
+
+
+def test_config_warning_without_verbose_sets_warning_level(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``config.log_level="WARNING"`` with ``verbose=False`` sets root logger to WARNING."""
+    config = _config_with_level(make_config, storage_dirs, "WARNING")
+    setup_agent_logging(agent_name="poller", config=config, verbose=False)
+    assert logging.getLogger().level == logging.WARNING
+
+
+def test_verbose_does_not_downgrade_debug_baseline(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``verbose=True`` with a DEBUG baseline leaves root logger at DEBUG."""
+    config = _config_with_level(make_config, storage_dirs, "DEBUG")
+    setup_agent_logging(agent_name="poller", config=config, verbose=True)
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_verbose_does_not_downgrade_info_baseline(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``verbose=True`` with an INFO baseline leaves root logger at INFO."""
+    config = _config_with_level(make_config, storage_dirs, "INFO")
+    setup_agent_logging(agent_name="poller", config=config, verbose=True)
+    assert logging.getLogger().level == logging.INFO
+
+
+def test_verbose_upgrades_warning_baseline_to_info(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``verbose=True`` raises a WARNING baseline to INFO so --verbose surfaces diagnostic records."""
+    config = _config_with_level(make_config, storage_dirs, "WARNING")
+    setup_agent_logging(agent_name="poller", config=config, verbose=True)
+    assert logging.getLogger().level == logging.INFO
+
+
+def test_verbose_upgrades_error_baseline_to_info(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """``verbose=True`` raises an ERROR baseline to INFO."""
+    config = _config_with_level(make_config, storage_dirs, "ERROR")
+    setup_agent_logging(agent_name="poller", config=config, verbose=True)
+    assert logging.getLogger().level == logging.INFO
+
+
+def test_setup_agent_logging_writes_jsonl_at_agent_named_path(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """The log file is created at ``<internal_root>/logs/<agent_name>.jsonl``.
+
+    Catches a bug where the agent_name argument is ignored and a hard-coded literal is used
+    instead — the file would exist but under the wrong name.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    setup_agent_logging(agent_name="poller", config=config, verbose=False)
+    logging.getLogger("cat_watcher.x").info("hi")
+
+    log_path = internal_root / "logs" / "poller.jsonl"
+    assert log_path.exists()
+    line = log_path.read_text(encoding="utf-8").splitlines()[-1]
+    parsed = cast("dict[str, object]", json.loads(line))
+    assert parsed["agent"] == "poller"

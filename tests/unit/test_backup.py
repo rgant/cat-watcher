@@ -1,5 +1,6 @@
 """Tests for cat_watcher.backup."""
 
+import logging
 import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -292,3 +293,28 @@ def test_run_backup_does_not_modify_source_db(tmp_path: Path) -> None:
 
     assert before == after
     assert before == [("pantry", "Pantry", "cam.example.com")]
+
+
+# --- main() smoke test ---------------------------------------------------------------------------
+
+
+def test_main_wires_log_level_from_config(
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``main()`` reads ``config.log_level`` and passes it through to the root logger."""
+    internal_root = tmp_path / "internal"
+    storage_root = tmp_path / "storage"
+    config = _build_config(make_config, internal_root, storage_root)
+
+    with (
+        patch("cat_watcher.backup.load_config", return_value=config),
+        patch("cat_watcher.backup.wait_for_storage_using_config"),
+        patch("cat_watcher.backup.ensure_storage_layout"),
+        patch("cat_watcher.backup._record_start_and_back_up", return_value=0),
+    ):
+        rc = main([])
+
+    assert rc == 0
+    assert restore_root_logger.level == logging.INFO

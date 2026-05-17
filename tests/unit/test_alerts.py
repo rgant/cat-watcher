@@ -12,9 +12,10 @@ import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.engine import Engine
 
 from cat_watcher.alert_templates import AlertContent
 from cat_watcher.alerts import (
@@ -30,6 +31,7 @@ from cat_watcher.alerts import (
     evaluate_web_flapping,
     run_alerts_tick,
 )
+from cat_watcher.alerts import main as alerts_main
 from cat_watcher.db import (
     AgentStart,
     AlertSent,
@@ -44,7 +46,6 @@ from cat_watcher.notifier import EmailResult, NotifResult
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
@@ -957,3 +958,62 @@ def test_dispatch_alert_logs_critical_when_both_channels_fail(
 
     critical_logs = [r for r in caplog.records if r.levelno == logging.CRITICAL and "dispatch failed on both channels" in r.message]
     assert len(critical_logs) == 1
+
+
+# --- main() smoke test ---------------------------------------------------------------------------
+
+
+def test_main_wires_log_level_from_config(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``main()`` reads ``config.log_level`` and passes it through to the root logger.
+
+    Tripwire for the logging-wiring contract: if ``setup_agent_logging`` ever ignores
+    ``config.log_level`` (e.g. hardcodes WARNING), ``root.level != logging.INFO`` will catch it.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    with (
+        patch("cat_watcher.alerts.load_config", return_value=config),
+        patch("cat_watcher.alerts.storage_available", return_value=True),
+        patch("cat_watcher.alerts.ensure_storage_layout"),
+        patch("cat_watcher.alerts.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.alerts.run_alerts_tick"),
+    ):
+        rc = alerts_main([])
+
+    assert rc == 0
+    assert restore_root_logger.level == logging.INFO
+
+
+def test_main_skips_storage_layout_when_storage_offline(
+    cfg: Config,
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``main()`` skips ``ensure_storage_layout`` when the drive is offline but still runs ``run_alerts_tick``.
+
+    The alerts agent must keep running with the external drive offline so it can fire
+    ``STORAGE_UNAVAILABLE``. ``ensure_storage_layout`` would fail with a missing mount, so the guard
+    exits that branch early; the tick itself must still execute.
+    """
+    _ = restore_root_logger
+    config = cfg
+
+    mock_run_alerts_tick = MagicMock()
+    mock_ensure_storage_layout = MagicMock()
+
+    with (
+        patch("cat_watcher.alerts.load_config", return_value=config),
+        patch("cat_watcher.alerts.storage_available", return_value=False),
+        patch("cat_watcher.alerts.ensure_storage_layout", mock_ensure_storage_layout),
+        patch("cat_watcher.alerts.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.alerts.run_alerts_tick", mock_run_alerts_tick),
+    ):
+        rc = alerts_main([])
+
+    assert rc == 0
+    assert mock_run_alerts_tick.called
+    mock_ensure_storage_layout.assert_not_called()

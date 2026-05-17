@@ -5,11 +5,14 @@ Exercises the FastAPI factory + auth middleware + ``/health`` route end-to-end v
 """
 
 import base64
+import logging
 from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
 import pytest
 
 from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
+from cat_watcher.web.app import main as web_main
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -219,3 +222,59 @@ def test_lifespan_heartbeat_task_is_cancelled_on_shutdown(
     finally:
         engine.dispose()
     assert hb is not None
+
+
+# --- main() smoke test ---------------------------------------------------------------------------
+
+
+def test_main_wires_log_level_from_config(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[[Path, Path], Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``main()`` reads ``config.log_level`` and passes it through to the root logger."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    with (
+        patch("cat_watcher.web.app.load_config", return_value=config),
+        patch("cat_watcher.web.app.uvicorn.run"),
+    ):
+        rc = web_main([])
+
+    assert rc == 0
+    assert restore_root_logger.level == logging.INFO
+
+
+def test_main_reload_mode_invokes_factory_uvicorn_run(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``--reload`` hands uvicorn an import string + factory=True so it can re-import on changes.
+
+    The production path passes a pre-built app object; passing an import string in reload mode
+    enables uvicorn's worker-per-change re-import cycle. A regression that passed the live app
+    object would silently disable hot-reload without any runtime error.
+    """
+    _ = restore_root_logger
+    internal_root = tmp_path / "internal"
+    storage_root = tmp_path / "storage"
+    internal_root.mkdir()
+    storage_root.mkdir()
+    config = make_config(internal_root, storage_root)
+
+    with (
+        patch("cat_watcher.web.app.load_config", return_value=config),
+        patch("cat_watcher.web.app.uvicorn.run") as mock_run,
+    ):
+        rc = web_main(["--reload"])
+
+    assert rc == 0
+    mock_run.assert_called_once()
+    # The first positional arg must be an import string (not a live app object) so uvicorn can
+    # re-import on each reload cycle. ``factory=True`` and ``reload=True`` enable the reload path.
+    call = mock_run.call_args
+    assert call.args[0] == "cat_watcher.web.app:reload_app"
+    assert call.kwargs["factory"] is True
+    assert call.kwargs["reload"] is True

@@ -6,23 +6,29 @@ Verifies the file-before-row ordering invariant: the ``clips`` row only commits 
 and .jpg files exist on disk.
 """
 
+import contextlib
 import logging
 from collections.abc import Callable  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at runtime.
 import numpy as np
 import pytest  # noqa: TC002  # runtime: respx.mock evaluates pytest.MonkeyPatch annotations at decoration time
 import respx
-from sqlalchemy.engine import Engine  # noqa: TC002  # runtime: Engine-annotated helper called at module level via fixtures
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from cat_watcher.config import CameraConfig, Config
 from cat_watcher.db import AgentStart, AlertSent, AlertType, Base, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
-from cat_watcher.poller import PollerArgs, run_tick
+from cat_watcher.poller import PollerArgs, PollerError, PollerLockedError, run_tick
+from cat_watcher.poller import main as poller_main
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 _BASE_URL = "http://cam.example.com:80"
 _FIND_URL = f"{_BASE_URL}/cgi-bin/mediaFileFind.cgi"
@@ -1027,3 +1033,111 @@ def test_poller_detection_error_falls_back_to_single_thumb(
             assert clip.analysis_error.startswith("detect failed")
     finally:
         engine.dispose()
+
+
+# --- main() smoke test ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _noop_pid_lock(_path: Path) -> Generator[None]:
+    yield
+
+
+def test_main_wires_log_level_from_config(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[[Path, Path], Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``main()`` reads ``config.log_level`` and passes it through to the root logger."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    with (
+        patch("cat_watcher.poller.load_config", return_value=config),
+        patch("cat_watcher.poller.ensure_storage_layout"),
+        patch("cat_watcher.poller.pid_lock", _noop_pid_lock),
+        patch("cat_watcher.poller.wait_for_storage"),
+        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.run_tick"),
+    ):
+        rc = poller_main(["--no-detect"])
+
+    assert rc == 0
+    assert restore_root_logger.level == logging.INFO
+
+
+def test_main_returns_zero_when_poller_lock_held(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[[Path, Path], Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """A held PID lock triggers ``PollerLockedError`` which ``main()`` maps to exit code 0.
+
+    ``PollerLockedError`` is a subclass of ``PollerError`` but is mapped to exit 0 (not 1) because
+    a concurrent poller is a normal operating condition, not a failure.
+    """
+    _ = restore_root_logger
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    # ``ensure_storage_layout`` runs before the pid_lock context, so the error path below still
+    # needs a real config object for that call.
+    with (
+        patch("cat_watcher.poller.load_config", return_value=config),
+        patch("cat_watcher.poller.ensure_storage_layout"),
+        patch("cat_watcher.poller.pid_lock", side_effect=PollerLockedError("lock held")),
+        patch("cat_watcher.poller.wait_for_storage"),
+        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+    ):
+        rc = poller_main(["--no-detect"])
+
+    assert rc == 0
+
+
+def test_main_returns_one_on_generic_poller_error(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[[Path, Path], Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """A ``PollerError`` (other than the lock variant) causes ``main()`` to return exit code 1."""
+    _ = restore_root_logger
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    with (
+        patch("cat_watcher.poller.load_config", return_value=config),
+        patch("cat_watcher.poller.ensure_storage_layout"),
+        patch("cat_watcher.poller.pid_lock", _noop_pid_lock),
+        patch("cat_watcher.poller.wait_for_storage"),
+        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.run_tick", side_effect=PollerError("kaboom")),
+    ):
+        rc = poller_main(["--no-detect"])
+
+    assert rc == 1
+
+
+def test_main_passes_verbose_to_setup_agent_logging(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[[Path, Path], Config],
+    restore_root_logger: logging.Logger,
+) -> None:
+    """``--verbose`` flows through ``main()`` into ``setup_agent_logging`` and raises WARNING to INFO.
+
+    A regression that hardcodes ``verbose=False`` inside ``main()`` would leave the root logger at
+    WARNING rather than INFO, caught by the level assertion.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root).model_copy(update={"log_level": "WARNING"})
+
+    with (
+        patch("cat_watcher.poller.load_config", return_value=config),
+        patch("cat_watcher.poller.ensure_storage_layout"),
+        patch("cat_watcher.poller.pid_lock", _noop_pid_lock),
+        patch("cat_watcher.poller.wait_for_storage"),
+        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.run_tick"),
+    ):
+        rc = poller_main(["--no-detect", "--verbose"])
+
+    assert rc == 0
+    assert restore_root_logger.level == logging.INFO

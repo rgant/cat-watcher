@@ -24,6 +24,8 @@ from sqlalchemy.engine import Engine
 
 from cat_watcher.__main__ import (
     _build_parser,
+    _fmt,
+    _fmt_delta,
     _ParsedArgs,
     _run_backup,
     _run_fetch_models,
@@ -200,9 +202,10 @@ def test_status_reports_camera_and_heartbeat_rows(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Seeded cameras + heartbeats appear in the status digest."""
+    last_cat_seen_at = datetime(2026, 5, 10, 12, 0, tzinfo=UTC)
     config = config_with_dirs(tmp_path, make_config)
     init_schema(config.internal_root)
-    _ = seed_camera(config, name="pantry", display_name="Pantry")
+    _ = seed_camera(config, name="pantry", display_name="Pantry", last_cat_seen_at=last_cat_seen_at)
     with open_seed_session(config) as session:
         session.add(Heartbeat(agent_name="poller", last_seen_at=datetime.now(UTC) - timedelta(seconds=30)))
         session.add(AgentStart(agent_name="poller", started_at=datetime.now(UTC)))
@@ -213,6 +216,12 @@ def test_status_reports_camera_and_heartbeat_rows(
     assert "pantry" in out
     assert "Pantry" in out
     assert "poller" in out
+    assert last_cat_seen_at.isoformat() in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 # --- inspect sub-command -------------------------------------------------------------------------
@@ -244,6 +253,11 @@ def test_inspect_prints_clip_metadata_and_size(
     out = capsys.readouterr().out
     assert "inspect-target.mp4" in out
     assert "4096" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_inspect_returns_three_for_unknown_clip(
@@ -259,6 +273,11 @@ def test_inspect_returns_three_for_unknown_clip(
     assert exit_code == 3
     err = capsys.readouterr().err
     assert "not found" in err
+    assert "{_fmt" not in err
+    assert "{self." not in err
+    assert "{cam." not in err
+    assert "{cfg." not in err
+    assert "NoneType" not in err
 
 
 def test_inspect_renders_missing_file_marker(
@@ -283,7 +302,13 @@ def test_inspect_renders_missing_file_marker(
     with patch("cat_watcher.__main__.load_config", return_value=config):
         exit_code = _run_inspect(make_handler_args(clip_id=clip_id))
     assert exit_code == 0
-    assert "(missing)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "(missing)" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 # --- test-cameras sub-command --------------------------------------------------------------------
@@ -326,6 +351,11 @@ def test_test_cameras_unreachable_returns_nonzero(
     assert exit_code != 0
     out = capsys.readouterr().out
     assert "FAIL" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_test_cameras_clock_drift_warns_below_five_minutes(
@@ -344,6 +374,11 @@ def test_test_cameras_clock_drift_warns_below_five_minutes(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "clock-drift: WARN" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_test_cameras_clock_drift_ok_below_warn_threshold(
@@ -364,6 +399,11 @@ def test_test_cameras_clock_drift_ok_below_warn_threshold(
     assert "clock-drift: OK" in out
     assert "clock-drift: WARN" not in out
     assert "clock-drift: !!! FAIL" not in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_test_cameras_clock_drift_loud_fail_above_five_minutes(
@@ -382,6 +422,11 @@ def test_test_cameras_clock_drift_loud_fail_above_five_minutes(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "clock-drift: !!! FAIL" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_test_cameras_timezone_drift_emits_advisory_with_both_zones(
@@ -419,6 +464,11 @@ def test_test_cameras_timezone_drift_emits_advisory_with_both_zones(
     assert "America/Denver" in out
     assert "America/New_York" in out
     assert "cameras[].timezone" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 # --- test-notification sub-command ---------------------------------------------------------------
@@ -441,6 +491,11 @@ def test_test_notification_reports_success_when_both_channels_succeed(
     out = capsys.readouterr().out
     assert "email: ok=True" in out
     assert "macos: ok=True" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_test_notification_returns_nonzero_when_any_channel_fails(
@@ -545,6 +600,11 @@ def test_restore_backup_refuses_when_agents_loaded(
     assert exit_code != 0
     err = capsys.readouterr().err
     assert "bootout" in err
+    assert "{_fmt" not in err
+    assert "{self." not in err
+    assert "{cam." not in err
+    assert "{cfg." not in err
+    assert "NoneType" not in err
 
 
 def test_restore_backup_copies_when_no_agents_loaded(tmp_path: Path, make_config: Callable[[Path, Path], Config]) -> None:
@@ -607,6 +667,11 @@ def test_status_renders_recent_alerts_when_present(
     out = capsys.readouterr().out
     assert "INACTIVITY" in out
     assert "No cat seen for 24h" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_status_omits_alerts_older_than_thirty_days(
@@ -644,6 +709,11 @@ def test_status_omits_alerts_older_than_thirty_days(
     out = capsys.readouterr().out
     assert "Stale alert from 45 days ago" not in out
     assert "Recent alert from yesterday" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
 
 
 def test_fetch_models_cleans_up_partial_download_on_failure(
@@ -675,6 +745,11 @@ def test_fetch_models_cleans_up_partial_download_on_failure(
     assert not target.exists(), f"expected {target} to be absent (atomic-rename never happened)"
     err = capsys.readouterr().err
     assert "download failed" in err
+    assert "{_fmt" not in err
+    assert "{self." not in err
+    assert "{cam." not in err
+    assert "{cfg." not in err
+    assert "NoneType" not in err
 
 
 def test_backup_returns_locked_when_storage_unavailable(
@@ -697,6 +772,11 @@ def test_backup_returns_locked_when_storage_unavailable(
     err = capsys.readouterr().err
     assert "storage_root unavailable" in err
     assert not list((config.storage_root / "backups").glob("cat_watcher-*.sqlite"))
+    assert "{_fmt" not in err
+    assert "{self." not in err
+    assert "{cam." not in err
+    assert "{cfg." not in err
+    assert "NoneType" not in err
 
 
 # --- config-path precedence ----------------------------------------------------------------------
@@ -714,3 +794,67 @@ def test_config_path_precedence_arg_beats_env(monkeypatch: pytest.MonkeyPatch, t
     assert _resolve_config_path(None) == env_path
     monkeypatch.delenv("CAT_WATCHER_CONFIG")
     assert _resolve_config_path(None) == Path("./config.toml")
+
+
+# --- _fmt and _fmt_delta formatters --------------------------------------------------------------
+
+
+def test_fmt_returns_em_dash_for_none() -> None:
+    """``_fmt(None)`` returns the em-dash sentinel used by status output."""
+    assert _fmt(None) == "—"
+
+
+def test_fmt_returns_isoformat_for_datetime() -> None:
+    """``_fmt`` delegates to ``.isoformat()`` for a timezone-aware datetime."""
+    assert _fmt(datetime(2026, 5, 10, 12, 0, tzinfo=UTC)) == "2026-05-10T12:00:00+00:00"
+
+
+def test_fmt_delta_zero() -> None:
+    """Zero timedelta renders as ``00:00:00``."""
+    assert _fmt_delta(timedelta(0)) == "00:00:00"
+
+
+def test_fmt_delta_positive() -> None:
+    """A positive timedelta renders as ``HH:MM:SS`` with zero-padded fields."""
+    assert _fmt_delta(timedelta(hours=1, minutes=2, seconds=3)) == "01:02:03"
+
+
+def test_fmt_delta_negative() -> None:
+    """A negative timedelta gets a leading ``-`` sign so operators can spot future timestamps."""
+    result = _fmt_delta(timedelta(seconds=-5))
+    assert result.startswith("-")
+    assert "00:05" in result
+
+
+# --- status empty-state branches -----------------------------------------------------------------
+
+
+def test_status_prints_empty_markers_when_db_is_unpopulated(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """All three ``(none)`` branches fire when no cameras, heartbeats, or alerts exist.
+
+    Covers:
+    - ``_print_camera_status``: no cameras → ``  (none)``
+    - ``_print_heartbeat_status``: no heartbeat rows → ``<agent>: (none)`` per agent
+    - ``_print_recent_alerts``: no alerts in window → ``  (none)``
+    """
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+
+    with patch("cat_watcher.__main__.load_config", return_value=config):
+        exit_code = _run_status(make_handler_args())
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "  (none)" in out
+    assert "poller: (none)" in out
+    assert "alerts: (none)" in out
+    assert "web: (none)" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
