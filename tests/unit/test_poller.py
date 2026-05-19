@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Self, final
 from unittest.mock import MagicMock
 
 import pytest
+from tz_helpers import pinned_tz
 
 from cat_watcher.amcrest_client import CameraUnreachableError, Recording
 from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
@@ -680,8 +681,6 @@ def test_parse_iso_datetime_naive_treated_as_os_local() -> None:
 
     Pinning the system tz makes the round-trip deterministic regardless of the host's actual zone.
     """
-    from tz_helpers import pinned_tz
-
     with pinned_tz("America/New_York"):  # EDT in May = UTC-04:00
         # Naive: "May 4 midnight in New York" -> "May 4 04:00 UTC".
         naive_result = _parse_iso_datetime("2026-05-04T00:00:00")

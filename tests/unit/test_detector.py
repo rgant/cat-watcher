@@ -6,6 +6,7 @@ env, and mocking them would leave the actual command lines untested).
 """
 
 import hashlib
+import shutil
 import subprocess
 from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations are evaluated by collectors
 from unittest.mock import MagicMock
@@ -240,8 +241,6 @@ def test_detect_raises_when_required_binary_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each required binary, when absent from PATH, surfaces as ``DetectorError`` naming it."""
-    import shutil
-
     detector, _ = _make_detector(return_value=_fake_results(cls_ids=[], confidences=[], boxes=[]))
     real_which = shutil.which
 

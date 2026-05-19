@@ -13,6 +13,7 @@ import base64
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from cat_watcher.db import AlertSent, AlertType, Camera, Clip
 
@@ -460,8 +461,6 @@ def test_thumb_card_renders_display_stamp_in_configured_timezone(
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """At 6h/24h ranges the thumb strip renders one card per clip with HH:MM:SS in display_timezone."""
-    from zoneinfo import ZoneInfo
-
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)

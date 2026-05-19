@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from tz_helpers import pinned_tz
 
 from cat_watcher import logs_viewer
 from cat_watcher.logs_viewer import RunArgs
@@ -100,8 +101,6 @@ def test_parse_since_iso_with_offset() -> None:
 
 def test_parse_since_naive_iso_is_os_local() -> None:
     """Naive ISO input is read in OS-local time (matching the poller's `_parse_iso_datetime`)."""
-    from tz_helpers import pinned_tz
-
     with pinned_tz("America/New_York"):
         parsed = logs_viewer.parse_since("2026-05-04T00:00:00")
         assert parsed == datetime(2026, 5, 4, 4, 0, 0, tzinfo=UTC)

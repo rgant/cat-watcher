@@ -38,7 +38,7 @@ from cat_watcher.__main__ import (
     main,
 )
 from cat_watcher.amcrest_client import AmcrestClient, CameraUnreachableError
-from cat_watcher.config import Config  # noqa: TC001  # runtime: make_config callable annotation
+from cat_watcher.config import CameraConfig, Config, _resolve_config_path
 from cat_watcher.db import AgentStart, AlertSent, AlertType, Heartbeat
 from cat_watcher.import_local import ImportReport
 from cat_watcher.notifier import EmailResult, NotifResult
@@ -443,7 +443,6 @@ def test_test_cameras_timezone_drift_emits_advisory_with_both_zones(
     expected zone (rather than the ``web.display_timezone`` fallback) — keeps the assertion focused
     on the comparison contract.
     """
-    from cat_watcher.config import CameraConfig  # local import; only this test cares
 
     def _build_with_ny_camera(internal_root: Path, storage_root: Path) -> Config:
         return make_config(
@@ -784,8 +783,6 @@ def test_backup_returns_locked_when_storage_unavailable(
 
 def test_config_path_precedence_arg_beats_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``--config PATH`` overrides ``CAT_WATCHER_CONFIG`` which overrides the default."""
-    from cat_watcher.config import _resolve_config_path  # internal import; testing precedence helper directly
-
     arg_path = tmp_path / "from-arg.toml"
     env_path = tmp_path / "from-env.toml"
     monkeypatch.setenv("CAT_WATCHER_CONFIG", str(env_path))

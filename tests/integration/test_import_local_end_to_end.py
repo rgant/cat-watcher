@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from sqlalchemy.orm import Session
 
+from cat_watcher import import_local as importer_module
 from cat_watcher.config import Config  # noqa: TC001  # runtime: make_config callable annotation
 from cat_watcher.db import Base, Clip, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, ScoredFrame
@@ -482,8 +483,6 @@ def test_import_local_continues_after_per_clip_error(
     payload = synthetic_clip_path.read_bytes()
     bad_clip, _ = _build_sd_tree(source_root, clip_payload=payload, hour=5, minute=50, start_sec=17, end_sec=20)
     _ = _build_sd_tree(source_root, clip_payload=payload, hour=6, minute=10, start_sec=0, end_sec=15)
-
-    from cat_watcher import import_local as importer_module
 
     real_atomic_copy = importer_module._atomic_copy_with_fsync
 
