@@ -1,4 +1,4 @@
-"""Integration tests for the cat-watcher timeline routes (Task 23).
+"""Integration tests for the cat-watcher timeline routes.
 
 Covers ``GET /`` and ``GET /timeline`` rendering: SVG lanes per camera, range-preset switching via
 the ``range`` query parameter, density bucketing for windows past the 24h threshold (per spec
@@ -9,25 +9,24 @@ are presentation details that the route's contract is silent on; they pin observ
 element classes, marker counts, ``aria-label`` text — instead.
 """
 
-import base64
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from cat_watcher.db import AlertSent, AlertType, Camera, Clip
+from db_helpers import AUTH_HEADER, seed_cat_subject, tag_clip_frame
+
+from cat_watcher.db import AlertSent, AlertType, Camera, Clip, create_engine
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from fastapi.testclient import TestClient
+    from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
-
-
-_AUTH_HEADER = {"Authorization": f"Basic {base64.b64encode(b'admin:pw').decode()}"}
 
 
 def _seed_camera_row(
@@ -77,10 +76,9 @@ def _state_clip_kwargs(
     reference_now: datetime,
     label: str,
     *,
-    manual_has_cat: bool | None = None,
     analysis_error: str | None = None,
 ) -> dict[str, object]:
-    """Build a Clip-row kwargs dict that includes ``manual_has_cat`` / ``analysis_error``.
+    """Build a Clip-row kwargs dict that includes ``analysis_error``.
 
     ``_seed_clip_rows`` doesn't surface those fields, so tests that need them construct rows
     directly via this helper to keep field boilerplate out of test bodies.
@@ -95,8 +93,7 @@ def _state_clip_kwargs(
         "file_path": f"clips/pantry/state-{label}.mp4",
         "thumb_path": f"thumbs/pantry/state-{label}.jpg",
         "file_size_bytes": 1024,
-        "has_cat": manual_has_cat is True,
-        "manual_has_cat": manual_has_cat,
+        "has_cat": False,
         "analysis_error": analysis_error,
         "detector_version": "yolov11n@deadbeef",
         "ingested_at": reference_now,
@@ -126,7 +123,7 @@ def _seed_alert_row(
 def test_root_renders_svg_with_camera_display_name(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /`` returns 200 with an inline ``<svg>`` and the camera's display name in a lane label."""
@@ -136,8 +133,8 @@ def test_root_renders_svg_with_camera_display_name(
     now_ish = datetime.now(UTC)
     _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=[timedelta(hours=2)], reference_now=now_ish)
 
-    with web_test_client(config) as client:
-        response = client.get("/", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "<svg" in response.text
@@ -147,7 +144,7 @@ def test_root_renders_svg_with_camera_display_name(
 def test_timeline_route_accepts_range_param(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /timeline?range=6h`` renders a 200 with an SVG lane container."""
@@ -163,8 +160,8 @@ def test_timeline_route_accepts_range_param(
         reference_now=fixed_now,
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=6h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=6h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert 'class="timeline-svg"' in response.text
@@ -173,7 +170,7 @@ def test_timeline_route_accepts_range_param(
 def test_timeline_renders_per_clip_markers_under_24h(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """A 6h window with 10 seeded clips renders 10 distinct per-clip ``<rect class="clip">`` elements.
@@ -188,8 +185,8 @@ def test_timeline_renders_per_clip_markers_under_24h(
     offsets = [timedelta(hours=5) - timedelta(minutes=i * 30) for i in range(10)]
     _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=offsets, reference_now=now_ish)
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=6h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=6h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     # Per-clip SVG markers carry ``<rect class="clip ...">`` (the leading ``clip`` plus modifier
@@ -203,7 +200,7 @@ def test_timeline_renders_per_clip_markers_under_24h(
 def test_timeline_buckets_clips_above_24h_threshold(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """A 7d window collapses 50 same-hour clips into a single heatmap cell whose ``aria-label`` includes the count.
@@ -222,8 +219,8 @@ def test_timeline_buckets_clips_above_24h_threshold(
     offsets = [base + timedelta(seconds=i * 60) for i in range(50)]
     _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=offsets, reference_now=now_ish)
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=7d", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=7d", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert 'class="clip"' not in response.text
@@ -235,7 +232,7 @@ def test_timeline_buckets_clips_above_24h_threshold(
 def test_bucket_opacity_scales_per_lane_at_7d(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """At 7d, each bucket rect carries an ``opacity`` attribute scaled to the per-lane max count."""
@@ -258,8 +255,8 @@ def test_bucket_opacity_scales_per_lane_at_7d(
         reference_now=now_ish,
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=7d", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=7d", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
@@ -272,7 +269,7 @@ def test_bucket_opacity_scales_per_lane_at_7d(
 def test_timeline_renders_offline_banner_when_storage_root_unmounted(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """When ``storage_root`` is missing, the response includes the offline banner from spec §4.13."""
@@ -284,8 +281,8 @@ def test_timeline_renders_offline_banner_when_storage_root_unmounted(
     # returns False without raising.
     storage_root.rmdir()
 
-    with web_test_client(config) as client:
-        response = client.get("/", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "External storage offline" in response.text
@@ -294,7 +291,7 @@ def test_timeline_renders_offline_banner_when_storage_root_unmounted(
 def test_timeline_header_carries_htmx_attrs_and_banner_aria_live(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Range presets carry hx-indicator + hx-push-url; storage banner carries aria-live."""
@@ -305,8 +302,8 @@ def test_timeline_header_carries_htmx_attrs_and_banner_aria_live(
     # trick the existing test_timeline_renders_offline_banner_when_storage_root_unmounted uses.
     storage_root.rmdir()
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=24h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=24h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
@@ -320,7 +317,7 @@ def test_timeline_header_carries_htmx_attrs_and_banner_aria_live(
 def test_timeline_omits_offline_banner_when_storage_root_mounted(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """A mounted storage root produces no offline banner."""
@@ -328,8 +325,8 @@ def test_timeline_omits_offline_banner_when_storage_root_mounted(
     config = make_config(internal_root, storage_root)
     _ = _seed_camera_row(db_session_factory, internal_root)
 
-    with web_test_client(config) as client:
-        response = client.get("/", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "External storage offline" not in response.text
@@ -338,7 +335,7 @@ def test_timeline_omits_offline_banner_when_storage_root_mounted(
 def test_timeline_thumb_imgs_reference_placeholder_in_onerror(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Each rendered thumbnail ``<img>`` carries an ``onerror`` that points at the bundled placeholder.
@@ -353,8 +350,8 @@ def test_timeline_thumb_imgs_reference_placeholder_in_onerror(
     now_ish = datetime.now(UTC)
     _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=[timedelta(hours=1)], reference_now=now_ish)
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=6h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=6h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "clip-placeholder.svg" in response.text
@@ -364,7 +361,7 @@ def test_timeline_thumb_imgs_reference_placeholder_in_onerror(
 def test_root_lane_includes_alert_marker(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """An ``alerts_sent`` row inside the window renders a vertical marker tagged with the alert type."""
@@ -383,8 +380,8 @@ def test_root_lane_includes_alert_marker(
         alert_type=AlertType.FREQUENCY,
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     # Alert markers carry the alert type as a label so operators can read them at a glance.
@@ -394,7 +391,7 @@ def test_root_lane_includes_alert_marker(
 def test_timeline_renders_time_axis_with_per_range_tick_count(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """The SVG includes a <g class="time-axis"> group whose tick count matches the per-range cadence."""
@@ -416,9 +413,9 @@ def test_timeline_renders_time_axis_with_per_range_tick_count(
         ("30d", 30, "tick interval 1d, 30d window -> 30 ticks"),
     ]
 
-    with web_test_client(config) as client:
+    with alembic_web_test_client(config) as client:
         for range_key, expected_ticks, msg in cases:
-            response = client.get(f"/timeline?range={range_key}", headers=_AUTH_HEADER)
+            response = client.get(f"/timeline?range={range_key}", headers=AUTH_HEADER)
             assert response.status_code == 200
             body = response.text
             assert '<g class="time-axis">' in body, f"{range_key}: missing time-axis group"
@@ -430,7 +427,7 @@ def test_timeline_renders_time_axis_with_per_range_tick_count(
 def test_timeline_renders_day_boundary_markers_when_window_crosses_midnight(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """At 24h, the time-axis renders a day-boundary marker per midnight in display_timezone."""
@@ -446,8 +443,8 @@ def test_timeline_renders_day_boundary_markers_when_window_crosses_midnight(
         reference_now=datetime.now(UTC),
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=24h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=24h", headers=AUTH_HEADER)
 
     # A 24h window in display_timezone always crosses exactly one midnight boundary.
     assert response.status_code == 200
@@ -457,7 +454,7 @@ def test_timeline_renders_day_boundary_markers_when_window_crosses_midnight(
 def test_thumb_card_renders_display_stamp_in_configured_timezone(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """At 6h/24h ranges the thumb strip renders one card per clip with HH:MM:SS in display_timezone."""
@@ -476,8 +473,8 @@ def test_thumb_card_renders_display_stamp_in_configured_timezone(
         reference_now=reference_now,
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/?range=24h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/?range=24h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     expected_local = (reference_now - timedelta(hours=4)).astimezone(ZoneInfo(config.web.display_timezone))
@@ -488,7 +485,7 @@ def test_thumb_card_renders_display_stamp_in_configured_timezone(
 def test_timeline_empty_state_links_to_next_longer_range(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """With no clips at 24h, the empty state surfaces a 'try 7d' CTA and a /cameras link."""
@@ -496,8 +493,8 @@ def test_timeline_empty_state_links_to_next_longer_range(
     config = make_config(internal_root, storage_root)
     _ = _seed_camera_row(db_session_factory, internal_root)  # camera but no clips
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=24h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=24h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
@@ -510,7 +507,7 @@ def test_timeline_empty_state_links_to_next_longer_range(
 def test_timeline_empty_state_omits_next_longer_link_at_30d(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """At the longest preset (30d), the empty state hides the next-longer-range CTA."""
@@ -518,8 +515,8 @@ def test_timeline_empty_state_omits_next_longer_link_at_30d(
     config = make_config(internal_root, storage_root)
     _ = _seed_camera_row(db_session_factory, internal_root)
 
-    with web_test_client(config) as client:
-        response = client.get("/timeline?range=30d", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/timeline?range=30d", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
@@ -531,7 +528,7 @@ def test_timeline_empty_state_omits_next_longer_link_at_30d(
 def test_thumb_card_li_carries_clip_css_classes(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Each <li> in the thumb strip carries the clip's css_classes so the state border applies."""
@@ -547,8 +544,8 @@ def test_thumb_card_li_carries_clip_css_classes(
         reference_now=fixed_now,
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/?range=24h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/?range=24h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     # The seeded clip has has_cat=True (i % 2 == 0 for i=0). Expect <li class="clip clip-cat">.
@@ -558,27 +555,154 @@ def test_thumb_card_li_carries_clip_css_classes(
 def test_thumb_card_renders_clip_manual_and_clip_error_state_classes(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """A manual-labeled clip emits ``clip-manual``; a detector-error clip emits ``clip-error``."""
+    """A reviewed clip with cat frame tagging emits ``clip-manual``; a detector-error clip emits ``clip-error``."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    reference_now = datetime.now(UTC).replace(microsecond=0)
+    with db_session_factory(internal_root) as session:
+        manual_clip = Clip(**_state_clip_kwargs(cam_id, reference_now, "manual"))
+        session.add(manual_clip)
+        session.add(Clip(**_state_clip_kwargs(cam_id, reference_now, "error", analysis_error="ffmpeg returned 1: bad header")))
+        session.flush()
+        manual_clip_id = manual_clip.id
+
+    # Tag the manual clip with a cat frame subject and mark it reviewed.
+    engine = _engine_for(internal_root)
+    try:
+        subj_id = seed_cat_subject(engine)
+        tag_clip_frame(engine, clip_id=manual_clip_id, subject_id=subj_id, reviewed_at=reference_now)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/?range=24h", headers=AUTH_HEADER).text
+
+    # Reviewed + cat-tagged frames: both clip-cat and clip-manual modifier classes present.
+    assert "clip-cat" in body, "expected cat-tagged reviewed clip to carry clip-cat class"
+    assert "clip-manual" in body, "expected cat-tagged reviewed clip to carry clip-manual class"
+    # Detector-error clip: clip-error modifier present on a thumb card.
+    assert "clip-error" in body, "expected detector-error clip to carry clip-error class"
+
+
+def _engine_for(internal_root: Path) -> Engine:
+    """Return a short-lived engine for the test DB so ``tag_clip_frame`` can write frames."""
+    return create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
+
+
+def test_clip_manual_badge_absent_for_unreviewed_clip_with_frame_membership(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A clip with cat-tagged frames but ``reviewed_at IS NULL`` must NOT carry ``clip-manual``.
+
+    Partially-tagged but unreviewed clips should not show the manual badge so the operator
+    knows the review is incomplete.
+    """
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    reference_now = datetime.now(UTC).replace(microsecond=0)
+    with db_session_factory(internal_root) as session:
+        clip = Clip(**_state_clip_kwargs(cam_id, reference_now, "unreviewed-tagged"))
+        session.add(clip)
+        session.flush()
+        clip_id = clip.id
+
+    engine = _engine_for(internal_root)
+    try:
+        subj_id = seed_cat_subject(engine)
+        tag_clip_frame(engine, clip_id=clip_id, subject_id=subj_id)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/?range=24h", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert "clip-manual" not in response.text, "unreviewed clip must not carry clip-manual badge"
+
+
+def test_clip_manual_badge_present_for_reviewed_clip_with_frame_membership(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A clip with cat-tagged frames AND ``reviewed_at IS NOT NULL`` carries ``clip-manual``."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    reference_now = datetime.now(UTC).replace(microsecond=0)
+    with db_session_factory(internal_root) as session:
+        clip = Clip(**_state_clip_kwargs(cam_id, reference_now, "reviewed-tagged"))
+        session.add(clip)
+        session.flush()
+        clip_id = clip.id
+
+    engine = _engine_for(internal_root)
+    try:
+        subj_id = seed_cat_subject(engine)
+        tag_clip_frame(engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=reference_now)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/?range=24h", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert "clip-manual" in response.text, "reviewed + tagged clip must carry clip-manual badge"
+
+
+def test_effective_has_cat_unreviewed_clip_uses_detector_verdict(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Unreviewed clip with ``has_cat=True`` renders as cat-positive; no ``clip-manual`` badge."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)
     reference_now = datetime.now(UTC).replace(microsecond=0)
-    # _seed_clip_rows doesn't surface manual_has_cat / analysis_error, so seed the two state
-    # variants directly. _state_clip_kwargs centralises the boilerplate fields per row.
+    kwargs = _state_clip_kwargs(cam_id, reference_now, "unreviewed-detector")
+    kwargs["has_cat"] = True
     with db_session_factory(internal_root) as session:
-        session.add(Clip(**_state_clip_kwargs(cam_id, reference_now, "manual", manual_has_cat=True)))
-        session.add(Clip(**_state_clip_kwargs(cam_id, reference_now, "error", analysis_error="ffmpeg returned 1: bad header")))
+        session.add(Clip(**kwargs))
 
-    with web_test_client(config) as client:
-        response = client.get("/?range=24h", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/?range=24h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
-    # Manual-confirmed cat: cat + manual modifier classes both present on the same <li>.
-    assert "clip-cat" in body, "expected manual-confirmed cat to carry clip-cat class"
-    assert "clip-manual" in body, "expected manual-confirmed cat to carry clip-manual class"
-    # Detector-error clip: clip-error modifier present on a thumb card.
-    assert "clip-error" in body, "expected detector-error clip to carry clip-error class"
+    assert "clip-cat" in body, "unreviewed clip with has_cat=True must render as cat-positive"
+    assert "clip-manual" not in body, "unreviewed clip must not carry clip-manual badge"
+
+
+def test_effective_has_cat_reviewed_clip_without_memberships_uses_detector(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Reviewed clip with no frame memberships falls back to detector verdict; no ``clip-manual``."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    reference_now = datetime.now(UTC).replace(microsecond=0)
+    # Reviewed but no frame subjects → has_manual_cat=FALSE in the view → effective=has_cat.
+    kwargs = _state_clip_kwargs(cam_id, reference_now, "reviewed-no-frames")
+    kwargs["has_cat"] = False
+    kwargs["reviewed_at"] = reference_now
+    with db_session_factory(internal_root) as session:
+        session.add(Clip(**kwargs))
+
+    with alembic_web_test_client(config) as client:
+        response = client.get("/?range=24h", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    body = response.text
+    assert "clip-no-cat" in body, "reviewed clip with no memberships and has_cat=False must render as no-cat"
+    assert "clip-manual" not in body, "clip without cat-tagged frames must not carry clip-manual badge"

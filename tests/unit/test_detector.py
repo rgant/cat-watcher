@@ -103,6 +103,8 @@ def test_detect_filters_below_confidence_threshold(synthetic_clip_path: Path) ->
     assert result.max_score == 0.20
     assert result.best_box_xyxy == (1.0, 2.0, 3.0, 4.0)
     assert all(sf.score == 0.20 for sf in result.scored_frames)
+    # Per-frame boxes are recorded regardless of threshold, so sub-threshold cat frames still carry one.
+    assert all(sf.box == (1.0, 2.0, 3.0, 4.0) for sf in result.scored_frames)
 
 
 def test_detect_filters_non_cat_classes(synthetic_clip_path: Path) -> None:
@@ -350,6 +352,22 @@ def test_scored_frame_carries_frame_ndarray(synthetic_clip_path: Path) -> None:
     assert offsets[0] > 0.0
 
 
+def test_scored_frame_carries_box_when_cat_hit(synthetic_clip_path: Path) -> None:
+    """A frame with a cat detection carries the highest-scoring box on ``ScoredFrame.box``."""
+    side_effect = [
+        _fake_results(cls_ids=[_COCO_CAT], confidences=[0.80], boxes=[[10.0, 20.0, 30.0, 40.0]]),
+        _fake_results(cls_ids=[], confidences=[], boxes=[]),
+        _fake_results(cls_ids=[_COCO_CAT], confidences=[0.60], boxes=[[5.0, 6.0, 7.0, 8.0]]),
+    ]
+    detector, _ = _make_detector(side_effect=side_effect, frames_to_sample=3)
+
+    result = detector.detect(synthetic_clip_path)
+
+    assert result.scored_frames[0].box == (10.0, 20.0, 30.0, 40.0)
+    assert result.scored_frames[1].box is None
+    assert result.scored_frames[2].box == (5.0, 6.0, 7.0, 8.0)
+
+
 def test_detect_samples_frames_at_distinct_timestamps(synthetic_clip_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ffmpeg is invoked with N distinct ``-ss <timestamp>`` values for ``frames_to_sample=N``."""
     per_frame = _fake_results(cls_ids=[], confidences=[], boxes=[])
@@ -360,7 +378,7 @@ def test_detect_samples_frames_at_distinct_timestamps(synthetic_clip_path: Path,
     def recording_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes] | subprocess.CompletedProcess[str]:
         if cmd[0].endswith("ffmpeg") and "-ss" in cmd:
             ffmpeg_timestamps.append(cmd[cmd.index("-ss") + 1])
-        return real_run(cmd, **kwargs)  # type: ignore[call-overload, no-any-return]  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType]
+        return real_run(cmd, **kwargs)  # type: ignore[call-overload, no-any-return]  # pyright: ignore[reportCallIssue, reportArgumentType, reportUnknownVariableType]  # opaque **kwargs pass-through to typed subprocess.run; see truncating_run above
 
     monkeypatch.setattr("cat_watcher.detector.subprocess.run", recording_run)
 

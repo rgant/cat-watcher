@@ -28,9 +28,11 @@ EXPECTED_TABLES: frozenset[str] = frozenset(
         "alembic_version",
         "alerts_sent",
         "cameras",
+        "clip_frame_subjects",
         "clip_frames",
         "clips",
         "heartbeats",
+        "subjects",
     },
 )
 
@@ -89,6 +91,71 @@ def test_no_db_url_raises_rather_than_creating_stub_file(tmp_path: Path, monkeyp
 
     # And critically — no stub DB file was written anywhere under tmp_path.
     assert not list(tmp_path.glob("**/*.sqlite"))
+
+
+def test_review_queue_schema_revision(alembic_cfg: Config, tmp_path: Path) -> None:
+    """After ``upgrade head``, the review-queue schema additions are present and legacy columns dropped.
+
+    Asserts the two new tables, the partial unique index, the new ``clip_frames`` and ``clips``
+    columns, the ``clip_label_summary`` view, and absence of the dropped ``manual_*`` columns.
+    """
+    command.upgrade(alembic_cfg, "head")
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'round.sqlite'}")
+    try:
+        inspector = inspect(engine)
+
+        # New tables
+        assert "subjects" in inspector.get_table_names()
+        assert "clip_frame_subjects" in inspector.get_table_names()
+
+        # Partial unique index on subjects (sqlite surfaces it via get_indexes)
+        subj_indexes = {idx["name"] for idx in inspector.get_indexes("subjects")}
+        assert "ux_subjects_kind_order_active" in subj_indexes
+
+        # clips carries reviewed_at for the review queue; the manual_* label columns are absent.
+        clip_cols = {col["name"] for col in inspector.get_columns("clips")}
+        assert "reviewed_at" in clip_cols
+        assert "manual_has_cat" not in clip_cols
+        assert "manual_label_at" not in clip_cols
+        assert "manual_label_notes" not in clip_cols
+
+        # New columns on clip_frames
+        frame_cols = {col["name"] for col in inspector.get_columns("clip_frames")}
+        assert "activity" in frame_cols
+        assert "bbox_xyxy" in frame_cols
+
+        # clip_label_summary view (SQLite reports views via get_view_names)
+        assert "clip_label_summary" in inspector.get_view_names()
+
+        # New index on clips
+        clip_indexes = {idx["name"] for idx in inspector.get_indexes("clips")}
+        assert "ix_clips_reviewed_at_start" in clip_indexes
+    finally:
+        engine.dispose()
+
+
+def test_drop_legacy_columns_downgrade_restores_them_nullable(alembic_cfg: Config, tmp_path: Path) -> None:
+    """Downgrading the head revision one step restores the three legacy ``manual_*`` columns NULLABLE.
+
+    The whole-chain ``downgrade base`` test can't catch a wrong ``add_column`` in this step because
+    later steps drop the ``clips`` table entirely. This downgrades exactly ``d301291abfcf`` →
+    ``f9e3f8032d8a`` so the restored columns survive to be inspected, per the spec's requirement that
+    ``downgrade()`` restore ``manual_has_cat / manual_label_at / manual_label_notes`` as NULLABLE.
+    """
+    command.upgrade(alembic_cfg, "head")
+    command.downgrade(alembic_cfg, "f9e3f8032d8a")  # pragma: allowlist secret
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'round.sqlite'}")
+    try:
+        inspector = inspect(engine)
+        legacy = {col["name"]: col for col in inspector.get_columns("clips") if col["name"].startswith("manual_")}
+        assert set(legacy) == {"manual_has_cat", "manual_label_at", "manual_label_notes"}
+        assert all(col["nullable"] for col in legacy.values())
+        # The view is dropped and recreated across the batch alter, so it must still resolve.
+        assert "clip_label_summary" in inspector.get_view_names()
+    finally:
+        engine.dispose()
 
 
 def test_upgrade_head_matches_current_models(alembic_cfg: Config, tmp_path: Path) -> None:

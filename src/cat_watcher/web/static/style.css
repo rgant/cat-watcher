@@ -126,6 +126,8 @@ a:focus-visible {
   scrollbar-gutter: stable;
 
   overflow-inline: auto;
+
+  /* stylelint-disable-next-line plugin/use-baseline -- logical longhand not yet Baseline */
   overscroll-behavior-inline: contain;
 
   /* Horizontal scroll on the rare phone too narrow to fit five short links — wrapping at 360px

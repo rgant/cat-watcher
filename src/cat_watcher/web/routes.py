@@ -1,53 +1,57 @@
 """HTTP routes for the cat-watcher web UI.
 
-This module owns:
+Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state``.
 
-* ``/health`` — auth-bypassed liveness probe.
-* ``/clips`` and ``/clips/{id}`` — clip listing + detail (HTML).
-* ``/media/clip/{id}.mp4`` — MP4 streaming with HTTP byte-Range support.
-* ``/media/thumb/{id}.jpg`` — thumbnail JPEG.
-* ``POST /clips/{id}/label`` and ``DELETE /clips/{id}/label`` — manual label set/clear; the POST
-  redirects 303 back to the detail page so the form survives a refresh.
-* ``/`` and ``/timeline`` — per-camera SVG activity timeline; switches between per-clip markers
-  and per-hour heatmap buckets at the 24h threshold (spec §4.7.1).
-* ``/cameras``, ``/stats``, ``/alerts`` — per-camera health, 30-day daily activity aggregation (with
-  manual-label override applied via ``COALESCE(manual_has_cat, has_cat)``), and alert dispatch
-  history.
-
-Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state`` — they do
-**not** instantiate their own engine or templates loader.
-
-**Storage-offline degradation (spec §4.13):** the ``/media/...`` routes distinguish two failure
-modes for missing files:
-
-* ``503 Service Unavailable`` — the external drive is offline (probed via
-  ``storage_root.is_dir()``). The timeline template's ``onerror`` handler swaps in a placeholder SVG
-  and the storage-offline banner shows.
-* ``410 Gone`` — the drive is mounted but this specific clip's file isn't on disk anymore (e.g.
-  retention sweep removed the file but hasn't yet pruned the row). Distinct response code keeps the
-  operator-visible signal in logs separable from the bulk-offline case.
+**Storage-offline degradation (spec §4.13):** ``/media/...`` returns ``503`` when ``storage_root``
+is offline, ``410`` when mounted but the file is gone.
 """
 
+import logging
 import operator
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Protocol, cast
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Form, HTTPException, Request, Response
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from sqlalchemy import Integer, desc, func, select
+from sqlalchemy import cast as sql_cast
 
-from cat_watcher.db import AlertSent, Camera, Clip, ClipFrame, Heartbeat, get_session
+from cat_watcher.db import (
+    AlertSent,
+    Camera,
+    Clip,
+    ClipFrame,
+    ClipFrameSubject,
+    ClipLabelSummary,
+    Heartbeat,
+    Subject,
+    get_session,
+)
+from cat_watcher.web._app_state import get_state
+from cat_watcher.web.clips_routes import clips_router
+
+__all__ = [
+    "alerts_router",
+    "cameras_router",
+    "clips_router",
+    "health_router",
+    "media_router",
+    "membership_router",
+    "review_router",
+    "stats_router",
+    "timeline_router",
+]
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from pathlib import Path
     from typing import TypedDict
 
-    from fastapi.templating import Jinja2Templates
     from sqlalchemy.engine import Engine
+    from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
 
@@ -56,27 +60,15 @@ if TYPE_CHECKING:
         name: str
         display_name: str
 
-
-class _AppState(Protocol):
-    """Typed view of the attributes :func:`cat_watcher.web.app.build_app` writes onto ``app.state``.
-
-    FastAPI types ``app.state`` as ``Any`` (it's a free-form attribute bag), so every read would
-    otherwise need a ``cast`` + ``# pyright: ignore[reportAny]`` pair. Centralizing the cast in
-    :func:`_state` and projecting through this protocol gives handlers fully-typed access to the
-    three pieces of shared state — engine, config, and templates — without per-callsite ceremony.
-    """
-
-    engine: Engine
-    config: Config
-    templates: Jinja2Templates
+    class _ClipLabelInfo(TypedDict):
+        effective_has_cat: bool
+        show_manual_badge: bool
 
 
-def _state(request: Request) -> _AppState:
-    return cast("_AppState", request.app.state)  # pyright: ignore[reportAny]  # FastAPI types ``request.app`` as Any
+logger = logging.getLogger(__name__)
 
 
 _AGENT_NAME_WEB = "web"
-_CLIPS_LIST_LIMIT = 200
 _THUMB_MEDIA_TYPE = "image/jpeg"
 _VIDEO_MEDIA_TYPE = "video/mp4"
 # Spec §4.7: ``/cameras`` shows the most recent N alerts per camera; 5 is the same N the design spec
@@ -89,8 +81,8 @@ _NO_CAMERA_PLACEHOLDER = "—"
 
 
 health_router = APIRouter()
-clips_router = APIRouter()
-label_router = APIRouter()
+review_router = APIRouter()
+membership_router = APIRouter()
 media_router = APIRouter()
 timeline_router = APIRouter()
 cameras_router = APIRouter()
@@ -121,7 +113,7 @@ async def health(request: Request) -> dict[str, str | None]:
     route does **not** write its own heartbeat; only the periodic background task in the lifespan
     keeps the row fresh.
     """
-    state = _state(request)
+    state = get_state(request)
     now = datetime.now(UTC)
     with get_session(state.engine) as session:
         hb = session.get(Heartbeat, _AGENT_NAME_WEB)
@@ -129,149 +121,84 @@ async def health(request: Request) -> dict[str, str | None]:
     return {"status": "ok", "heartbeat": heartbeat, "now": now.isoformat()}
 
 
-@clips_router.get("/clips")
-async def list_clips(
-    request: Request,
-    *,
-    camera: str | None = None,
-    has_cat: bool | None = None,
-    date_str: str | None = None,
-) -> object:
-    """Render the clip-listing page filtered by ``camera`` / ``has_cat`` / ``date_str``.
+@review_router.post("/clips/{clip_id}/reviewed", status_code=204)
+async def mark_clip_reviewed(request: Request, clip_id: int) -> Response:
+    """Set ``clips.reviewed_at`` to now, marking the operator review complete.
 
-    Ordering is ``start_ts DESC`` and the result set is capped at :data:`_CLIPS_LIST_LIMIT` so a
-    runaway query against a populated DB doesn't render a 50k-row page. The ``date_str`` filter
-    interprets dates as UTC days (``[start_of_day, start_of_day + 1d)``); the spec defers
-    timezone-aware filtering to a later iteration.
+    Idempotent: a clip already reviewed is left unchanged (its original timestamp is preserved).
+    Returns 204 on success (both the state-change and idempotent no-op cases) and 404 if the clip
+    row does not exist.
     """
-    state = _state(request)
-    display_tz = ZoneInfo(state.config.web.display_timezone)
-
-    stmt = select(Clip).join(Camera).order_by(desc(Clip.start_ts)).limit(_CLIPS_LIST_LIMIT)
-    if camera:
-        stmt = stmt.where(Camera.name == camera)
-    if has_cat is not None:
-        stmt = stmt.where(Clip.has_cat.is_(has_cat))
-    if date_str:
-        day = date.fromisoformat(date_str)
-        day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-        stmt = stmt.where(Clip.start_ts >= day_start).where(Clip.start_ts < day_start + timedelta(days=1))
-
+    state = get_state(request)
     with get_session(state.engine) as session:
-        clips = list(session.scalars(stmt))
-        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
-        # Build a {camera_id: display_name} mapping eagerly so the template can render the camera
-        # display name without triggering lazy-loaded attribute access on a closed session.
-        clip_rows = [_clip_summary(clip, cameras, display_tz=display_tz) for clip in clips]
-
-    return state.templates.TemplateResponse(
-        request,
-        "clips.html.jinja",
-        {
-            "clip_rows": clip_rows,
-            "cameras": cameras,
-            "filters": {"camera": camera, "has_cat": has_cat, "date": date_str},
-            "tz": state.config.web.display_timezone,
-        },
-    )
-
-
-@clips_router.get("/clips/{clip_id}")
-async def clip_detail(request: Request, clip_id: int) -> object:
-    """Render the detail page for ``clip_id``: video player + detection metadata + label form."""
-    state = _state(request)
-    display_tz = ZoneInfo(state.config.web.display_timezone)
-    confidence_threshold = state.config.detector.confidence_threshold
-
-    with get_session(state.engine) as session:
-        clip = session.get(Clip, clip_id)
+        clip = session.execute(select(Clip).where(Clip.id == clip_id)).scalar_one_or_none()
         if clip is None:
             raise HTTPException(status_code=404, detail="clip not found")
-        camera = session.get(Camera, clip.camera_id)
-        # Project ``clip.frames`` into plain dicts BEFORE expunge so the relationship's lazy load
-        # runs while the session is still live. Per-frame display strings + ``below_threshold`` are
-        # precomputed so the template stays free of arithmetic and threshold knowledge.
-        frames = [
-            {
-                "id": f.id,
-                "ordinal": f.ordinal,
-                "t_offset_seconds": f.t_offset_seconds,
-                "display_offset": f"{int(f.t_offset_seconds // 60):d}:{int(f.t_offset_seconds % 60):02d}",
-                "score": f.score,
-                "display_score": f"{f.score:.2f}",
-                "below_threshold": f.score < confidence_threshold,
-            }
-            for f in clip.frames
-        ]
-        # Global next/prev neighbors by ``start_ts`` — listing-order independent. Same-timestamp
-        # ties resolve via the index's tie-break; rare enough on a single-host ingest to ignore.
-        prev_clip_id = session.scalar(select(Clip.id).where(Clip.start_ts > clip.start_ts).order_by(Clip.start_ts.asc()).limit(1))
-        next_clip_id = session.scalar(select(Clip.id).where(Clip.start_ts < clip.start_ts).order_by(desc(Clip.start_ts)).limit(1))
-        # Detach the rows from the session so the template can read attributes after exit.
-        session.expunge(clip)
-        if camera is not None:
-            session.expunge(camera)
-
-    # The Amcrest video has the camera-local clock burned into the OSD; rendering the heading in
-    # display_timezone keeps the page label aligned with what the user sees in the player.
-    display_start = clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
-
-    return state.templates.TemplateResponse(
-        request,
-        "clip_detail.html.jinja",
-        {
-            "clip": clip,
-            "camera": camera,
-            "frames": frames,
-            "display_start": display_start,
-            "prev_clip_id": prev_clip_id,
-            "next_clip_id": next_clip_id,
-            "tz": state.config.web.display_timezone,
-        },
-    )
+        if clip.reviewed_at is None:
+            clip.reviewed_at = datetime.now(UTC)
+            logger.info("clip_reviewed", extra={"clip_id": clip.id})
+        session.commit()
+    return Response(status_code=204)
 
 
-@label_router.post("/clips/{clip_id}/label")
-async def set_label(
-    request: Request,
-    clip_id: int,
-    *,
-    has_cat: Annotated[bool, Form()],
-    notes: Annotated[str, Form()] = "",
-) -> Response:
-    """Persist a manual label override for ``clip_id``.
+@review_router.delete("/clips/{clip_id}/reviewed", status_code=204)
+async def reopen_clip_review(request: Request, clip_id: int) -> Response:
+    """Clear ``clips.reviewed_at``, re-opening the clip for operator review.
 
-    Empty ``notes`` collapses to ``NULL`` so the column distinguishes "no notes provided" from a
-    deliberate empty-string label. Redirects 303 back to the detail page; that's the
-    POST-Redirect-GET pattern the form relies on so a browser refresh after submit doesn't resubmit
-    the form.
+    Idempotent: clearing an already-unreviewed clip is a no-op. Memberships
+    (``clip_frame_subjects``) are NOT touched — the re-open workflow keeps existing frame tags
+    intact. Returns 204 on success and 404 if the clip row does not exist.
     """
-    state = _state(request)
+    state = get_state(request)
     with get_session(state.engine) as session:
-        clip = session.get(Clip, clip_id)
+        clip = session.execute(select(Clip).where(Clip.id == clip_id)).scalar_one_or_none()
         if clip is None:
             raise HTTPException(status_code=404, detail="clip not found")
-        clip.manual_has_cat = has_cat
-        clip.manual_label_notes = notes or None
-        clip.manual_label_at = datetime.now(UTC)
-    return RedirectResponse(request.url_for("clip_detail", clip_id=clip_id), status_code=303)
+        if clip.reviewed_at is not None:
+            clip.reviewed_at = None
+            logger.info("clip_review_reopened", extra={"clip_id": clip.id})
+        session.commit()
+    return Response(status_code=204)
 
 
-@label_router.delete("/clips/{clip_id}/label")
-async def clear_label(request: Request, clip_id: int) -> Response:
-    """Clear all three manual-label columns for ``clip_id`` back to ``NULL``.
+def _validate_frame_membership(session: Session, *, clip_id: int, frame_id: int, subject_id: int) -> Subject:
+    if session.get(Clip, clip_id) is None:
+        raise HTTPException(status_code=404, detail="clip not found")
+    frame = session.get(ClipFrame, frame_id)
+    if frame is None or frame.clip_id != clip_id:
+        raise HTTPException(status_code=404, detail="frame not found")
+    subj = session.get(Subject, subject_id)
+    if subj is None:
+        raise HTTPException(status_code=404, detail="subject not found")
+    return subj
 
-    Returns 204 (No Content) so the htmx caller can ``window.location.reload()`` without parsing a
-    body. 404 if the clip row is gone.
-    """
-    state = _state(request)
+
+@membership_router.put("/clips/{clip_id}/frames/{frame_id}/subjects/{subject_id}", status_code=204)
+async def add_frame_subject(request: Request, clip_id: int, frame_id: int, subject_id: int) -> Response:
+    """Add ``subject_id`` to ``frame_id``'s subject set (insert-or-ignore). 409 if subject is archived."""
+    state = get_state(request)
     with get_session(state.engine) as session:
-        clip = session.get(Clip, clip_id)
-        if clip is None:
-            raise HTTPException(status_code=404, detail="clip not found")
-        clip.manual_has_cat = None
-        clip.manual_label_notes = None
-        clip.manual_label_at = None
+        subj = _validate_frame_membership(session, clip_id=clip_id, frame_id=frame_id, subject_id=subject_id)
+        if subj.archived_at is not None:
+            raise HTTPException(status_code=409, detail="subject is archived")
+        if session.get(ClipFrameSubject, (frame_id, subject_id)) is None:
+            session.add(ClipFrameSubject(clip_frame_id=frame_id, subject_id=subject_id))
+            session.commit()
+            logger.info("clip_frame_subject_added", extra={"clip_id": clip_id, "frame_id": frame_id, "subject_slug": subj.slug})
+    return Response(status_code=204)
+
+
+@membership_router.delete("/clips/{clip_id}/frames/{frame_id}/subjects/{subject_id}", status_code=204)
+async def remove_frame_subject(request: Request, clip_id: int, frame_id: int, subject_id: int) -> Response:
+    """Remove ``subject_id`` from ``frame_id``'s subject set (no-op if absent). Archived subjects allowed."""
+    state = get_state(request)
+    with get_session(state.engine) as session:
+        subj = _validate_frame_membership(session, clip_id=clip_id, frame_id=frame_id, subject_id=subject_id)
+        existing = session.get(ClipFrameSubject, (frame_id, subject_id))
+        if existing is not None:
+            session.delete(existing)
+            session.commit()
+            logger.info("clip_frame_subject_removed", extra={"clip_id": clip_id, "frame_id": frame_id, "subject_slug": subj.slug})
     return Response(status_code=204)
 
 
@@ -292,7 +219,7 @@ async def media_clip(request: Request, clip_id: int) -> FileResponse:
     malformed Range syntax, ``416`` for ranges that fall past EOF. Plus our 404/503/410 from
     :func:`_resolve_media_path`.
     """
-    state = _state(request)
+    state = get_state(request)
     file_path = _resolve_media_path(engine=state.engine, clip_id=clip_id, get_relpath=_clip_video_relpath, config=state.config)
     return FileResponse(file_path, media_type=_VIDEO_MEDIA_TYPE)
 
@@ -303,7 +230,7 @@ async def media_thumb(request: Request, clip_id: int) -> FileResponse:
 
     No Range support — thumbnails are small (a few KB) so a single ``FileResponse`` is fine.
     """
-    state = _state(request)
+    state = get_state(request)
     file_path = _resolve_media_path(engine=state.engine, clip_id=clip_id, get_relpath=_clip_thumb_relpath, config=state.config)
     return FileResponse(file_path, media_type=_THUMB_MEDIA_TYPE)
 
@@ -311,32 +238,9 @@ async def media_thumb(request: Request, clip_id: int) -> FileResponse:
 @media_router.get("/media/frame/{frame_id}.jpg", name="media_frame")
 async def media_frame(request: Request, frame_id: int) -> FileResponse:
     """Serve the per-frame JPEG keyed by ``ClipFrame.id``; same 404/503/410 semantics as :func:`media_thumb`."""
-    state = _state(request)
+    state = get_state(request)
     file_path = _resolve_frame_media_path(engine=state.engine, frame_id=frame_id, config=state.config)
     return FileResponse(file_path, media_type=_THUMB_MEDIA_TYPE)
-
-
-def _clip_summary(clip: Clip, cameras: list[Camera], *, display_tz: ZoneInfo) -> dict[str, object]:
-    """Project a Clip + its Camera into a flat dict the template can render without lazy loads.
-
-    ``display_start`` is precomputed in ``display_tz`` so the visible cell aligns with the
-    camera-OSD time burned into the video; the raw ``start_ts`` (UTC) is also passed for the HTML5
-    ``<time datetime="…">`` attribute.
-    """
-    by_id = {cam.id: cam for cam in cameras}
-    cam = by_id.get(clip.camera_id)
-    return {
-        "id": clip.id,
-        "camera_display_name": cam.display_name if cam is not None else "",
-        "camera_name": cam.name if cam is not None else "",
-        "source_filename": clip.source_filename,
-        "start_ts": clip.start_ts,
-        "display_start": clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "duration_seconds": clip.duration_seconds,
-        "has_cat": clip.has_cat,
-        "manual_has_cat": clip.manual_has_cat,
-        "max_score": clip.max_score,
-    }
 
 
 def _resolve_media_path(
@@ -418,7 +322,7 @@ def _render_timeline(request: Request, *, range_key: str) -> object:
     :data:`_TIMELINE_BUCKET_THRESHOLD` (spec §4.7.1). Below the threshold we hand the template a
     flat list of per-clip markers; above it we collapse to per-hour bins keyed by lane.
     """
-    state = _state(request)
+    state = get_state(request)
     delta = _TIMELINE_RANGES.get(range_key, _TIMELINE_RANGES[_TIMELINE_DEFAULT_RANGE])
     if range_key not in _TIMELINE_RANGES:
         # Snap to the default rather than 400-ing — operators following an old bookmark should still
@@ -482,12 +386,28 @@ def _load_timeline_data(
     with get_session(engine) as session:
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
         clips = list(session.scalars(select(Clip).where(Clip.start_ts >= start_window).order_by(Clip.start_ts)))
+        summary_by_clip = {
+            summary.clip_id: summary
+            for summary in session.scalars(
+                select(ClipLabelSummary).where(ClipLabelSummary.clip_id.in_([clip.id for clip in clips])),
+            )
+        }
         alerts = list(session.scalars(select(AlertSent).where(AlertSent.sent_at >= start_window).order_by(AlertSent.sent_at)))
         camera_rows = [_camera_lane(cam) for cam in cameras]
         clip_markers_by_camera: dict[int, list[dict[str, object]]] = defaultdict(list)
         for clip in clips:
+            summary = summary_by_clip[clip.id]
             clip_markers_by_camera[clip.camera_id].append(
-                _clip_marker(clip, start_window=start_window, total_seconds=total_seconds, display_tz=display_tz),
+                _clip_marker(
+                    clip,
+                    label={
+                        "effective_has_cat": summary.effective_has_cat,
+                        "show_manual_badge": summary.has_manual_cat and clip.reviewed_at is not None,
+                    },
+                    start_window=start_window,
+                    total_seconds=total_seconds,
+                    display_tz=display_tz,
+                ),
             )
         alert_markers = [_alert_marker(alert, start_window=start_window, total_seconds=total_seconds) for alert in alerts]
     return camera_rows, clip_markers_by_camera, alert_markers
@@ -537,6 +457,7 @@ def _camera_lane(cam: Camera) -> _CameraRow:
 def _clip_marker(
     clip: Clip,
     *,
+    label: _ClipLabelInfo,
     start_window: datetime,
     total_seconds: float,
     display_tz: ZoneInfo,
@@ -546,11 +467,16 @@ def _clip_marker(
     ``css_classes`` and ``display_stamp`` are precomputed (rather than templated as conditionals or
     filter chains) so djlint's HTML reformatter can't insert newlines into the class attribute, and
     so Jinja stays free of timezone arithmetic.
+
+    ``label`` carries ``effective_has_cat`` from the ``clip_label_summary`` view and
+    ``show_manual_badge`` (``has_manual_cat AND reviewed_at IS NOT NULL``) — the badge fires only
+    when the clip is reviewed AND has cat frame tags, not for partially-tagged unreviewed clips.
     """
     offset_seconds = (clip.start_ts - start_window).total_seconds()
-    effective = clip.has_cat if clip.manual_has_cat is None else clip.manual_has_cat
-    classes = ["clip", "clip-cat" if effective else "clip-no-cat"]
-    if clip.manual_has_cat is not None:
+    effective_has_cat = label["effective_has_cat"]
+    show_manual_badge = label["show_manual_badge"]
+    classes = ["clip", "clip-cat" if effective_has_cat else "clip-no-cat"]
+    if show_manual_badge:
         classes.append("clip-manual")
     if clip.analysis_error:
         classes.append("clip-error")
@@ -559,8 +485,8 @@ def _clip_marker(
         "start_ts": clip.start_ts,
         "duration_seconds": clip.duration_seconds,
         "max_score": clip.max_score,
-        "has_cat": effective,
-        "manual_label": clip.manual_has_cat is not None,
+        "has_cat": effective_has_cat,
+        "manual_label": show_manual_badge,
         "analysis_error": bool(clip.analysis_error),
         "css_classes": " ".join(classes),
         "display_stamp": clip.start_ts.astimezone(display_tz).strftime("%H:%M:%S"),
@@ -754,7 +680,7 @@ async def cameras_page(request: Request) -> object:
     N hours later". A separate non-camera-scoped section covers ``camera_id IS NULL`` alerts on
     ``/alerts``; this page is camera-scoped only.
     """
-    state = _state(request)
+    state = get_state(request)
     with get_session(state.engine) as session:
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
         recent_by_camera: dict[int, list[dict[str, object]]] = {}
@@ -782,14 +708,13 @@ async def stats_page(request: Request) -> object:
     """Render the 30-day daily clip aggregation (spec §4.7).
 
     Groups by ``(camera_id, date(start_ts))`` and computes total clips + cat-positive clips per
-    bucket. Cat-positive uses ``COALESCE(manual_has_cat, has_cat)`` so corrected manual labels flow
-    into the stat — a clip the detector got wrong but a human re-labeled is now counted on the
-    human's call. ``CAST … AS INTEGER`` is required because SQLite doesn't sum booleans directly;
-    with the cast each truthy bit becomes 1 and the SUM gives a per-day integer count.
+    bucket. Cat-positive reads ``effective_has_cat`` from the ``clip_label_summary`` view.
+    ``CAST … AS INTEGER`` is required because SQLite doesn't sum booleans directly; with the cast
+    each truthy bit becomes 1 and the SUM gives a per-day integer count.
     """
-    state = _state(request)
+    state = get_state(request)
     cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
-    cat_expr = func.coalesce(Clip.manual_has_cat, Clip.has_cat).cast(Integer)
+    cat_expr = sql_cast(ClipLabelSummary.effective_has_cat, Integer)
 
     with get_session(state.engine) as session:
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
@@ -801,9 +726,10 @@ async def stats_page(request: Request) -> object:
             select(
                 Clip.camera_id,
                 date_label,
-                func.count().label("total"),  # pylint: disable=not-callable
+                func.count().label("total"),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
                 func.sum(cat_expr).label("cat_total"),
             )
+            .join(ClipLabelSummary, ClipLabelSummary.clip_id == Clip.id)
             .where(Clip.start_ts >= cutoff)
             .group_by(Clip.camera_id, date_label)
             .order_by(date_label.desc(), Clip.camera_id),
@@ -826,7 +752,7 @@ async def alerts_page(request: Request) -> object:
     operators can scan the column for "which subsystem fired this" without losing the row to a blank
     cell.
     """
-    state = _state(request)
+    state = get_state(request)
     cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
 
     with get_session(state.engine) as session:

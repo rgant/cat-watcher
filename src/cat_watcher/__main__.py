@@ -2,7 +2,7 @@
 
 Sub-commands:
 
-* ``import-local`` (Task 17b) — fold an SD-card snapshot into the canonical layout.
+* ``import-local`` — fold an SD-card snapshot into the canonical layout.
 * ``status`` — print health digest: per-camera state, agent heartbeats with staleness, recent
   ``agent_starts`` counts, latest backup mtime, last 5 alerts per type.
 * ``inspect <clip_id>`` — dump a single clip's metadata + on-disk file presence/size.
@@ -16,7 +16,9 @@ Sub-commands:
   new filename or delete the existing file — there's no in-place update or checksum verification.
 * ``reanalyze [--camera N] [--limit N] [--all]`` — re-score clips whose detection failed (default
   filter: ``analysis_error IS NOT NULL``) or every clip (``--all``, e.g. after a model upgrade).
-  Preserves ``manual_has_cat`` exactly.
+  Preserves all ``clip_frame_subjects`` rows plus ``reviewed_at`` on ``clips``. Only detector-output
+  columns are touched: ``clips.has_cat``, ``clips.max_score``, ``clip_frames.score``,
+  ``clip_frames.bbox_xyxy``, and ``clips.detector_version``.
 * ``backup`` — proxy to :func:`cat_watcher.backup.run_backup` (same code path the LaunchAgent uses).
 * ``restore-backup <date>`` — copy a dated backup file onto ``<internal_root>/cat_watcher.sqlite``.
   Refuses while any cat-watcher LaunchAgent is loaded; operator must ``launchctl bootout`` first.
@@ -43,10 +45,24 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, desc, func, select
 
 from cat_watcher.amcrest_client import AmcrestClient, CameraError
+from cat_watcher.backup import run_backup
 from cat_watcher.config import CameraConfig, load_config
-from cat_watcher.db import AgentStart, AlertSent, Camera, Clip, ClipFrame, Heartbeat, create_engine, get_session
+from cat_watcher.db import (
+    DB_FILENAME,
+    AgentStart,
+    AlertSent,
+    Camera,
+    Clip,
+    ClipFrame,
+    ClipLabelSummary,
+    Heartbeat,
+    Subject,
+    engine_for,
+    get_session,
+)
 from cat_watcher.detector import Detector
 from cat_watcher.import_local import import_local
+from cat_watcher.labels import build_tag_summary, query_cat_frame_counts
 from cat_watcher.logging_setup import setup_logging
 from cat_watcher.logs_viewer import LogsNamespace, configure_logs_parser
 from cat_watcher.logs_viewer import RunArgs as LogsRunArgs
@@ -67,8 +83,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-_DB_FILENAME = "cat_watcher.sqlite"
 _BACKUPS_SUBDIR = "backups"
 _MODELS_SUBDIR = "models"
 _AGENT_NAMES_WITH_HEARTBEAT: tuple[str, ...] = ("poller", "alerts", "web")
@@ -169,6 +183,12 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = subparsers.add_parser("backup", parents=[common], help="Run a one-shot DB backup (proxy to backup agent)")
 
     restore = subparsers.add_parser("restore-backup", parents=[common], help="Copy a dated backup over the live SQLite")
+
+    _ = subparsers.add_parser(
+        "subjects",
+        parents=[common],
+        help="List configured subjects (active + archived) for verifying the config→DB sync",
+    )
     _ = restore.add_argument("backup_date", help="Backup date (YYYY-MM-DD) matching backups/cat_watcher-<date>.sqlite")
 
     logs = subparsers.add_parser("logs", parents=[common], help="Tail/filter structured JSONL logs from cat-watcher agents")
@@ -201,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "reanalyze": _run_reanalyze,
         "backup": _run_backup,
         "restore-backup": _run_restore_backup,
+        "subjects": _run_subjects,
     }
     handler = handlers.get(args.command)
     if handler is None:
@@ -210,20 +231,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     return handler(args)
 
 
-# --- shared handler helpers ----------------------------------------------------------------------
-
-
-def _open_engine(config: Config) -> Engine:
-    return create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
-
-
 # --- import-local --------------------------------------------------------------------------------
 
 
 def _run_import_local(args: _ParsedArgs) -> int:
     config = load_config(args.config)
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
-    engine = _open_engine(config)
+    engine = engine_for(config.internal_root)
     try:
         detector = (
             None
@@ -270,7 +284,7 @@ def _run_import_local(args: _ParsedArgs) -> int:
 def _run_status(args: _ParsedArgs) -> int:
     """Read-only DB digest; always exits 0 unless config fails."""
     config = load_config(args.config)
-    engine = _open_engine(config)
+    engine = engine_for(config.internal_root)
     now = datetime.now(UTC)
     print("cat-watcher status")
     print(f"  config: {config.internal_root}")
@@ -319,7 +333,7 @@ def _print_heartbeat_status(session: Session, *, now: datetime) -> None:
 def _print_agent_starts(session: Session, *, now: datetime) -> None:
     cutoff = now - timedelta(hours=_AGENT_STARTS_WINDOW_HOURS)
     rows = session.execute(
-        select(AgentStart.agent_name, func.count().label("n"))  # pylint: disable=not-callable
+        select(AgentStart.agent_name, func.count().label("n"))  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
         .where(AgentStart.started_at >= cutoff)
         .group_by(AgentStart.agent_name),
     ).all()
@@ -337,7 +351,7 @@ def _print_recent_alerts(session: Session, *, now: datetime) -> None:
     cutoff = now - timedelta(days=_RECENT_ALERTS_WINDOW_DAYS)
     alerts_by_type: dict[str, list[AlertSent]] = {}
     rows = session.scalars(
-        select(AlertSent)  # dprint-ignore
+        select(AlertSent)  # keep one query clause per line (ruff would join the chain)
         .where(AlertSent.sent_at >= cutoff)
         .order_by(desc(AlertSent.sent_at))
         .limit(_RECENT_ALERTS_QUERY_LIMIT),
@@ -389,16 +403,34 @@ def _fmt_delta(delta: timedelta) -> str:
 def _run_inspect(args: _ParsedArgs) -> int:
     """Return 0 on success, 3 when the clip id is not found."""
     config = load_config(args.config)
-    engine = _open_engine(config)
+    engine = engine_for(config.internal_root)
     try:
         with get_session(engine) as session:
             clip = session.get(Clip, args.clip_id)
             if clip is None:
                 print(f"clip {args.clip_id} not found", file=sys.stderr)
                 return _EXIT_NOT_FOUND
+            label_row = session.scalars(select(ClipLabelSummary).where(ClipLabelSummary.clip_id == args.clip_id)).one_or_none()
+            active_event_subjects = list(
+                session.scalars(
+                    select(Subject).where(Subject.archived_at.is_(None), Subject.kind == "event").order_by(Subject.display_order),
+                ),
+            )
             session.expunge(clip)
+            if label_row is not None:
+                session.expunge(label_row)
+            for subj in active_event_subjects:
+                session.expunge(subj)
+        cat_frame_counts = query_cat_frame_counts(engine, args.clip_id)
     finally:
         engine.dispose()
+
+    has_manual_cat = label_row.has_manual_cat if label_row is not None else False
+    tagged_slugs: set[str] = set()
+    if label_row is not None:
+        raw = label_row.tagged_subject_slugs
+        tagged_slugs = set(raw.split(",")) if raw else set()
+    tag_summary = build_tag_summary(cat_frame_counts, tagged_slugs, active_event_subjects)
 
     full_clip_path = config.storage_root / clip.file_path
     full_thumb_path = config.storage_root / clip.thumb_path
@@ -413,13 +445,14 @@ def _run_inspect(args: _ParsedArgs) -> int:
     print(f"  thumb_path       = {clip.thumb_path}")
     print(f"  on-disk thumb    = {full_thumb_path} {_size_or_missing(full_thumb_path)}")
     print(f"  has_cat          = {clip.has_cat}")
-    print(f"  manual_has_cat   = {clip.manual_has_cat}")
-    print(f"  manual_label_at  = {_fmt(clip.manual_label_at)}")
     print(f"  max_score        = {clip.max_score}")
     print(f"  frames_sampled   = {clip.frames_sampled}")
     print(f"  frames_with_cat  = {clip.frames_with_cat}")
     print(f"  detector_version = {clip.detector_version}")
     print(f"  ingested_at      = {clip.ingested_at.isoformat()}")
+    print(f"  reviewed_at      = {_fmt(clip.reviewed_at)}")
+    print(f"  has_manual_cat   = {has_manual_cat}")
+    print(f"  tag_summary      = {tag_summary}")
     if clip.analysis_error:
         print(f"  analysis_error   = {clip.analysis_error}")
     return _EXIT_OK
@@ -429,6 +462,61 @@ def _size_or_missing(path: Path) -> str:
     if not path.is_file():
         return "(missing)"
     return f"({path.stat().st_size} bytes)"
+
+
+# --- subjects ------------------------------------------------------------------------------------
+
+# Column widths for subjects tabular output. Chosen to accommodate typical slug/kind lengths without
+# truncation for the common case; the values are wider than the minimum so the table stays readable
+# after the first few real subjects are added.
+_SUBJECTS_COL_SLUG = 24
+_SUBJECTS_COL_KIND = 8
+_SUBJECTS_COL_ORDER = 6
+_SUBJECTS_COL_NAME = 24
+_SUBJECTS_COL_DESC = 36
+
+
+def _run_subjects(args: _ParsedArgs) -> int:
+    """Print all subjects (active + archived) ordered: active first, then by kind, display_order, slug."""
+    config = load_config(args.config)
+    engine = engine_for(config.internal_root)
+    try:
+        with get_session(engine) as session:
+            subjects = list(
+                session.scalars(
+                    select(Subject).order_by(
+                        Subject.archived_at.is_(None).desc(),
+                        Subject.kind,
+                        Subject.display_order,
+                        Subject.slug,
+                    ),
+                ),
+            )
+    finally:
+        engine.dispose()
+
+    header = (
+        f"{'slug':<{_SUBJECTS_COL_SLUG}}"
+        f"{'kind':<{_SUBJECTS_COL_KIND}}"
+        f"{'order':<{_SUBJECTS_COL_ORDER}}"
+        f"{'display_name':<{_SUBJECTS_COL_NAME}}"
+        f"{'description':<{_SUBJECTS_COL_DESC}}"
+        f"archived_at"
+    )
+    print(header)
+    print("-" * len(header))
+    for subj in subjects:
+        archived = subj.archived_at.isoformat() if subj.archived_at is not None else ""
+        description = (subj.description or "")[:_SUBJECTS_COL_DESC].rstrip()
+        print(
+            f"{subj.slug:<{_SUBJECTS_COL_SLUG}}"
+            f"{subj.kind:<{_SUBJECTS_COL_KIND}}"
+            f"{subj.display_order:<{_SUBJECTS_COL_ORDER}}"
+            f"{subj.display_name:<{_SUBJECTS_COL_NAME}}"
+            f"{description:<{_SUBJECTS_COL_DESC}}"
+            f"{archived}",
+        )
+    return _EXIT_OK
 
 
 # --- test-cameras --------------------------------------------------------------------------------
@@ -641,7 +729,7 @@ def _run_reanalyze(args: _ParsedArgs) -> int:
         frames_to_sample=config.detector.frames_to_sample,
         confidence_threshold=config.detector.confidence_threshold,
     )
-    engine = _open_engine(config)
+    engine = engine_for(config.internal_root)
     try:
         report, camera_display_by_id = _reanalyze_loop(engine=engine, config=config, detector=detector, args=args)
     finally:
@@ -737,10 +825,10 @@ def _reanalyze_one_clip(
 
 
 def _apply_detection_fields(clip: Clip, fields: DetectionFields) -> None:
-    """Copy ``detection_for`` field output onto ``clip``; leaves ``manual_has_cat`` untouched.
+    """Copy ``detection_for`` field output onto ``clip``; preserves ``clip_frame_subjects`` rows and ``reviewed_at``.
 
-    The web layer's COALESCE projection makes the manual override prevail over re-detection;
-    overwriting it here would silently discard operator labels.
+    Only detector-output columns are written: ``has_cat``, ``max_score``, ``frames_sampled``,
+    ``frames_with_cat``, ``best_box_xyxy``, ``detector_version``, and ``analysis_error``.
     """
     clip.has_cat = fields["has_cat"]
     clip.max_score = fields["max_score"]
@@ -798,8 +886,6 @@ def _run_backup(args: _ParsedArgs) -> int:
     an unmounted drive surfaces the same operator-actionable timeout instead of a raw
     FileNotFoundError.
     """
-    from cat_watcher.backup import run_backup  # noqa: PLC0415
-
     config = load_config(args.config)
     try:
         wait_for_storage_using_config(config)
@@ -807,7 +893,7 @@ def _run_backup(args: _ParsedArgs) -> int:
         print(f"backup: storage_root unavailable at {config.storage_root}", file=sys.stderr)
         return _EXIT_LOCKED
     out = run_backup(
-        db_path=config.internal_root / _DB_FILENAME,
+        db_path=config.internal_root / DB_FILENAME,
         backups_dir=config.storage_root / _BACKUPS_SUBDIR,
         now=datetime.now(UTC),
         keep_count=config.backup.keep_count,
@@ -837,7 +923,7 @@ def _run_restore_backup(args: _ParsedArgs) -> int:
             file=sys.stderr,
         )
         return _EXIT_LOCKED
-    target = config.internal_root / _DB_FILENAME
+    target = config.internal_root / DB_FILENAME
     _ = shutil.copy2(backup_path, target)
     print(f"restore-backup: copied {backup_path} -> {target}")
     return _EXIT_OK

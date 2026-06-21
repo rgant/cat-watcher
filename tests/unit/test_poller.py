@@ -13,12 +13,23 @@ from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations a
 from typing import TYPE_CHECKING, Self, final
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
+from db_helpers import scored_frames_with_boxes, tag_clip_frame
 from tz_helpers import pinned_tz
 
 from cat_watcher.amcrest_client import CameraUnreachableError, Recording
 from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
-from cat_watcher.db import AlertSent, AlertType, Camera, Clip, Heartbeat, PollStatus, get_session
+from cat_watcher.db import (
+    AlertSent,
+    AlertType,
+    Camera,
+    Clip,
+    Heartbeat,
+    PollStatus,
+    Subject,
+    get_session,
+)
 from cat_watcher.detector import DetectionResult, Detector, DetectorError
 from cat_watcher.poller import (
     PollerArgs,
@@ -38,6 +49,7 @@ from cat_watcher.poller import (
     update_camera_state_failure,
     update_camera_state_success,
     upsert_heartbeat,
+    write_per_frame_thumbs,
 )
 
 if TYPE_CHECKING:
@@ -76,46 +88,46 @@ def test_update_state_success_advances_last_polled_when_no_clips(db_engine: Engi
 
 
 def test_update_state_success_advances_last_clip_at_when_clips_ingested(
-    db_engine: Engine,
+    alembic_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
     """``last_clip_at`` becomes ``max(start_ts)`` of new clips when any are ingested."""
-    cam_id = seed_camera(db_engine)
+    cam_id = seed_camera(alembic_engine)
     clip1_ts = _NOW - timedelta(minutes=30)
     clip2_ts = _NOW - timedelta(minutes=10)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=clip1_ts, has_cat=False)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=clip2_ts, has_cat=False)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=clip1_ts, has_cat=False)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=clip2_ts, has_cat=False)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         clips = session.query(Clip).order_by(Clip.start_ts).all()
         update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
         assert cam.last_clip_at == clip2_ts  # the later one wins
 
 
 def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(
-    db_engine: Engine,
+    alembic_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
     """``last_cat_seen_at`` advances to the latest cat-positive clip; later non-cat clips don't move it back."""
-    cam_id = seed_camera(db_engine)
+    cam_id = seed_camera(alembic_engine)
     no_cat_ts = _NOW - timedelta(minutes=30)
     cat_ts = _NOW - timedelta(minutes=20)
     later_no_cat_ts = _NOW - timedelta(minutes=10)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=no_cat_ts, has_cat=False)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=cat_ts, has_cat=True)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=later_no_cat_ts, has_cat=False)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=no_cat_ts, has_cat=False)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=cat_ts, has_cat=True)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=later_no_cat_ts, has_cat=False)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         clips = session.query(Clip).order_by(Clip.start_ts).all()
         update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
         assert cam.last_cat_seen_at == cat_ts  # latest TRUE wins; later no-cat doesn't move it back
@@ -123,45 +135,25 @@ def test_update_state_success_advances_last_cat_seen_when_cat_positive_clip(
 
 
 def test_update_state_success_preserves_last_cat_seen_when_no_cat_positive(
-    db_engine: Engine,
+    alembic_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
     """A polling round with only no-cat clips leaves ``last_cat_seen_at`` untouched (no false reset)."""
     previous_cat_at = _NOW - timedelta(days=3)
-    cam_id = seed_camera(db_engine, last_cat_seen_at=previous_cat_at)
+    cam_id = seed_camera(alembic_engine, last_cat_seen_at=previous_cat_at)
     new_ts = _NOW - timedelta(minutes=10)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=new_ts, has_cat=False)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=new_ts, has_cat=False)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         clips = session.query(Clip).all()
         update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
         assert cam.last_cat_seen_at == previous_cat_at  # NOT moved to ``new_ts``
         assert cam.last_clip_at == new_ts
-
-
-def test_update_state_success_respects_manual_has_cat_override(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
-) -> None:
-    """``COALESCE(manual_has_cat, has_cat)``: a model-false clip with ``manual_has_cat=True`` is cat-positive."""
-    cam_id = seed_camera(db_engine)
-    ts = _NOW - timedelta(minutes=5)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=ts, has_cat=False, manual_has_cat=True)
-
-    with get_session(db_engine) as session:
-        clips = session.query(Clip).all()
-        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
-
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        assert cam.last_cat_seen_at == ts
 
 
 def test_update_state_success_clears_poll_status_since_on_recovery(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
@@ -309,9 +301,9 @@ def test_update_state_failure_preserves_poll_status_since_on_repeat(db_engine: E
 
 
 def test_update_state_success_preserves_last_polled_at_when_cursor_locked(
-    db_engine: Engine,
+    alembic_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
     """``advance_cursor=False`` preserves ``last_polled_at`` while still updating observation fields.
 
@@ -322,16 +314,16 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(
     """
     earlier = _NOW - timedelta(hours=1)
     cam_id = seed_camera(
-        db_engine,
+        alembic_engine,
         last_polled_at=earlier,
         poll_status=PollStatus.ERROR,
         poll_status_since=earlier,
         poll_error="prior failure",
     )
     clip_ts = _NOW - timedelta(minutes=30)
-    seed_clip(db_engine, camera_id=cam_id, start_ts=clip_ts, has_cat=True)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=clip_ts, has_cat=True)
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         clips = session.query(Clip).all()
         update_camera_state_success(
             session,
@@ -342,7 +334,7 @@ def test_update_state_success_preserves_last_polled_at_when_cursor_locked(
             advance_cursor=False,
         )
 
-    with get_session(db_engine) as session:
+    with get_session(alembic_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
         assert cam.last_polled_at == earlier  # NOT advanced — scoped query
@@ -548,6 +540,32 @@ def test_extract_thumbnail_produces_valid_jpeg(synthetic_clip_path: Path, tmp_pa
     assert thumb.is_file()
     head = thumb.read_bytes()[:3]
     assert head == b"\xff\xd8\xff", f"expected JPEG magic bytes, got {head!r}"
+
+
+# --- write_per_frame_thumbs: bbox_xyxy -----------------------------------------------------------
+
+
+def test_write_per_frame_thumbs_sets_bbox_xyxy_from_scored_frames(tmp_path: Path) -> None:
+    """Frames with a cat hit carry ``ClipFrame.bbox_xyxy = [x1, y1, x2, y2]``; frames without carry ``None``.
+
+    Drives ``write_per_frame_thumbs`` directly with in-memory stubs so the assertion is
+    independent of the full tick pipeline.
+    """
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    scored = scored_frames_with_boxes(stub_frame)
+    local_dt = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
+
+    _, clip_frames = write_per_frame_thumbs(
+        scored_frames=scored,
+        storage_root=tmp_path,
+        camera_name="pantry",
+        local_dt=local_dt,
+    )
+
+    assert len(clip_frames) == 3
+    assert clip_frames[0].bbox_xyxy == [10.0, 20.0, 30.0, 40.0]
+    assert clip_frames[1].bbox_xyxy is None
+    assert clip_frames[2].bbox_xyxy == [5.0, 6.0, 7.0, 8.0]
 
 
 # --- detection_fields_for ------------------------------------------------------------------------
@@ -1255,3 +1273,92 @@ def test_run_tick_emits_poll_tick_failed_warning_on_unexpected_exception(
     assert vars(rec)["error_msg"] == "boom"
     assert vars(rec)["cursor_before"] == prior.isoformat()
     assert vars(rec)["cursor_after"] == prior.isoformat()
+
+
+# --- update_camera_state_success: effective_has_cat via clip_label_summary view ------------------
+
+
+def _seed_subject(engine: Engine, *, slug: str, kind: str) -> int:
+    """Insert a Subject of ``kind`` ('cat' or 'event') and return its id."""
+    subj = Subject(slug=slug, display_name=slug.replace("-", " ").title(), kind=kind, display_order=1)
+    with get_session(engine) as session:
+        session.add(subj)
+        session.flush()
+        return subj.id
+
+
+def test_update_state_success_advances_cursor_on_cat_kind_membership(
+    alembic_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """``has_cat=FALSE`` clip reviewed with a ``kind='cat'`` membership → cursor advances.
+
+    The view's ``effective_has_cat`` returns TRUE when the clip is reviewed and has at least one
+    frame tagged with a ``kind='cat'`` subject.
+    """
+    cam_id = seed_camera(alembic_engine)
+    cat_subj_id = _seed_subject(alembic_engine, slug="marcel", kind="cat")
+    ts = _NOW - timedelta(minutes=5)
+    clip_id = seed_clip(alembic_engine, camera_id=cam_id, start_ts=ts, has_cat=False)
+    tag_clip_frame(alembic_engine, clip_id=clip_id, subject_id=cat_subj_id, reviewed_at=_NOW)
+
+    with get_session(alembic_engine) as session:
+        clips = session.query(Clip).all()
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
+
+    with get_session(alembic_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_cat_seen_at == ts
+
+
+def test_update_state_success_does_not_advance_cursor_on_event_only_membership(
+    alembic_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """``has_cat=FALSE`` clip reviewed with only a ``kind='event'`` membership → cursor stays put.
+
+    The view's ``has_manual_cat`` filters on ``s.kind = 'cat'`` only, so event-kind memberships
+    do not set ``effective_has_cat``; the cursor must not advance on event-only tagging.
+    """
+    previous_cat_at = _NOW - timedelta(days=1)
+    cam_id = seed_camera(alembic_engine, last_cat_seen_at=previous_cat_at)
+    event_subj_id = _seed_subject(alembic_engine, slug="litter-change", kind="event")
+    ts = _NOW - timedelta(minutes=5)
+    clip_id = seed_clip(alembic_engine, camera_id=cam_id, start_ts=ts, has_cat=False)
+    tag_clip_frame(alembic_engine, clip_id=clip_id, subject_id=event_subj_id, reviewed_at=_NOW)
+
+    with get_session(alembic_engine) as session:
+        clips = session.query(Clip).all()
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
+
+    with get_session(alembic_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_cat_seen_at == previous_cat_at  # NOT advanced; event-only does not count
+
+
+def test_update_state_success_advances_cursor_on_detector_cat_unreviewed(
+    alembic_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """``has_cat=TRUE`` unreviewed clip → cursor advances (detector verdict before review).
+
+    The view's ``effective_has_cat`` falls back to the detector's ``clips.has_cat`` when
+    ``reviewed_at IS NULL``.
+    """
+    cam_id = seed_camera(alembic_engine)
+    ts = _NOW - timedelta(minutes=5)
+    _ = seed_clip(alembic_engine, camera_id=cam_id, start_ts=ts, has_cat=True)
+
+    with get_session(alembic_engine) as session:
+        clips = session.query(Clip).all()
+        update_camera_state_success(session, camera_id=cam_id, ingested_clips=clips, now=_NOW, overlap_minutes=0)
+
+    with get_session(alembic_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.last_cat_seen_at == ts

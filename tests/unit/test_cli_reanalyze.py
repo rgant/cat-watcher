@@ -3,7 +3,8 @@
 Reanalyze re-scores clips whose detection failed (default filter ``analysis_error IS NOT NULL``) or
 every clip (``--all``). Each test patches the detector + the ``detection_for`` helper so the
 CPU-heavy YOLO path is never touched; what's exercised here is the row-update logic, the filter
-rules, the ``--limit`` / ``--camera`` flags, and the preserve-``manual_has_cat`` invariant.
+rules, the ``--limit`` / ``--camera`` flags, and the preservation invariant: all
+``clip_frame_subjects`` rows and ``clips.reviewed_at`` survive re-detection unchanged.
 """
 
 from collections.abc import Callable  # noqa: TC003  # runtime: pytest evaluates fixture annotations during collection
@@ -19,12 +20,13 @@ from cli_test_helpers import (
     read_clip,
     seed_camera,
     seed_clip,
+    set_clip_reviewed_at,
 )
 from sqlalchemy import select
 
 from cat_watcher.__main__ import _run_reanalyze
 from cat_watcher.config import Config  # noqa: TC001  # runtime: make_config callable annotation
-from cat_watcher.db import ClipFrame, create_engine, get_session
+from cat_watcher.db import ClipFrame, ClipFrameSubject, Subject, create_engine, get_session
 from cat_watcher.detector import Detector, ScoredFrame
 
 if TYPE_CHECKING:
@@ -174,32 +176,6 @@ def test_reanalyze_all_rescores_every_clip(tmp_path: Path, make_config: Callable
         _ = _run_reanalyze(make_handler_args(camera="", limit=None, all=True))
     clip = read_clip(config, clip_id)
     assert clip.detector_version == "yolov11n@new"
-
-
-def test_reanalyze_preserves_manual_has_cat(tmp_path: Path, make_config: Callable[..., Config]) -> None:
-    """Manual labels survive re-detection; ``has_cat`` reflects the new model output."""
-    config = config_with_dirs(tmp_path, make_config)
-    init_schema(config.internal_root)
-    _set_weights_present(config)
-    cam_id = seed_camera(config)
-    _ = _ensure_clip_file(config)
-    clip_id = seed_clip(
-        config,
-        camera_id=cam_id,
-        analysis_error="skipped: --no-detect",
-        manual_has_cat=True,
-        has_cat=False,
-    )
-
-    with (
-        patch("cat_watcher.__main__.load_config", return_value=config),
-        patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=False), ())),
-    ):
-        _ = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
-    clip = read_clip(config, clip_id)
-    assert clip.manual_has_cat is True
-    assert clip.has_cat is False  # detector said no; manual override (True) is preserved separately
 
 
 def test_reanalyze_skips_missing_files_with_warning(tmp_path: Path, make_config: Callable[..., Config]) -> None:
@@ -407,3 +383,70 @@ def test_reanalyze_all_backfills_clip_frames(tmp_path: Path, make_config: Callab
     frames = _read_clip_frames(config, clip_id)
     assert len(frames) == 4
     assert [frame.score for frame in frames] == [0.1, 0.85, 0.3, 0.6]
+
+
+def test_reanalyze_preserves_clip_frame_subjects(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """All ``clip_frame_subjects`` rows survive reanalyze; only detector-output columns are touched."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+    _set_weights_present(config)
+    cam_id = seed_camera(config)
+    _ = _ensure_clip_file(config)
+    clip_id = seed_clip(config, camera_id=cam_id, analysis_error="skipped: --no-detect")
+
+    engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            subj = Subject(slug="rufus", display_name="Rufus", kind="cat", display_order=1)
+            session.add(subj)
+            session.flush()
+            frame = ClipFrame(clip_id=clip_id, ordinal=0, t_offset_seconds=1.0, score=0.5, thumb_path="t.jpg")
+            session.add(frame)
+            session.flush()
+            session.add(ClipFrameSubject(clip_frame_id=frame.id, subject_id=subj.id))
+    finally:
+        engine.dispose()
+
+    subjects_before = 1
+    with (
+        patch("cat_watcher.__main__.load_config", return_value=config),
+        patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), ())),
+    ):
+        exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
+    assert exit_code == 0
+
+    engine2 = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        with get_session(engine2) as session:
+            frame_ids = [r[0] for r in session.execute(select(ClipFrame.id).where(ClipFrame.clip_id == clip_id)).all()]
+            subjects_after = len(
+                session.execute(select(ClipFrameSubject.clip_frame_id).where(ClipFrameSubject.clip_frame_id.in_(frame_ids))).all(),
+            )
+    finally:
+        engine2.dispose()
+
+    assert subjects_after == subjects_before
+
+
+def test_reanalyze_preserves_reviewed_at(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """``reviewed_at`` on the clip row is untouched by reanalyze."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+    _set_weights_present(config)
+    cam_id = seed_camera(config)
+    _ = _ensure_clip_file(config)
+    clip_id = seed_clip(config, camera_id=cam_id, analysis_error="skipped: --no-detect")
+    reviewed_ts = datetime(2026, 5, 20, 9, 0, 0, tzinfo=UTC)
+
+    set_clip_reviewed_at(config, clip_id, reviewed_ts)
+
+    with (
+        patch("cat_watcher.__main__.load_config", return_value=config),
+        patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), ())),
+    ):
+        exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
+    assert exit_code == 0
+
+    assert read_clip(config, clip_id).reviewed_at == reviewed_ts

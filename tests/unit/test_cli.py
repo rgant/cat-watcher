@@ -19,7 +19,9 @@ from cli_test_helpers import (
     open_seed_session,
     seed_camera,
     seed_clip,
+    set_clip_reviewed_at,
 )
+from db_helpers import apply_clip_label_summary_view
 from sqlalchemy.engine import Engine
 
 from cat_watcher.__main__ import (
@@ -33,17 +35,39 @@ from cat_watcher.__main__ import (
     _run_inspect,
     _run_restore_backup,
     _run_status,
+    _run_subjects,
     _run_test_cameras,
     _run_test_notification,
     main,
 )
 from cat_watcher.amcrest_client import AmcrestClient, CameraUnreachableError
 from cat_watcher.config import CameraConfig, Config, _resolve_config_path
-from cat_watcher.db import AgentStart, AlertSent, AlertType, Heartbeat
+from cat_watcher.db import (
+    AgentStart,
+    AlertSent,
+    AlertType,
+    ClipFrame,
+    ClipFrameSubject,
+    Heartbeat,
+    Subject,
+    create_engine,
+    get_session,
+)
 from cat_watcher.import_local import ImportReport
 from cat_watcher.notifier import EmailResult, NotifResult
 from cat_watcher.poller import PollerLockedError
 from cat_watcher.storage import StorageUnavailableError
+
+
+def _init_schema_with_view(config: Config) -> None:
+    """Create ORM tables and the ``clip_label_summary`` view for inspect CLI tests."""
+    init_schema(config.internal_root)
+    engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        apply_clip_label_summary_view(engine)
+    finally:
+        engine.dispose()
+
 
 # --- argparse wiring -----------------------------------------------------------------------------
 
@@ -111,7 +135,7 @@ def test_run_import_local_returns_zero_on_clean_report(tmp_path: Path, make_conf
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.ensure_storage_layout"),
-        patch("cat_watcher.__main__.create_engine", return_value=engine_mock),
+        patch("cat_watcher.__main__.engine_for", return_value=engine_mock),
         patch("cat_watcher.__main__.import_local", return_value=clean_report) as import_local_mock,
     ):
         exit_code = _run_import_local(args)
@@ -130,7 +154,7 @@ def test_run_import_local_returns_one_when_errors_present(tmp_path: Path, make_c
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.ensure_storage_layout"),
-        patch("cat_watcher.__main__.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.__main__.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.__main__.import_local", return_value=failing_report),
     ):
         exit_code = _run_import_local(args)
@@ -146,7 +170,7 @@ def test_run_import_local_returns_two_when_poller_lock_held(tmp_path: Path, make
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.ensure_storage_layout"),
-        patch("cat_watcher.__main__.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.__main__.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.__main__.import_local", side_effect=PollerLockedError("lock held")),
     ):
         exit_code = _run_import_local(args)
@@ -163,7 +187,7 @@ def test_run_import_local_disposes_engine_even_when_import_raises(tmp_path: Path
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.ensure_storage_layout"),
-        patch("cat_watcher.__main__.create_engine", return_value=engine_mock),
+        patch("cat_watcher.__main__.engine_for", return_value=engine_mock),
         patch("cat_watcher.__main__.import_local", side_effect=PollerLockedError("lock held")),
     ):
         _ = _run_import_local(args)
@@ -180,7 +204,7 @@ def test_run_import_local_skips_detector_when_no_detect(tmp_path: Path, make_con
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.ensure_storage_layout"),
-        patch("cat_watcher.__main__.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.__main__.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.__main__.import_local", return_value=clean_report) as import_local_mock,
         patch("cat_watcher.__main__.Detector", autospec=True) as detector_cls,
     ):
@@ -234,7 +258,7 @@ def test_inspect_prints_clip_metadata_and_size(
 ) -> None:
     """``inspect <id>`` shows the source filename and the on-disk file size."""
     config = config_with_dirs(tmp_path, make_config)
-    init_schema(config.internal_root)
+    _init_schema_with_view(config)
     cam_id = seed_camera(config)
     # Materialize a real file so the on-disk size assertion has a number to print.
     clip_dir = config.storage_root / "clips" / "pantry"
@@ -267,7 +291,7 @@ def test_inspect_returns_three_for_unknown_clip(
 ) -> None:
     """An unknown clip id returns the not-found exit code and writes to stderr."""
     config = config_with_dirs(tmp_path, make_config)
-    init_schema(config.internal_root)
+    _init_schema_with_view(config)
     with patch("cat_watcher.__main__.load_config", return_value=config):
         exit_code = _run_inspect(make_handler_args(clip_id=9999))
     assert exit_code == 3
@@ -291,7 +315,7 @@ def test_inspect_renders_missing_file_marker(
     when the row exists but the file is gone.
     """
     config = config_with_dirs(tmp_path, make_config)
-    init_schema(config.internal_root)
+    _init_schema_with_view(config)
     cam_id = seed_camera(config)
     clip_id = seed_clip(
         config,
@@ -309,6 +333,86 @@ def test_inspect_renders_missing_file_marker(
     assert "{cam." not in out
     assert "{cfg." not in out
     assert "NoneType" not in out
+
+
+def test_inspect_no_memberships_shows_default_label_fields(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A clip with no ``clip_frame_subjects`` rows renders ``reviewed_at = —``, ``has_manual_cat = False``, ``tag_summary = —``.
+
+    The legacy ``manual_has_cat`` and ``manual_label_at`` lines must not appear.
+    """
+    config = config_with_dirs(tmp_path, make_config)
+    _init_schema_with_view(config)
+    cam_id = seed_camera(config)
+    clip_id = seed_clip(config, camera_id=cam_id, source_filename="no-labels.mp4")
+    with patch("cat_watcher.__main__.load_config", return_value=config):
+        exit_code = _run_inspect(make_handler_args(clip_id=clip_id))
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "reviewed_at      = —" in out
+    assert "has_manual_cat   = False" in out
+    assert "tag_summary      = —" in out
+    assert "manual_has_cat   =" not in out
+    assert "manual_label_at  =" not in out
+
+
+def test_inspect_with_cat_memberships_shows_has_manual_cat_and_tag_summary(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A clip with cat subject memberships on 2 frames renders ``has_manual_cat = True`` and the correct ``tag_summary``."""
+    config = config_with_dirs(tmp_path, make_config)
+    _init_schema_with_view(config)
+    cam_id = seed_camera(config)
+    clip_id = seed_clip(config, camera_id=cam_id, source_filename="with-labels.mp4")
+
+    db_path = config.internal_root / "cat_watcher.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            subj = Subject(slug="marcel", display_name="Marcel", kind="cat", display_order=1)
+            session.add(subj)
+            session.flush()
+            frame_a = ClipFrame(clip_id=clip_id, ordinal=0, t_offset_seconds=1.0, score=0.9, thumb_path="t0.jpg")
+            frame_b = ClipFrame(clip_id=clip_id, ordinal=1, t_offset_seconds=2.0, score=0.8, thumb_path="t1.jpg")
+            session.add_all([frame_a, frame_b])
+            session.flush()
+            session.add(ClipFrameSubject(clip_frame_id=frame_a.id, subject_id=subj.id))
+            session.add(ClipFrameSubject(clip_frame_id=frame_b.id, subject_id=subj.id))
+    finally:
+        engine.dispose()
+
+    with patch("cat_watcher.__main__.load_config", return_value=config):
+        exit_code = _run_inspect(make_handler_args(clip_id=clip_id))
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "has_manual_cat   = True" in out
+    assert "tag_summary      = marcel: 2" in out
+
+
+def test_inspect_reviewed_clip_shows_iso_timestamp(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A clip with ``reviewed_at`` set shows the ISO timestamp in the ``reviewed_at`` line."""
+    config = config_with_dirs(tmp_path, make_config)
+    _init_schema_with_view(config)
+    cam_id = seed_camera(config)
+    clip_id = seed_clip(config, camera_id=cam_id, source_filename="reviewed.mp4")
+    reviewed_ts = datetime(2026, 6, 1, 10, 0, 0, tzinfo=UTC)
+
+    set_clip_reviewed_at(config, clip_id, reviewed_ts)
+
+    with patch("cat_watcher.__main__.load_config", return_value=config):
+        exit_code = _run_inspect(make_handler_args(clip_id=clip_id))
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert reviewed_ts.isoformat() in out
 
 
 # --- test-cameras sub-command --------------------------------------------------------------------
@@ -855,3 +959,82 @@ def test_status_prints_empty_markers_when_db_is_unpopulated(
     assert "{cam." not in out
     assert "{cfg." not in out
     assert "NoneType" not in out
+
+
+# --- subjects sub-command ------------------------------------------------------------------------
+
+
+def test_subjects_lists_all_rows_with_header(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With 6 seeded subjects the output contains a header line and one line per subject, exit 0."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+
+    db_path = config.internal_root / "cat_watcher.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            session.add(Subject(slug="marcel", display_name="Marcel", kind="cat", display_order=1))
+            session.add(Subject(slug="oscar", display_name="Oscar", kind="cat", display_order=2))
+            session.add(Subject(slug="pepper", display_name="Pepper", kind="cat", display_order=3))
+            session.add(Subject(slug="box-visit", display_name="Box Visit", kind="event", display_order=1))
+            session.add(Subject(slug="grooming", display_name="Grooming", kind="event", display_order=2))
+            session.add(Subject(slug="playtime", display_name="Playtime", kind="event", display_order=3))
+    finally:
+        engine.dispose()
+
+    with patch("cat_watcher.__main__.load_config", return_value=config):
+        exit_code = _run_subjects(make_handler_args())
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    expected_slugs = {"marcel", "oscar", "pepper", "box-visit", "grooming", "playtime"}
+    for slug in expected_slugs:
+        assert slug in out
+    # Header row must be present
+    assert "slug" in out
+    assert "kind" in out
+    # Should have at least header + 6 data rows
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) >= 7
+
+
+def test_subjects_shows_archived_at_iso_for_archived_row(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An archived subject renders its ``archived_at`` ISO timestamp in the output."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+
+    archived_ts = datetime(2026, 3, 15, 9, 30, 0, tzinfo=UTC)
+    db_path = config.internal_root / "cat_watcher.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            session.add(Subject(slug="felix", display_name="Felix", kind="cat", display_order=1))
+            session.add(
+                Subject(
+                    slug="old-visitor",
+                    display_name="Old Visitor",
+                    kind="event",
+                    display_order=1,
+                    archived_at=archived_ts,
+                ),
+            )
+    finally:
+        engine.dispose()
+
+    with patch("cat_watcher.__main__.load_config", return_value=config):
+        exit_code = _run_subjects(make_handler_args())
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "old-visitor" in out
+    assert archived_ts.isoformat() in out
+    # Active row must not show the archived timestamp
+    assert "felix" in out

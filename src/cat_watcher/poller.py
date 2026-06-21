@@ -36,17 +36,29 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from cat_watcher import retention, thumbnails
 from cat_watcher.alert_templates import render_poller_empty_after_quiet
 from cat_watcher.alerts import AlertCandidate, dispatch_candidate, evaluate_heartbeat_watchdog
 from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuthError, CameraUnreachableError
 from cat_watcher.config import Config, load_config
-from cat_watcher.db import AgentStart, AlertType, Camera, Clip, ClipFrame, Heartbeat, PollStatus, create_engine, get_session
+from cat_watcher.db import (
+    AgentStart,
+    AlertType,
+    Camera,
+    Clip,
+    ClipFrame,
+    ClipLabelSummary,
+    Heartbeat,
+    PollStatus,
+    engine_for,
+    get_session,
+)
 from cat_watcher.detector import Detector, DetectorError
 from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
+from cat_watcher.subjects_sync import sync_subjects_at_startup
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
@@ -124,8 +136,9 @@ def update_camera_state_success(  # noqa: PLR0913  # state-update sibling of upd
       (e.g. clock skew, manual edit), it wins. Scoped queries (``--since`` / ``--until`` /
       ``--limit``) pass ``advance_cursor=False`` and leave the cursor untouched.
     - ``last_clip_at`` advances to ``max(start_ts of new clips)`` only if any clips were ingested.
-    - ``last_cat_seen_at`` advances to the latest ``COALESCE(manual_has_cat, has_cat) = true`` clip
-      only if at least one new clip is cat-positive (model or operator override).
+    - ``last_cat_seen_at`` advances to the latest ``effective_has_cat = true`` clip (per the
+      ``clip_label_summary`` view: manual override when reviewed, detector verdict otherwise) only
+      if at least one new clip is cat-positive.
     - ``poll_status`` -> OK; ``poll_status_since`` -> NULL; ``poll_error`` -> NULL on the OK
       transition.
     """
@@ -138,11 +151,15 @@ def update_camera_state_success(  # noqa: PLR0913  # state-update sibling of upd
         cam.last_polled_at = target if cam.last_polled_at is None else max(target, cam.last_polled_at)
     if ingested_clips:
         cam.last_clip_at = max(clip.start_ts for clip in ingested_clips)
-    cat_positive_starts = [
-        clip.start_ts for clip in ingested_clips if (clip.manual_has_cat if clip.manual_has_cat is not None else clip.has_cat)
-    ]
-    if cat_positive_starts:
-        cam.last_cat_seen_at = max(cat_positive_starts)
+        ingested_ids = [clip.id for clip in ingested_clips]
+        latest_cat_ts = session.scalar(
+            select(func.max(Clip.start_ts))
+            .join(ClipLabelSummary, ClipLabelSummary.clip_id == Clip.id)
+            .where(Clip.id.in_(ingested_ids))
+            .where(ClipLabelSummary.effective_has_cat.is_(True)),
+        )
+        if latest_cat_ts is not None:
+            cam.last_cat_seen_at = latest_cat_ts
     cam.poll_status = PollStatus.OK
     cam.poll_status_since = None
     cam.poll_error = None
@@ -331,12 +348,14 @@ def write_per_frame_thumbs(
     per_clip_dir = thumbnails.per_clip_thumb_dir(camera_name, local_dt)
     (storage_root / per_clip_dir).mkdir(parents=True, exist_ok=True)
     records = thumbnails.write_clip_frames(scored_frames, storage_root=storage_root, per_clip_dir=per_clip_dir)
+    box_by_ordinal: dict[int, tuple[float, float, float, float] | None] = {sf.ordinal: sf.box for sf in scored_frames}
     clip_frames = [
         ClipFrame(
             ordinal=record.ordinal,
             t_offset_seconds=record.t_offset_seconds,
             score=record.score,
             thumb_path=record.thumb_relpath,
+            bbox_xyxy=list(box) if (box := box_by_ordinal.get(record.ordinal)) is not None else None,
         )
         for record in records
     ]
@@ -1030,8 +1049,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interval_seconds=config.storage.wait_interval_seconds,
                 timeout_seconds=config.storage.wait_timeout_seconds,
             )
-            engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+            engine = engine_for(config.internal_root)
             try:
+                if sync_subjects_at_startup(engine, config.subjects, logger) is None:
+                    return 2
                 detector = (
                     None
                     if args.no_detect or args.list_only

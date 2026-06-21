@@ -229,6 +229,56 @@ def test_import_local_writes_per_frame_thumbs(
         engine.dispose()
 
 
+def test_import_local_writes_bbox_xyxy_on_frames_with_detections(
+    tmp_path: Path,
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """Frames with a cat hit carry ``ClipFrame.bbox_xyxy``; frames without carry ``None``.
+
+    Proves the shared ``write_per_frame_thumbs`` path (called by both the poller and import_local
+    via ``materialize_and_persist_clip``) writes ``bbox_xyxy`` correctly on the SD-card import path.
+    """
+    internal_root, storage_root, source_root = _setup_dirs(tmp_path)
+    _materialize_engine(internal_root)
+
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    scored = (
+        ScoredFrame(ordinal=0, t_offset_seconds=1.0, score=0.8, frame=stub_frame, box=(10.0, 20.0, 30.0, 40.0)),
+        ScoredFrame(ordinal=1, t_offset_seconds=2.0, score=0.0, frame=stub_frame, box=None),
+        ScoredFrame(ordinal=2, t_offset_seconds=3.0, score=0.6, frame=stub_frame, box=(5.0, 6.0, 7.0, 8.0)),
+    )
+    detector = _make_detector(scored_frames=scored)
+    _ = _build_sd_tree(source_root, clip_payload=synthetic_clip_path.read_bytes())
+
+    engine = _open_engine(internal_root)
+    try:
+        report = import_local(
+            engine=engine,
+            config=make_config(internal_root, storage_root),
+            camera_name="pantry",
+            source_dir=source_root,
+            detector=detector,
+            limit=None,
+            now=_NOW,
+        )
+    finally:
+        engine.dispose()
+
+    assert report.ingested == 1
+
+    engine = _open_engine(internal_root)
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert len(clip.frames) == 3
+            assert clip.frames[0].bbox_xyxy == [10.0, 20.0, 30.0, 40.0]
+            assert clip.frames[1].bbox_xyxy is None
+            assert clip.frames[2].bbox_xyxy == [5.0, 6.0, 7.0, 8.0]
+    finally:
+        engine.dispose()
+
+
 def test_import_local_no_detect_skips_inference_and_marks_clip(
     tmp_path: Path,
     synthetic_clip_path: Path,

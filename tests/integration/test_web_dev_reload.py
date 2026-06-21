@@ -9,6 +9,7 @@ dev-only resource into production.
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from cat_watcher.db import Base, create_engine
 from cat_watcher.web.app import build_app
@@ -23,6 +24,48 @@ if TYPE_CHECKING:
 def _materialize_db(internal_root: Path) -> None:
     engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
     Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        _ = conn.execute(
+            text(
+                """
+                CREATE VIEW IF NOT EXISTS clip_label_summary AS
+                SELECT
+                    c.id AS clip_id,
+                    CAST(EXISTS (
+                        SELECT 1
+                        FROM clip_frames cf
+                        JOIN clip_frame_subjects cfs ON cfs.clip_frame_id = cf.id
+                        JOIN subjects s ON s.id = cfs.subject_id
+                        WHERE cf.clip_id = c.id AND s.kind = 'cat'
+                    ) AS INTEGER) AS has_manual_cat,
+                    CAST(
+                        CASE
+                            WHEN c.reviewed_at IS NULL THEN c.has_cat
+                            ELSE EXISTS (
+                                SELECT 1
+                                FROM clip_frames cf
+                                JOIN clip_frame_subjects cfs ON cfs.clip_frame_id = cf.id
+                                JOIN subjects s ON s.id = cfs.subject_id
+                                WHERE cf.clip_id = c.id AND s.kind = 'cat'
+                            )
+                        END
+                    AS INTEGER) AS effective_has_cat,
+                    COALESCE((
+                        SELECT GROUP_CONCAT(slug_ordered.slug, ',')
+                        FROM (
+                            SELECT DISTINCT s.slug AS slug, s.kind AS kind, s.display_order AS display_order
+                            FROM clip_frames cf
+                            JOIN clip_frame_subjects cfs ON cfs.clip_frame_id = cf.id
+                            JOIN subjects s ON s.id = cfs.subject_id
+                            WHERE cf.clip_id = c.id
+                            ORDER BY s.kind, s.display_order
+                        ) AS slug_ordered
+                    ), '') AS tagged_subject_slugs
+                FROM clips c
+                """,
+            ),
+        )
+        conn.commit()
     engine.dispose()
 
 

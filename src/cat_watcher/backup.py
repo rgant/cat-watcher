@@ -30,9 +30,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from cat_watcher.config import load_config
-from cat_watcher.db import AgentStart, create_engine, get_session
+from cat_watcher.db import DB_FILENAME, AgentStart, create_engine, get_session
 from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
+from cat_watcher.subjects_sync import sync_subjects_at_startup
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _AGENT_NAME = "backup"
-_DB_FILENAME = "cat_watcher.sqlite"
 _BACKUPS_DIR = "backups"
 _BACKUP_FILENAME_TEMPLATE = "cat_watcher-{date}.sqlite"
 _BACKUP_GLOB = "cat_watcher-*.sqlite"
@@ -132,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
 
     now = datetime.now(UTC)
-    db_path = config.internal_root / _DB_FILENAME
+    db_path = config.internal_root / DB_FILENAME
     return _record_start_and_back_up(config=config, db_path=db_path, now=now)
 
 
@@ -145,6 +145,8 @@ def _record_start_and_back_up(*, config: Config, db_path: Path, now: datetime) -
     """
     engine = create_engine(f"sqlite:///{db_path}")
     try:
+        if sync_subjects_at_startup(engine, config.subjects, logger) is None:
+            return 2
         with get_session(engine) as session:
             session.add(AgentStart(agent_name=_AGENT_NAME, started_at=now))
         backup_path = run_backup(

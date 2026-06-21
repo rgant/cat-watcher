@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, override
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Dialect,
     Enum,
@@ -33,6 +34,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy import (
     create_engine as _sa_create_engine,
@@ -48,6 +50,7 @@ from sqlalchemy.types import JSON, TypeDecorator, TypeEngine
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from pathlib import Path
 
     from sqlalchemy.engine import Engine
     from sqlalchemy.engine.interfaces import DBAPIConnection
@@ -56,6 +59,7 @@ if TYPE_CHECKING:
 
 
 __all__ = (
+    "DB_FILENAME",
     "AgentStart",
     "AlertSent",
     "AlertType",
@@ -63,12 +67,20 @@ __all__ = (
     "Camera",
     "Clip",
     "ClipFrame",
+    "ClipFrameSubject",
+    "ClipLabelSummary",
     "Heartbeat",
     "PollStatus",
+    "Subject",
     "UtcDateTime",
     "create_engine",
+    "engine_for",
     "get_session",
 )
+
+
+DB_FILENAME = "cat_watcher.sqlite"
+"""Filename of the live SQLite database under ``internal_root`` (see :func:`engine_for`)."""
 
 
 class UtcDateTime(TypeDecorator[datetime]):  # pylint: disable=too-many-ancestors  # SQLAlchemy TypeDecorator MRO
@@ -125,6 +137,10 @@ class UtcDateTime(TypeDecorator[datetime]):  # pylint: disable=too-many-ancestor
         return datetime
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class PollStatus(enum.Enum):
     """Poll-loop health for a single camera; surfaced in the web UI status badge."""
 
@@ -176,7 +192,12 @@ class Camera(Base):
 
 
 class Clip(Base):
-    """One row per ingested clip; ``(camera_id, source_filename)`` is the idempotency key."""
+    """One row per ingested clip; ``(camera_id, source_filename)`` is the idempotency key.
+
+    Detector verdict lives on ``has_cat``; operator confirmation is stamped on ``reviewed_at``.
+    The ``clip_label_summary`` view derives ``effective_has_cat`` from frame-subject tagging when
+    the clip is reviewed, falling back to the detector verdict otherwise.
+    """
 
     __tablename__: str = "clips"
 
@@ -198,11 +219,7 @@ class Clip(Base):
     detector_version: Mapped[str] = mapped_column(String(128), nullable=False)
     ingested_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     analysis_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # Three-state user correction: True (yes), False (no), NULL (no manual label).
-    # The web UI projects ``COALESCE(manual_has_cat, has_cat)``; all three states matter.
-    manual_has_cat: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    manual_label_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
-    manual_label_notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     camera: Mapped[Camera] = relationship(back_populates="clips")
     # ``passive_deletes=True`` defers row removal to the DB-level ``ondelete=CASCADE`` on
@@ -219,6 +236,7 @@ class Clip(Base):
         UniqueConstraint("camera_id", "source_filename", name="uq_clips_camera_source"),
         Index("ix_clips_camera_start", "camera_id", "start_ts"),
         Index("ix_clips_camera_hascat_start", "camera_id", "has_cat", "start_ts"),
+        Index("ix_clips_reviewed_at_start", "reviewed_at", "start_ts"),
     )
 
 
@@ -239,13 +257,87 @@ class ClipFrame(Base):
     t_offset_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     score: Mapped[float] = mapped_column(Float, nullable=False)
     thumb_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    activity: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bbox_xyxy: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
 
     clip: Mapped[Clip] = relationship(back_populates="frames")
+    subjects: Mapped[list[ClipFrameSubject]] = relationship(
+        back_populates="frame",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__: tuple[SchemaItem, ...] = (
         UniqueConstraint("clip_id", "ordinal", name="uq_clip_frames_clip_ordinal"),
         Index("ix_clip_frames_clip", "clip_id"),
     )
+
+
+class Subject(Base):
+    """One row per taggable subject (cat or event) shown in the review UI.
+
+    ``kind`` is constrained to ``'cat'`` or ``'event'`` via a CHECK constraint in the migration.
+    Active (non-archived) subjects are unique on ``(kind, display_order)`` via the partial index
+    ``ux_subjects_kind_order_active`` — archived subjects may reuse old display positions.
+    """
+
+    __tablename__: str = "subjects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=_utc_now)
+
+    frame_subjects: Mapped[list[ClipFrameSubject]] = relationship(
+        back_populates="subject",
+    )
+
+    __table_args__: tuple[SchemaItem, ...] = (
+        CheckConstraint("kind IN ('cat', 'event')", name="ck_subjects_kind"),
+        Index(
+            "ux_subjects_kind_order_active",
+            "kind",
+            "display_order",
+            unique=True,
+            sqlite_where=text("archived_at IS NULL"),
+        ),
+    )
+
+
+class ClipFrameSubject(Base):
+    """Junction row linking a ``ClipFrame`` to a ``Subject``; composite PK ``(clip_frame_id, subject_id)``.
+
+    FK to ``clip_frames.id`` uses ``ON DELETE CASCADE`` so deleting a frame removes its taggings.
+    FK to ``subjects.id`` uses ``ON DELETE RESTRICT`` to prevent accidental subject deletion while
+    tags exist. The reverse index on ``subject_id`` supports looking up all frames tagged with a
+    given subject.
+    """
+
+    __tablename__: str = "clip_frame_subjects"
+
+    clip_frame_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("clip_frames.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    subject_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("subjects.id", ondelete="RESTRICT"),
+        primary_key=True,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=_utc_now)
+
+    frame: Mapped[ClipFrame] = relationship(back_populates="subjects")
+    subject: Mapped[Subject] = relationship(back_populates="frame_subjects")
+
+    __table_args__: tuple[SchemaItem, ...] = (Index("ix_clip_frame_subjects_subject", "subject_id", "clip_frame_id"),)
 
 
 class AlertSent(Base):
@@ -298,6 +390,71 @@ class AgentStart(Base):
     __table_args__: tuple[SchemaItem, ...] = (Index("ix_agent_starts_name_started", "agent_name", "started_at"),)
 
 
+class _ViewBase(DeclarativeBase):
+    """Declarative base for read-only DB views.
+
+    Its ``metadata`` stays separate from ``Base.metadata`` so ``Base.metadata.create_all`` never
+    emits table DDL for a view — the migration owns the ``CREATE VIEW``.
+    """
+
+
+class ClipLabelSummary(_ViewBase):
+    """Typed ORM binding for the read-only ``clip_label_summary`` view (one row per clip)."""
+
+    __tablename__: str = "clip_label_summary"
+
+    clip_id: Mapped[int] = mapped_column(primary_key=True)
+    has_manual_cat: Mapped[bool] = mapped_column()
+    effective_has_cat: Mapped[bool] = mapped_column()
+    tagged_subject_slugs: Mapped[str] = mapped_column()
+
+
+# Canonical, single-source definition of the ``clip_label_summary`` view. It lives in app code (not
+# the migration) because both the HEAD migration and the test fixtures need the exact same text and
+# the ``migrations`` package is not importable under pytest. This is the *current* definition: any
+# change to the view must ship as a new migration that drops and recreates it, updating this constant
+# in lockstep. Historical migrations keep their own frozen copies so an old ``upgrade`` reproduces
+# the schema as it was authored. ``slug`` uses the aggregate ``ORDER BY`` form (SQLite >= 3.44) so
+# the comma-joined ordering is well-defined rather than relying on undefined aggregate input order.
+CLIP_LABEL_SUMMARY_VIEW_SQL = """
+CREATE VIEW clip_label_summary AS
+SELECT
+    c.id AS clip_id,
+    CAST(EXISTS (
+        SELECT 1
+        FROM clip_frames cf
+        JOIN clip_frame_subjects cfs ON cfs.clip_frame_id = cf.id
+        JOIN subjects s ON s.id = cfs.subject_id
+        WHERE cf.clip_id = c.id AND s.kind = 'cat'
+    ) AS INTEGER) AS has_manual_cat,
+    CAST(
+        CASE
+            WHEN c.reviewed_at IS NULL THEN c.has_cat
+            ELSE EXISTS (
+                SELECT 1
+                FROM clip_frames cf
+                JOIN clip_frame_subjects cfs ON cfs.clip_frame_id = cf.id
+                JOIN subjects s ON s.id = cfs.subject_id
+                WHERE cf.clip_id = c.id AND s.kind = 'cat'
+            )
+        END
+    AS INTEGER) AS effective_has_cat,
+    COALESCE((
+        SELECT GROUP_CONCAT(slug_distinct.slug ORDER BY slug_distinct.kind, slug_distinct.display_order)
+        FROM (
+            SELECT DISTINCT s.slug AS slug, s.kind AS kind, s.display_order AS display_order
+            FROM clip_frames cf
+            JOIN clip_frame_subjects cfs ON cfs.clip_frame_id = cf.id
+            JOIN subjects s ON s.id = cfs.subject_id
+            WHERE cf.clip_id = c.id
+        ) AS slug_distinct
+    ), '') AS tagged_subject_slugs
+FROM clips c
+"""
+
+DROP_CLIP_LABEL_SUMMARY_VIEW_SQL = "DROP VIEW IF EXISTS clip_label_summary"
+
+
 def create_engine(url: str) -> Engine:
     """Build an ``Engine`` for ``url`` with WAL + foreign-key PRAGMAs applied per connection.
 
@@ -324,13 +481,18 @@ def create_engine(url: str) -> Engine:
         cursor = dbapi_conn.cursor()
         try:
             for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA synchronous=NORMAL"):
-                _ = cursor.execute(pragma)  # pyright: ignore[reportAny]
+                _ = cursor.execute(pragma)  # pyright: ignore[reportAny]  # DBAPI cursor.execute() is untyped (returns Any)
         finally:
             cursor.close()
 
     event.listen(engine, "connect", set_sqlite_pragmas)
 
     return engine
+
+
+def engine_for(internal_root: Path) -> Engine:
+    """Build an :class:`Engine` for the live DB (:data:`DB_FILENAME`) under ``internal_root``."""
+    return create_engine(f"sqlite:///{internal_root / DB_FILENAME}")
 
 
 @contextmanager

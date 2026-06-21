@@ -261,7 +261,7 @@ def test_iter_recordings_naive_since_raises_value_error() -> None:
 def test_iter_recordings_handles_missing_length_field() -> None:
     """A row with no ``Length`` field parses cleanly to ``file_size_bytes=0`` (defensive default)."""
     page_no_length = (
-        "found=1\r\n"  # dprint-ignore
+        "found=1\r\n"  # one wire-format field per line, mirroring the device response
         "items[0].FilePath=/clip.mp4\r\n"
         "items[0].StartTime=2026-05-01 06:00:00\r\n"
         "items[0].EndTime=2026-05-01 06:01:00\r\n"
@@ -556,5 +556,5 @@ def test_iter_recordings_destroy_failure_logged_not_raised(caplog: pytest.LogCap
 def test_client_context_manager_closes_underlying_httpx() -> None:
     """``with AmcrestClient(...) as c:`` exits cleanly and the httpx client is closed."""
     with _make_client() as client:
-        assert isinstance(client._client, httpx.Client)  # type: ignore[unreachable]
-    assert client._client.is_closed  # type: ignore[unreachable]
+        assert isinstance(client._client, httpx.Client)  # type: ignore[unreachable]  # mypy sees httpx/httpxyz as distinct classes; the shim aliases them at runtime, so this runs
+    assert client._client.is_closed  # type: ignore[unreachable]  # same: reachable at runtime via the httpxyz alias

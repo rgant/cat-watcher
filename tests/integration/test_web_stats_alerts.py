@@ -1,30 +1,29 @@
-"""Integration tests for the cat-watcher cameras / stats / alerts pages (Task 24).
+"""Integration tests for the cat-watcher cameras / stats / alerts pages.
 
 Covers ``GET /cameras`` (per-camera health table + recent alerts), ``GET /stats`` (30-day daily
-aggregation across all cameras with manual-label override applied via
-``COALESCE(manual_has_cat, has_cat)``), and ``GET /alerts`` (last 30 days of dispatched alerts with
-email/macOS delivery flags). Auth is exercised exhaustively in ``test_web_health.py``; this module
-attaches a constant ``Authorization`` header.
+aggregation across all cameras with cat-positive counts from the ``clip_label_summary`` view), and
+``GET /alerts`` (last 30 days of dispatched alerts with email/macOS delivery flags). Auth is
+exercised exhaustively in ``test_web_health.py``; this module attaches a constant ``Authorization``
+header.
 """
 
-import base64
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
 from typing import TYPE_CHECKING
 
-from cat_watcher.db import AlertSent, AlertType, Camera, Clip, PollStatus
+from db_helpers import AUTH_HEADER, tag_clip_frame
+
+from cat_watcher.db import AlertSent, AlertType, Camera, Clip, PollStatus, Subject, create_engine, get_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
 
     from fastapi.testclient import TestClient
+    from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
-
-
-_AUTH_HEADER = {"Authorization": f"Basic {base64.b64encode(b'admin:pw').decode()}"}
 
 
 def _persist_cameras(
@@ -54,7 +53,6 @@ def _make_clip(
     camera_id: int,
     start_ts: datetime,
     has_cat: bool,
-    manual_has_cat: bool | None = None,
 ) -> Clip:
     """Build a Clip row; ``source_filename`` derives from the full ``start_ts`` (date + time + µs).
 
@@ -73,7 +71,6 @@ def _make_clip(
         thumb_path=f"thumbs/{fname}.jpg",
         file_size_bytes=1024,
         has_cat=has_cat,
-        manual_has_cat=manual_has_cat,
         detector_version="yolov11n@deadbeef",
         ingested_at=start_ts,
     )
@@ -82,7 +79,7 @@ def _make_clip(
 def test_cameras_page_lists_all_cameras_with_status(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``GET /cameras`` renders both seeded cameras' display names and ``poll_status`` values."""
@@ -97,8 +94,8 @@ def test_cameras_page_lists_all_cameras_with_status(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/cameras", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/cameras", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "Pantry Litter Box" in response.text
@@ -110,7 +107,7 @@ def test_cameras_page_lists_all_cameras_with_status(
 def test_cameras_page_renders_poll_status_since_elapsed(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """A non-OK camera with ``poll_status_since`` set surfaces an elapsed-time string in the page.
@@ -138,8 +135,8 @@ def test_cameras_page_renders_poll_status_since_elapsed(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/cameras", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/cameras", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "unreachable" in response.text
@@ -150,7 +147,7 @@ def test_cameras_page_renders_poll_status_since_elapsed(
 def test_cameras_page_includes_recent_alerts_for_each_camera(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Each camera's most recent alerts surface alongside its row on ``/cameras``."""
@@ -176,8 +173,8 @@ def test_cameras_page_includes_recent_alerts_for_each_camera(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/cameras", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/cameras", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "INACTIVITY" in response.text
@@ -187,19 +184,18 @@ def test_cameras_page_includes_recent_alerts_for_each_camera(
 def test_stats_aggregates_clip_counts_per_camera_per_day(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``/stats`` shows total + cat-positive counts per camera per day for the last 30 days.
 
     Two cameras seeded:
 
-    * pantry: 3 clips today, 2 of which are cat-positive via ``has_cat=True`` (no manual override).
-    * bath: 1 clip yesterday with ``has_cat=False`` but ``manual_has_cat=True`` — the override must
-      flip the cat-positive count to 1.
+    * pantry: 3 clips today, 2 of which are cat-positive via ``has_cat=True`` (no operator review).
+    * bath: 1 clip yesterday with ``has_cat=False`` but reviewed and tagged with a cat subject — the
+      operator override via the review queue must flip the cat-positive count to 1.
     """
     internal_root, storage_root = storage_dirs
-    config = make_config(internal_root, storage_root)
     pantry_id, bath_id = _persist_cameras(
         db_session_factory,
         internal_root,
@@ -210,6 +206,8 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
     )
     today_anchor = datetime.now(UTC).replace(microsecond=0)
     yesterday_anchor = today_anchor - timedelta(days=1)
+    # Bath clip: detector says no-cat; operator review will flip it to cat-positive via tagging.
+    bath_clip = _make_clip(camera_id=bath_id, start_ts=yesterday_anchor, has_cat=False)
     _persist(
         db_session_factory,
         internal_root,
@@ -218,12 +216,14 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
                 _make_clip(camera_id=pantry_id, start_ts=today_anchor - timedelta(minutes=i * 10), has_cat=has_cat)
                 for i, has_cat in enumerate([True, True, False])
             ),
-            _make_clip(camera_id=bath_id, start_ts=yesterday_anchor, has_cat=False, manual_has_cat=True),
+            bath_clip,
         ],
     )
+    # Tag the bath clip with a cat subject and mark it reviewed so effective_has_cat becomes True.
+    _tag_clips_as_cat(internal_root, [(bath_clip.id, yesterday_anchor)])
 
-    with web_test_client(config) as client:
-        response = client.get("/stats", headers=_AUTH_HEADER)
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/stats", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     pantry_row = _row_for(response.text, "Pantry", today_anchor.date().isoformat())
@@ -232,7 +232,7 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
     assert bath_row is not None, "Expected a Bath row for yesterday in /stats"
     assert "3" in pantry_row, f"Pantry total clips=3 missing in row: {pantry_row}"
     assert "2" in pantry_row, f"Pantry cat-positive=2 missing in row: {pantry_row}"
-    # 1 / 1 — total and cat both equal 1 thanks to the manual override.
+    # 1 / 1 — total and cat both equal 1 thanks to the operator review-queue override.
     assert "1" in bath_row
 
 
@@ -260,7 +260,7 @@ def _row_for(body: str, camera_display_name: str, date_iso: str) -> str | None:
 def test_alerts_page_lists_recent_alerts(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """``/alerts`` lists alerts dispatched in the last 30 days with type, subject, camera, and delivery flags.
@@ -293,8 +293,8 @@ def test_alerts_page_lists_recent_alerts(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/alerts", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/alerts", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "INACTIVITY" in response.text
@@ -309,7 +309,7 @@ def test_alerts_page_lists_recent_alerts(
 def test_alerts_page_renders_em_dash_for_non_camera_alerts(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Alerts with ``camera_id IS NULL`` (e.g. WEB_DOWN, DISK_LOW) show "—" in the camera column."""
@@ -330,8 +330,8 @@ def test_alerts_page_renders_em_dash_for_non_camera_alerts(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/alerts", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/alerts", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "DISK_LOW" in response.text
@@ -344,7 +344,7 @@ def test_alerts_page_renders_em_dash_for_non_camera_alerts(
 def test_alerts_page_omits_alerts_older_than_30_days(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """An alert dispatched > 30 days ago does not appear; one inside the window does.
@@ -374,8 +374,8 @@ def test_alerts_page_omits_alerts_older_than_30_days(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/alerts", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/alerts", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "Stale alert from 45 days ago" not in response.text
@@ -385,7 +385,7 @@ def test_alerts_page_omits_alerts_older_than_30_days(
 def test_alerts_page_orders_newest_first(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Alerts render in ``sent_at DESC`` order so the newest dispatch is at the top of the page.
@@ -416,8 +416,8 @@ def test_alerts_page_orders_newest_first(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/alerts", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/alerts", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     newer_pos = response.text.find("Newer alert subject")
@@ -430,7 +430,7 @@ def test_alerts_page_orders_newest_first(
 def test_stats_omits_clips_older_than_30_days(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """A clip with ``start_ts`` 45 days back doesn't appear in ``/stats``; one yesterday does.
@@ -459,8 +459,8 @@ def test_stats_omits_clips_older_than_30_days(
         ],
     )
 
-    with web_test_client(config) as client:
-        response = client.get("/stats", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/stats", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     # The stale clip's ISO date should be absent — its row was filtered out by the cutoff. The fresh
@@ -473,7 +473,7 @@ def test_stats_omits_clips_older_than_30_days(
 def test_cameras_page_caps_recent_alerts_at_five(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
     """Only the 5 most-recent alerts per camera render on ``/cameras`` (``_CAMERA_RECENT_ALERTS_LIMIT``).
@@ -504,8 +504,8 @@ def test_cameras_page_caps_recent_alerts_at_five(
     ]
     _persist(db_session_factory, internal_root, seeded_alerts)
 
-    with web_test_client(config) as client:
-        response = client.get("/cameras", headers=_AUTH_HEADER)
+    with alembic_web_test_client(config) as client:
+        response = client.get("/cameras", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     # Newest 5 (smallest hour-offsets) must appear.
@@ -514,3 +514,110 @@ def test_cameras_page_caps_recent_alerts_at_five(
     # Two oldest must be cut off by the limit.
     assert "alert-5" not in response.text
     assert "alert-6" not in response.text
+
+
+def _seed_cat_subject_stats(engine: Engine) -> int:
+    """Insert one cat Subject and return its id."""
+    with get_session(engine) as session:
+        subj = Subject(slug="stats-cat", display_name="Stats Cat", kind="cat", display_order=1)
+        session.add(subj)
+        session.flush()
+        return subj.id
+
+
+def _tag_clips_as_cat(internal_root: Path, tags: list[tuple[int, datetime | None]]) -> None:
+    """Seed one cat Subject and tag each ``(clip_id, reviewed_at)`` clip with it via the review queue.
+
+    ``reviewed_at=None`` tags the frame without marking the clip reviewed (so ``effective_has_cat``
+    stays the detector verdict); a non-None value marks it reviewed (the override flips cat-positive).
+    """
+    engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
+    try:
+        subj_id = _seed_cat_subject_stats(engine)
+        for clip_id, reviewed_at in tags:
+            tag_clip_frame(engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=reviewed_at)
+    finally:
+        engine.dispose()
+
+
+def _make_stats_parity_clip(cam_id: int, label: str, today: datetime, *, has_cat: bool, reviewed_at: datetime | None = None) -> Clip:
+    """Build a Clip row for the stats parity test; source_filename derives from ``label``."""
+    fname = f"stats-parity-{label}.mp4"
+    return Clip(
+        camera_id=cam_id,
+        source_filename=fname,
+        start_ts=today,
+        end_ts=today + timedelta(seconds=10),
+        duration_seconds=10.0,
+        file_path=f"clips/{fname}",
+        thumb_path=f"thumbs/{fname}.jpg",
+        file_size_bytes=1024,
+        has_cat=has_cat,
+        detector_version="yolov11n@deadbeef",
+        ingested_at=today,
+        reviewed_at=reviewed_at,
+    )
+
+
+def _seed_parity_clips(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    internal_root: Path,
+    cam_id: int,
+    today: datetime,
+) -> tuple[int, int]:
+    """Seed four clips for the stats parity test and return ``(clip_c_id, clip_d_id)``.
+
+    A and B need no frame subjects (we only need their IDs to verify the total count).
+    C and D will be tagged with a cat frame subject by the caller after this returns.
+    """
+    clip_c = _make_stats_parity_clip(cam_id, "C", today, has_cat=False)
+    clip_d = _make_stats_parity_clip(cam_id, "D", today, has_cat=False, reviewed_at=today)
+    with db_session_factory(internal_root) as session:
+        for clip in (
+            _make_stats_parity_clip(cam_id, "A", today, has_cat=True),
+            _make_stats_parity_clip(cam_id, "B", today, has_cat=True, reviewed_at=today),
+            clip_c,
+            clip_d,
+        ):
+            session.add(clip)
+        session.flush()
+        return clip_c.id, clip_d.id
+
+
+def test_stats_effective_has_cat_four_combinations(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """``/stats`` cat-positive count reflects ``effective_has_cat`` from ``clip_label_summary``.
+
+    Four clips, all on today's date for one camera:
+
+    * A: ``has_cat=True``, unreviewed, no frames → effective=True (detector).
+    * B: ``has_cat=True``, reviewed, no frames → effective=False (reviewed with has_manual_cat=FALSE).
+    * C: ``has_cat=False``, unreviewed, cat frame → effective=False (detector, unreviewed).
+    * D: ``has_cat=False``, reviewed, cat frame → effective=True (has_manual_cat=TRUE, reviewed).
+
+    Expected cat_total = 2 (clips A and D).
+    """
+    internal_root, storage_root = storage_dirs
+    [cam_id] = _persist_cameras(
+        db_session_factory,
+        internal_root,
+        [Camera(name="pantry", display_name="Pantry", host="cam.example.com", poll_status=PollStatus.OK)],
+    )
+    today = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0)
+    clip_c_id, clip_d_id = _seed_parity_clips(db_session_factory, internal_root, cam_id, today)
+
+    # C: tagged but unreviewed → effective stays False. D: tagged and reviewed → effective becomes True.
+    _tag_clips_as_cat(internal_root, [(clip_c_id, None), (clip_d_id, today)])
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/stats", headers=AUTH_HEADER).text
+
+    row = _row_for(body, "Pantry", today.date().isoformat())
+    assert row is not None, "Expected a Pantry row for today in /stats"
+    # Total = 4 clips; cat_total = 2 (A=detector True + D=reviewed manual True).
+    assert "4" in row, f"Expected total=4 in Pantry row: {row}"
+    assert "2" in row, f"Expected cat_total=2 in Pantry row: {row}"

@@ -23,16 +23,18 @@ from sqlalchemy import select
 from starlette.routing import WebSocketRoute
 
 from cat_watcher.config import load_config
-from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
+from cat_watcher.db import AgentStart, Heartbeat, engine_for, get_session
 from cat_watcher.logging_setup import setup_agent_logging
+from cat_watcher.subjects_sync import sync_subjects_at_startup
 from cat_watcher.web.auth import BasicAuthMiddleware
 from cat_watcher.web.routes import (
     alerts_router,
     cameras_router,
     clips_router,
     health_router,
-    label_router,
     media_router,
+    membership_router,
+    review_router,
     stats_router,
     timeline_router,
 )
@@ -50,7 +52,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _AGENT_NAME = "web"
-_DB_FILENAME = "cat_watcher.sqlite"
 _HOT_RELOAD_URL = "/hot-reload"
 
 
@@ -60,7 +61,7 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     The returned app owns its own SQLAlchemy engine (disposed by the lifespan on shutdown). Auth
     middleware sits in front of every route except ``/health``.
     """
-    engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
+    engine = engine_for(config.internal_root)
     hotreload = _build_hotreload() if dev_hot_reload else None
 
     @asynccontextmanager
@@ -100,7 +101,8 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     app.include_router(health_router)
     app.include_router(timeline_router)
     app.include_router(clips_router)
-    app.include_router(label_router)
+    app.include_router(review_router)
+    app.include_router(membership_router)
     app.include_router(media_router)
     app.include_router(cameras_router)
     app.include_router(stats_router)
@@ -176,6 +178,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     config = load_config(args.config)
     setup_agent_logging(agent_name="web", config=config)
+    engine = engine_for(config.internal_root)
+    try:
+        if sync_subjects_at_startup(engine, config.subjects, logger) is None:
+            return 2
+    finally:
+        engine.dispose()
     if args.reload:
         uvicorn.run(
             "cat_watcher.web.app:reload_app",

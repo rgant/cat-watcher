@@ -22,4 +22,4 @@ def test_httpx_module_alias_is_httpxyz() -> None:
 
 def test_httpx_response_class_is_httpxyz_response() -> None:
     """Attribute access through the alias confirms the shim is deep enough for class lookups."""
-    assert httpx.Response is httpxyz.Response  # type: ignore[comparison-overlap]
+    assert httpx.Response is httpxyz.Response  # type: ignore[comparison-overlap]  # mypy sees httpx/httpxyz as distinct; the shim makes them identical at runtime — that's the assertion

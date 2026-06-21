@@ -11,10 +11,10 @@ Per spec §4.5 + Task 18 plan. Three responsibilities, one module:
 
 2. **Shared dispatcher** — :func:`dispatch_alert` does cool-down + send + record. This is the only
    place that talks to :mod:`cat_watcher.notifier` and writes to ``alerts_sent``. The poller imports
-   this for its ``ALERTS_STUCK`` watchdog (Task 17 carve-out): the poller does *not* own cool-down
-   state, so all routing — including from inside the poller — must funnel through this helper.
-   Suppressed events log at INFO and write **no** ``alerts_sent`` row (per Task 18: an active
-   24h-cool-down alert must not generate ~96 rows/day per type).
+   this for its ``ALERTS_STUCK`` watchdog : the poller does *not* own cool-down state, so all
+   routing — including from inside the poller — must funnel through this helper. Suppressed events
+   log at INFO and write **no** ``alerts_sent`` row (per Task 18: an active 24h-cool-down alert
+   must not generate ~96 rows/day per type).
 
 3. **Tick orchestrator** (:func:`run_alerts_tick`) + ``main`` — for the ``cat-watcher-alerts --once``
    LaunchAgent. Skips the §4.13 storage wait (the alerts agent's state lives on internal storage, so
@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from cat_watcher.alert_templates import (
     INACTIVITY_BRANCH_NO_CLIPS,
@@ -52,14 +52,16 @@ from cat_watcher.db import (
     AlertType,
     Camera,
     Clip,
+    ClipLabelSummary,
     Heartbeat,
     PollStatus,
-    create_engine,
+    engine_for,
     get_session,
 )
 from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.notifier import EmailResult, NotifResult, send_email, send_macos_notification
 from cat_watcher.storage import ensure_storage_layout, storage_available
+from cat_watcher.subjects_sync import sync_subjects_at_startup
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -73,7 +75,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _AGENT_NAME = "alerts"
-_DB_FILENAME = "cat_watcher.sqlite"
 _DELIVERY_ERROR_MAX_LEN = 500
 _LOG_TAIL_LINES = 50
 
@@ -293,7 +294,7 @@ def evaluate_inactivity_no_cats_global(
     a fleet-wide no-cats alert and a per-camera unreachable alert can coexist on the same tick.
     """
     cam = session.scalar(
-        select(Camera)  # dprint-ignore
+        select(Camera)  # keep one query clause per line (ruff would join the chain)
         .where(Camera.last_cat_seen_at.is_not(None))
         .order_by(Camera.last_cat_seen_at.desc())
         .limit(1),
@@ -325,17 +326,16 @@ def evaluate_frequency(  # noqa: PLR0913  # rule reads camera clips against 4 th
 ) -> AlertCandidate | None:
     """Evaluate the ``FREQUENCY`` rule per spec §4.5: ``count(cat-positive) >= threshold`` in window.
 
-    ``COALESCE(manual_has_cat, has_cat)`` is the cat-positive projection — manual labels override
-    the model output, so a clip you marked ``manual_has_cat=False`` does not count toward the
-    threshold even if ``has_cat=True``. Conversely a model-false clip you marked ``True`` does
-    count.
+    ``effective_has_cat`` (from ``clip_label_summary``) is the cat-positive projection — manual
+    overrides win once the clip is reviewed; before review the detector verdict stands.
     """
     cutoff = now - timedelta(hours=window_hours)
     rows = list(
         session.scalars(
             select(Clip)
+            .join(ClipLabelSummary, ClipLabelSummary.clip_id == Clip.id)
             .where(Clip.camera_id == cam.id)
-            .where(func.coalesce(Clip.manual_has_cat, Clip.has_cat).is_(True))
+            .where(ClipLabelSummary.effective_has_cat.is_(True))
             .where(Clip.start_ts >= cutoff)
             .order_by(Clip.start_ts),
         ).all(),
@@ -413,7 +413,7 @@ def evaluate_web_flapping(  # noqa: PLR0913  # rule reads agent_starts against w
     cutoff = now - timedelta(minutes=window_minutes)
     rows = list(
         session.scalars(
-            select(AgentStart)  # dprint-ignore
+            select(AgentStart)  # keep one query clause per line (ruff would join the chain)
             .where(AgentStart.agent_name == "web")
             .where(AgentStart.started_at >= cutoff)
             .order_by(AgentStart.started_at),
@@ -544,8 +544,8 @@ def dispatch_candidate(
 ) -> None:
     """Open a fresh session and dispatch one :class:`AlertCandidate` via :func:`dispatch_alert`.
 
-    Public so the poller can reuse it for ``ALERTS_STUCK`` (Task 17 carve-out): the alert routing
-    layer must funnel through this single helper to keep cool-down state honored uniformly.
+    Public so the poller can reuse it for ``ALERTS_STUCK``: the alert routing layer must funnel
+    through this single helper to keep cool-down state honored uniformly.
     """
     with get_session(engine) as session:
         dispatch_alert(
@@ -732,8 +732,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if storage_available(config.storage_root):
         ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
 
-    engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
+    engine = engine_for(config.internal_root)
     try:
+        if sync_subjects_at_startup(engine, config.subjects, logger) is None:
+            return 2
         run_alerts_tick(config=config, engine=engine, now=datetime.now(UTC))
     finally:
         engine.dispose()

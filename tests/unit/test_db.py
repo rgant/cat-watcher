@@ -120,7 +120,6 @@ def test_round_trip_camera_clip_alert(db_engine: Engine) -> None:
         assert loaded_clip.start_ts == datetime(2026, 5, 3, 12, 0, 0, tzinfo=UTC)
         # tz-aware DateTime columns must hand back tz-aware datetimes.
         assert loaded_clip.start_ts.tzinfo is not None
-        assert loaded_clip.manual_has_cat is None
 
         assert len(loaded_camera.alerts) == 1
         loaded_alert = loaded_camera.alerts[0]

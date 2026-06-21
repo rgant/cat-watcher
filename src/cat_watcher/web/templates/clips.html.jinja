@@ -32,8 +32,17 @@
       Date (UTC)
       <input type="date" name="date_str" value="{{ filters.date or '' }}">
     </label>
+    <label>
+      Reviewed
+      <select name="reviewed">
+        <option value="no" {% if filters.reviewed == "no" %}selected{% endif %}>Unreviewed</option>
+        <option value="yes" {% if filters.reviewed == "yes" %}selected{% endif %}>Reviewed</option>
+        <option value="any" {% if filters.reviewed == "any" %}selected{% endif %}>Any</option>
+      </select>
+    </label>
     <button type="submit">Filter</button>
   </form>
+  <p class="progress-indicator">{{ progress.reviewed }} / {{ progress.total }} reviewed</p>
   {% if clip_rows %}
     <table class="clip-list">
       <caption class="sr-only">Clips, ordered newest first, capped at 200 rows.</caption>
@@ -42,17 +51,16 @@
           <th scope="col">Thumbnail</th>
           <th scope="col">Camera</th>
           <th scope="col">Start</th>
-          <th scope="col">Duration</th>
+          <th scope="col">Reviewed</th>
           <th scope="col">Cat?</th>
           <th scope="col">Score</th>
         </tr>
       </thead>
       <tbody>
         {% for row in clip_rows %}
-          {% set effective_cat = row.manual_has_cat if row.manual_has_cat is not none else row.has_cat %}
           <tr>
             <td class="thumb-cell">
-              <a href="{{ url_for('clip_detail', clip_id=row.id) }}">
+              <a href="{{ url_for('clip_detail', clip_id=row.id) }}?{{ filter_qs }}">
                 <img src="{{ url_for('media_thumb', clip_id=row.id) }}"
                      alt="Thumbnail of {{ row.source_filename }}"
                      loading="lazy"
@@ -62,15 +70,21 @@
             </td>
             <td data-label="Camera">{{ row.camera_display_name }}</td>
             <td data-label="Start">
-              <a href="{{ url_for('clip_detail', clip_id=row.id) }}">
+              <a href="{{ url_for('clip_detail', clip_id=row.id) }}?{{ filter_qs }}">
                 <time datetime="{{ row.start_ts.isoformat() }}">{{ row.display_start }}</time>
               </a>
             </td>
-            <td data-label="Duration">{{ "%.1f"|format(row.duration_seconds) }}s</td>
+            <td data-label="Reviewed">
+              {% if row.reviewed_at_short %}
+                <time datetime="{{ row.reviewed_at_iso }}">{{ row.reviewed_at_short }}</time>
+              {% else %}
+                —
+              {% endif %}
+            </td>
             <td data-label="Cat?">
-              <span class="{{ 'badge-cat' if effective_cat else 'badge-no-cat' }} {{ 'badge-manual' if row.manual_has_cat is not none else '' }}">
-                {{ 'cat' if effective_cat else 'no cat' }}
-                {% if row.manual_has_cat is not none %}(manual){% endif %}
+              <span class="{{ row.badge_class }}">
+                {{ 'cat' if row.effective_has_cat else 'no cat' }}
+                {% if row.manual_badge %}(manual){% endif %}
               </span>
             </td>
             <td data-label="Score">{{ "%.2f"|format(row.max_score) }}</td>
@@ -79,6 +93,9 @@
       </tbody>
     </table>
   {% else %}
-    <p class="empty-state">No clips match the current filters.</p>
+    <p class="empty-state">
+      No clips match these filters.
+      <a href="{{ url_for('list_clips') }}">Reset to default queue →</a>
+    </p>
   {% endif %}
 {% endblock content %}

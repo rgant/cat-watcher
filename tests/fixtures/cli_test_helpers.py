@@ -93,7 +93,6 @@ def seed_clip(  # noqa: PLR0913  # pylint: disable=too-many-arguments  # single 
     camera_id: int,
     start_ts: datetime | None = None,
     has_cat: bool = False,
-    manual_has_cat: bool | None = None,
     analysis_error: str | None = None,
     detector_version: str = "yolov11n@old",
     source_filename: str | None = None,
@@ -117,7 +116,6 @@ def seed_clip(  # noqa: PLR0913  # pylint: disable=too-many-arguments  # single 
         thumb_path=thumb_path,
         file_size_bytes=1024,
         has_cat=has_cat,
-        manual_has_cat=manual_has_cat,
         detector_version=detector_version,
         ingested_at=start,
         analysis_error=analysis_error,
@@ -137,5 +135,17 @@ def read_clip(config: Config, clip_id: int) -> Clip:
             assert clip is not None
             session.expunge(clip)
             return clip
+    finally:
+        engine.dispose()
+
+
+def set_clip_reviewed_at(config: Config, clip_id: int, reviewed_at: datetime) -> None:
+    """Write ``clips.reviewed_at`` for ``clip_id`` via a short-lived engine that disposes on exit."""
+    engine = create_engine(f"sqlite:///{config.internal_root / _DB_FILENAME}")
+    try:
+        with get_session(engine) as session:
+            clip_row = session.get(Clip, clip_id)
+            assert clip_row is not None
+            clip_row.reviewed_at = reviewed_at
     finally:
         engine.dispose()

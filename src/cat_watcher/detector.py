@@ -39,6 +39,7 @@ import numpy as np
 if TYPE_CHECKING:
     from pathlib import Path
 
+    # YOLO is exposed via ultralytics' module-level __getattr__; type-checkers can't follow it.
     from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]
     from ultralytics.engine.results import Results
 
@@ -73,6 +74,7 @@ class ScoredFrame(NamedTuple):
     t_offset_seconds: float
     score: float
     frame: np.ndarray
+    box: tuple[float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -269,7 +271,15 @@ class Detector:
             results = cast("list[Results]", self._model(frame, verbose=False))
             hit = self._best_cat_in_frame(results)
             score = hit.score if hit is not None else 0.0
-            scored.append(ScoredFrame(ordinal=ordinal, t_offset_seconds=timestamp, score=score, frame=frame))
+            scored.append(
+                ScoredFrame(
+                    ordinal=ordinal,
+                    t_offset_seconds=timestamp,
+                    score=score,
+                    frame=frame,
+                    box=hit.box if hit is not None else None,
+                ),
+            )
             if hit is None:
                 continue
             # Threshold gates the boolean ``has_cat`` / ``frames_with_cat`` columns; ``max_score``

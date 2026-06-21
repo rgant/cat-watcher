@@ -11,8 +11,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path  # runtime: ``monkeypatch.setattr(Path, ...)`` patches the class itself
 from typing import TYPE_CHECKING
 
+from db_helpers import seed_cat_subject, tag_clip_frame
+
 from cat_watcher.config import RetentionConfig
-from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, ClipFrame, get_session
+from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, ClipFrame, ClipFrameSubject, Subject, get_session
 from cat_watcher.retention import RetentionReport, sweep
 
 if TYPE_CHECKING:
@@ -146,6 +148,37 @@ def test_pass1_oserror_during_unlink_does_not_raise(
 
     assert report.clips_removed_pass1 == 1  # the row was deleted; only the unlink failed
     assert any("simulated unlink failure" in r.message for r in caplog.records)
+
+
+def test_pass1_cascades_to_clip_frame_subject_memberships(db_engine: Engine, tmp_path: Path) -> None:
+    """Sweeping an aged clip cascades through ``clip_frames`` to ``clip_frame_subjects``.
+
+    Deletion relies on the DB-level ``ON DELETE CASCADE`` (the relationships use ``passive_deletes``),
+    which only fires with ``PRAGMA foreign_keys=ON``. A regression there would silently orphan
+    membership rows. The tagged ``Subject`` itself must survive — its FK is ``ON DELETE RESTRICT``.
+    """
+    cam_id = _seed_camera(db_engine)
+    old_ts = _NOW - timedelta(days=45)
+    clip_id = _seed_clip(
+        db_engine,
+        camera_id=cam_id,
+        storage_root=tmp_path,
+        rel_clip="clips/pantry/2026-03-17/060000.mp4",
+        rel_thumb="thumbs/pantry/2026-03-17/060000.jpg",
+        start_ts=old_ts,
+    )
+    subject_id = seed_cat_subject(db_engine)
+    tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subject_id)
+
+    report = sweep(engine=db_engine, storage_root=tmp_path, retention=_retention(), now=_NOW)
+
+    assert report.clips_removed_pass1 == 1
+    with get_session(db_engine) as session:
+        assert session.get(Clip, clip_id) is None
+        assert session.query(ClipFrame).count() == 0
+        assert session.query(ClipFrameSubject).count() == 0
+        # The subject vocabulary row is preserved (RESTRICT FK) — only the membership cascaded away.
+        assert session.get(Subject, subject_id) is not None
 
 
 # --- pass 2: orphan filesystem sweep --------------------------------------------------------------
@@ -479,7 +512,7 @@ def test_sweep_full_pipeline_against_representative_state(db_engine: Engine, tmp
     assert not (tmp_path / "thumbs/pantry/2026-03-17").exists()
 
 
-# --- per-frame thumb retention (Task 9) ----------------------------------------------------------
+# --- per-frame thumb retention ----------------------------------------------------------
 
 
 def _write_per_frame_thumbs(storage_root: Path, per_clip_dir: str, frame_count: int) -> list[str]:

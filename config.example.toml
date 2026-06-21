@@ -17,6 +17,33 @@ display_name = "Office Litter Box Camera"
 host = "<office.example.com>"
 port = 80
 
+# Subjects are the per-frame labels applied during review on /clips/{id}. Ships with the universal
+# event categories; add your own [[subjects]] with kind = "cat" (and an optional color) for each
+# cat you want to label.
+[[subjects]]
+slug = "cleaning"
+display_name = "Cleaning"
+kind = "event"
+display_order = 1
+
+[[subjects]]
+slug = "robot"
+display_name = "Robot"
+kind = "event"
+display_order = 2
+
+[[subjects]]
+slug = "person"
+display_name = "Person"
+kind = "event"
+display_order = 3
+
+[[subjects]]
+slug = "other"
+display_name = "Other"
+kind = "event"
+display_order = 4
+
 [detector]
 model = "yolo11n.pt"
 confidence_threshold = 0.35

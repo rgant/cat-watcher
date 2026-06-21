@@ -213,6 +213,17 @@ class PollerConfig(BaseModel, extra="forbid"):
         return self
 
 
+class ConfiguredSubject(BaseModel, extra="forbid"):
+    """One ``[[subjects]]`` entry from ``config.toml``; synced to the DB at every agent startup."""
+
+    slug: str
+    display_name: str
+    kind: str
+    display_order: int
+    description: str | None = None
+    color: str | None = None
+
+
 class Config(BaseModel, extra="forbid"):
     """Root configuration model — bound TOML + env at startup."""
 
@@ -222,6 +233,7 @@ class Config(BaseModel, extra="forbid"):
     # ``min_length=1`` rejects an empty ``[[cameras]]`` list; ``load_config`` re-wraps the
     # validation error as ``ConfigError``.
     cameras: Annotated[list[CameraConfig], Field(min_length=1)]
+    subjects: list[ConfiguredSubject] = Field(default_factory=list)
     detector: DetectorConfig
     alerts: AlertConfig
     web: WebConfig
@@ -279,7 +291,7 @@ def _load_settings[T: BaseSettings](cls: type[T]) -> T:
     except ValidationError as exc:
         prefix = cls.model_config.get("env_prefix", "") or ""
         missing = [
-            f"{prefix}{err['loc'][0]}".upper()  # dprint-ignore
+            f"{prefix}{err['loc'][0]}".upper()  # keep comprehension expanded, one clause per line
             for err in exc.errors()
             if err["type"] == "missing" and err["loc"]
         ]

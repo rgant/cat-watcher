@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cat_watcher.config import ConfigError, load_config
+from cat_watcher.config import ConfigError, ConfiguredSubject, load_config
 
 _VALID_TOML = textwrap.dedent("""\
     internal_root = "./data"
@@ -564,3 +564,126 @@ def test_empty_cameras_list_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     # Loose match: pydantic's exact "List should have at least 1 item" wording may shift versions.
     with pytest.raises(ConfigError, match=r"cameras"):
         _ = load_config()
+
+
+# ---------------------------------------------------------------------------
+# [[subjects]] parsing
+# ---------------------------------------------------------------------------
+
+_TOML_WITH_SUBJECTS = _VALID_TOML + textwrap.dedent("""\
+
+    [[subjects]]
+    slug = "marcel"
+    display_name = "Marcel"
+    kind = "cat"
+    display_order = 1
+    description = "Our oldest cat"
+    color = "#ff9900"
+
+    [[subjects]]
+    slug = "cleaning"
+    display_name = "Cleaning"
+    kind = "event"
+    display_order = 1
+""")
+
+_TOML_WITH_SUBJECTS_MINIMAL = _VALID_TOML + textwrap.dedent("""\
+
+    [[subjects]]
+    slug = "cleaning"
+    display_name = "Cleaning"
+    kind = "event"
+    display_order = 1
+""")
+
+
+def test_subjects_optional_fields_default_to_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting optional ``description`` and ``color`` fields defaults them to ``None``."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_TOML_WITH_SUBJECTS_MINIMAL)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.subjects is not None
+    assert len(cfg.subjects) == 1
+    s = cfg.subjects[0]
+    assert s.slug == "cleaning"
+    assert s.description is None
+    assert s.color is None
+
+
+def test_subjects_full_fields_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """All fields in ``[[subjects]]`` parse and round-trip through the config model."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_TOML_WITH_SUBJECTS)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.subjects is not None
+    assert len(cfg.subjects) == 2
+    assert isinstance(cfg.subjects[0], ConfiguredSubject)
+    marcel = next(s for s in cfg.subjects if s.slug == "marcel")
+    assert marcel.display_name == "Marcel"
+    assert marcel.kind == "cat"
+    assert marcel.display_order == 1
+    assert marcel.description == "Our oldest cat"
+    assert marcel.color == "#ff9900"
+
+
+def test_subjects_missing_required_field_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing required ``display_order`` in ``[[subjects]]`` raises ``ConfigError``."""
+    toml = _VALID_TOML + textwrap.dedent("""\
+
+        [[subjects]]
+        slug = "cleaning"
+        display_name = "Cleaning"
+        kind = "event"
+    """)
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(toml)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    with pytest.raises(ConfigError, match=r"display_order"):
+        _ = load_config()
+
+
+def test_subjects_extra_field_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unknown field in ``[[subjects]]`` is rejected by ``extra='forbid'``."""
+    toml = _VALID_TOML + textwrap.dedent("""\
+
+        [[subjects]]
+        slug = "cleaning"
+        display_name = "Cleaning"
+        kind = "event"
+        display_order = 1
+        bogus_field = "oops"
+    """)
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(toml)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    with pytest.raises(ConfigError, match=r"bogus_field"):
+        _ = load_config()
+
+
+def test_subjects_absent_means_empty_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Config with no ``[[subjects]]`` section yields an empty list (not None)."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_VALID_TOML)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.subjects == []

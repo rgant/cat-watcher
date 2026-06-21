@@ -27,6 +27,7 @@ def test_detect_pipeline_runs_end_to_end(synthetic_clip_path: Path) -> None:
     accuracy. See the Phase 2 limitations note in the implementation plan for the path to a
     ground-truth-based accuracy benchmark.
     """
+    # YOLO is exposed via ultralytics' module-level __getattr__; type-checkers can't follow it.
     from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]
 
     model_name = "yolo11n.pt"

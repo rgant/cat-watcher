@@ -8,6 +8,7 @@ and .jpg files exist on disk.
 
 import contextlib
 import logging
+import os
 from collections.abc import Callable  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: respx.mock evaluates fixture annotations at decoration time
@@ -18,17 +19,40 @@ import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at r
 import numpy as np
 import pytest  # noqa: TC002  # runtime: respx.mock evaluates pytest.MonkeyPatch annotations at decoration time
 import respx
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from db_helpers import scored_frames_with_boxes
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from cat_watcher.config import CameraConfig, Config
-from cat_watcher.db import AgentStart, AlertSent, AlertType, Base, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
+from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
 from cat_watcher.poller import PollerArgs, PollerError, PollerLockedError, run_tick
 from cat_watcher.poller import main as poller_main
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+
+def _apply_schema(db_path: Path) -> None:
+    """Apply the full schema (including the ``clip_label_summary`` view) via Alembic migrations.
+
+    Temporarily overrides ``CAT_WATCHER_DB_URL`` so ``migrations/env.py`` targets the given
+    ``tmp_path`` file rather than the real development database.
+    """
+    prior = os.environ.get("CAT_WATCHER_DB_URL")
+    os.environ["CAT_WATCHER_DB_URL"] = f"sqlite:///{db_path}"
+    try:
+        alembic_cfg = AlembicConfig("alembic.ini")
+        alembic_cfg.set_main_option("script_location", "migrations")
+        command.upgrade(alembic_cfg, "head")
+    finally:
+        if prior is None:
+            del os.environ["CAT_WATCHER_DB_URL"]
+        else:
+            os.environ["CAT_WATCHER_DB_URL"] = prior
+
 
 _BASE_URL = "http://cam.example.com:80"
 _FIND_URL = f"{_BASE_URL}/cgi-bin/mediaFileFind.cgi"
@@ -95,8 +119,8 @@ def test_full_tick_ingests_clip_to_canonical_layout(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     payload = synthetic_clip_path.read_bytes()
     _seed_amcrest_mocks(payload)
@@ -148,8 +172,8 @@ def test_full_tick_with_no_detect_skips_inference_and_marks_clip(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -192,8 +216,8 @@ def test_full_tick_list_only_is_strict_dry_run(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -242,8 +266,8 @@ def test_list_only_emits_per_clip_lines_and_count_to_stdout(
         internal_root, storage_root = storage_dirs
         config = make_config(internal_root, storage_root)
 
+        _apply_schema(internal_root / "test.sqlite")
         engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-        Base.metadata.create_all(engine)
 
         _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -280,8 +304,8 @@ def test_full_tick_default_window_advances_last_polled_at(
     config = make_config(internal_root, storage_root)
     overlap_minutes = config.poller.overlap_minutes
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = _make_detector(has_cat=False)
@@ -318,8 +342,8 @@ def test_full_tick_with_limit_does_not_advance_cursor(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -350,8 +374,8 @@ def test_full_tick_idempotent_on_second_invocation(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = _make_detector(has_cat=False)
@@ -381,8 +405,8 @@ def test_full_tick_camera_unreachable_records_status(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     # Skip the 10-second inter-attempt sleep so the test runs in milliseconds rather than 30s.
     def no_sleep(_seconds: float) -> None:
@@ -425,8 +449,8 @@ def test_full_tick_isolates_per_camera_failures(  # pylint: disable=too-many-loc
     ]
     config = make_config(internal_root, storage_root, cameras=cameras)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     def no_sleep(_seconds: float) -> None:
         return None
@@ -474,8 +498,8 @@ def test_full_tick_records_analysis_error_when_detector_fails(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = MagicMock(spec=Detector)
@@ -510,8 +534,8 @@ def test_full_tick_respects_limit_cap(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     payload = synthetic_clip_path.read_bytes()
     second_path = "/mnt/sd/2026-05-01/001/dav/07/07.10.00-07.11.00[M][0@0][0].mp4"
@@ -571,8 +595,8 @@ def test_full_tick_file_before_row_ordering_leaves_only_orphan_file_on_db_failur
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = _make_detector(has_cat=False)
@@ -627,8 +651,8 @@ def test_full_tick_writes_heartbeat_and_agent_starts_row(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -703,8 +727,8 @@ def test_full_tick_invokes_retention_sweep_to_prune_aged_clips(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
     aged_clip_path, aged_thumb_path = _seed_aged_camera_and_clip(engine, storage_root)
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -738,8 +762,8 @@ def test_poller_writes_per_frame_thumbs_and_clip_frames(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     scored = _stub_scored_frames((0.1, 0.85, 0.3, 0.6))
@@ -774,6 +798,45 @@ def test_poller_writes_per_frame_thumbs_and_clip_frames(
 
 
 @respx.mock
+def test_poller_writes_bbox_xyxy_on_frames_with_detections(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """Full-pipeline assertion: ``ClipFrame.bbox_xyxy`` is populated when the detector returns a box.
+
+    Frames with a cat hit carry ``[x1, y1, x2, y2]``; frames without a hit carry ``NULL``.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    _apply_schema(internal_root / "test.sqlite")
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    scored = scored_frames_with_boxes(stub_frame)
+    detector = _make_detector(has_cat=True, scored_frames=scored)
+
+    args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
+    try:
+        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+    finally:
+        engine.dispose()
+
+    engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert len(clip.frames) == 3
+            assert clip.frames[0].bbox_xyxy == [10.0, 20.0, 30.0, 40.0]
+            assert clip.frames[1].bbox_xyxy is None
+            assert clip.frames[2].bbox_xyxy == [5.0, 6.0, 7.0, 8.0]
+    finally:
+        engine.dispose()
+
+
+@respx.mock
 def test_poller_no_detect_falls_back_to_single_thumb(
     storage_dirs: tuple[Path, Path],
     synthetic_clip_path: Path,
@@ -783,8 +846,8 @@ def test_poller_no_detect_falls_back_to_single_thumb(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
 
@@ -880,8 +943,8 @@ def test_safety_net_fires_poller_empty_after_quiet_when_amcrest_returns_zero_row
     internal_root, storage_root = storage_dirs
     config = disable_alert_channels(make_config(internal_root, storage_root))
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
     last_clip_at = _NOW - timedelta(hours=config.poller.safety_net_hours + 1)
     cam_id = seed_camera(engine, last_clip_at=last_clip_at)
     _seed_empty_amcrest_mocks()
@@ -919,8 +982,8 @@ def test_overlap_zone_clip_is_ingested_via_extended_query_window(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     cursor_after_prior_tick = _NOW - timedelta(minutes=20)
     _ = seed_camera(
@@ -967,8 +1030,8 @@ def test_safety_net_widening_recovers_clip_and_suppresses_alert(
     """
     internal_root, storage_root = storage_dirs
     config = disable_alert_channels(make_config(internal_root, storage_root))
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     cam_id = seed_camera(engine, last_clip_at=_NOW - timedelta(hours=config.poller.safety_net_hours + 1))
     # Clip arrives in the safety-net-widened window (2h ago, well after the stale last_clip_at).
@@ -1005,8 +1068,8 @@ def test_poller_detection_error_falls_back_to_single_thumb(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
 
+    _apply_schema(internal_root / "test.sqlite")
     engine = create_engine(f"sqlite:///{internal_root / 'test.sqlite'}")
-    Base.metadata.create_all(engine)
 
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = MagicMock(spec=Detector)
@@ -1057,7 +1120,7 @@ def test_main_wires_log_level_from_config(
         patch("cat_watcher.poller.ensure_storage_layout"),
         patch("cat_watcher.poller.pid_lock", _noop_pid_lock),
         patch("cat_watcher.poller.wait_for_storage"),
-        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.poller.run_tick"),
     ):
         rc = poller_main(["--no-detect"])
@@ -1086,7 +1149,7 @@ def test_main_returns_zero_when_poller_lock_held(
         patch("cat_watcher.poller.ensure_storage_layout"),
         patch("cat_watcher.poller.pid_lock", side_effect=PollerLockedError("lock held")),
         patch("cat_watcher.poller.wait_for_storage"),
-        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.engine_for", return_value=MagicMock(spec=Engine)),
     ):
         rc = poller_main(["--no-detect"])
 
@@ -1108,7 +1171,7 @@ def test_main_returns_one_on_generic_poller_error(
         patch("cat_watcher.poller.ensure_storage_layout"),
         patch("cat_watcher.poller.pid_lock", _noop_pid_lock),
         patch("cat_watcher.poller.wait_for_storage"),
-        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.poller.run_tick", side_effect=PollerError("kaboom")),
     ):
         rc = poller_main(["--no-detect"])
@@ -1134,7 +1197,7 @@ def test_main_passes_verbose_to_setup_agent_logging(
         patch("cat_watcher.poller.ensure_storage_layout"),
         patch("cat_watcher.poller.pid_lock", _noop_pid_lock),
         patch("cat_watcher.poller.wait_for_storage"),
-        patch("cat_watcher.poller.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.poller.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.poller.run_tick"),
     ):
         rc = poller_main(["--no-detect", "--verbose"])

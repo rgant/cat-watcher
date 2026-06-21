@@ -1,4 +1,4 @@
-"""Integration tests for the cat-watcher web app skeleton (Task 20).
+"""Integration tests for the cat-watcher web app skeleton.
 
 Exercises the FastAPI factory + auth middleware + ``/health`` route end-to-end via the shared
 ``web_test_client`` fixture (which materializes the SQLite schema and runs the app lifespan).
@@ -93,7 +93,7 @@ def test_protected_route_returns_401_with_www_authenticate_header_when_missing_c
 def test_protected_route_with_valid_credentials_passes_auth(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[[Path, Path], Config],
-    web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
     """Assert valid credentials let the request through; the middleware should not return ``401``.
 
@@ -104,7 +104,7 @@ def test_protected_route_with_valid_credentials_passes_auth(
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     headers = {"Authorization": _basic_auth_header("admin", "pw")}
-    with web_test_client(config) as client:
+    with alembic_web_test_client(config) as client:
         response = client.get("/clips", headers=headers)
     assert response.status_code != 401
 

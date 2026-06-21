@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+from db_helpers import tag_clip_frame
 from sqlalchemy.engine import Engine
 
 from cat_watcher.alert_templates import AlertContent
@@ -37,8 +38,10 @@ from cat_watcher.db import (
     AlertSent,
     AlertType,
     Camera,
+    Clip,
     Heartbeat,
     PollStatus,
+    Subject,
     get_session,
 )
 from cat_watcher.notifier import EmailResult, NotifResult
@@ -58,6 +61,12 @@ _TRIVIAL_CONTENT = AlertContent(subject="subj", body="body", macos_summary="summ
 
 
 @pytest.fixture
+def db_engine(alembic_engine: Engine) -> Engine:
+    """Alias for ``alembic_engine`` — all alerts tests need the view DDL that Alembic applies."""
+    return alembic_engine
+
+
+@pytest.fixture
 def cfg(
     make_config: Callable[..., Config],
     disable_alert_channels: Callable[[Config], Config],
@@ -67,7 +76,7 @@ def cfg(
     return disable_alert_channels(make_config(tmp_path, tmp_path))
 
 
-def _dispatch_env(cfg: Config, session: Session, *, now: datetime) -> DispatchEnv:  # pylint: disable=redefined-outer-name
+def _dispatch_env(cfg: Config, session: Session, *, now: datetime) -> DispatchEnv:  # pylint: disable=redefined-outer-name  # params intentionally share the cfg/session fixture names; this is a helper, not a fixture
     """Build a ``DispatchEnv`` for tests that hand the dispatcher a live session."""
     return DispatchEnv(secrets=cfg.email, rules=cfg.alerts, session=session, now=now)
 
@@ -267,12 +276,12 @@ def test_inactivity_no_cats_does_not_fire_for_silent_camera_when_other_camera_ac
 def test_frequency_fires_when_threshold_reached(
     db_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
     """``count(cat_positive) >= threshold`` in the window → ``FREQUENCY`` candidate with subject + body."""
     cam_id = seed_camera(db_engine)
     for i in range(10):
-        seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 5), has_cat=True)
+        _ = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 5), has_cat=True)
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -287,12 +296,12 @@ def test_frequency_fires_when_threshold_reached(
 def test_frequency_does_not_fire_below_threshold(
     db_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
     """``count < threshold`` → no fire."""
     cam_id = seed_camera(db_engine)
     for i in range(7):
-        seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 5), has_cat=True)
+        _ = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 5), has_cat=True)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
@@ -300,21 +309,27 @@ def test_frequency_does_not_fire_below_threshold(
     assert cand is None
 
 
-def test_frequency_excludes_clips_with_manual_has_cat_false(
+def test_frequency_excludes_reviewed_clips_with_no_cat_membership(
     db_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
-    """Clips marked ``manual_has_cat=False`` (operator override) do NOT count even if ``has_cat=True``."""
+    """Reviewed clips with ``has_cat=True`` but no cat memberships do NOT count (FP correction).
+
+    5 of the 8 detector-positive clips were reviewed and cleared (no cat tags); remaining 3
+    are unreviewed (detector verdict = cat).  Only the 3 unreviewed clips count, keeping the
+    total below the threshold of 8.
+    """
     cam_id = seed_camera(db_engine)
     for i in range(8):
-        seed_clip(
+        reviewed_at = _NOW - timedelta(minutes=30) if i < 5 else None
+        clip_id = seed_clip(
             db_engine,
             camera_id=cam_id,
             start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
             has_cat=True,
-            manual_has_cat=False if i < 5 else None,
         )
+        _set_reviewed_at(db_engine, clip_id, reviewed_at)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
@@ -322,26 +337,197 @@ def test_frequency_excludes_clips_with_manual_has_cat_false(
     assert cand is None
 
 
-def test_frequency_includes_model_false_clips_marked_manual_true(
+def test_frequency_includes_reviewed_clips_with_cat_membership(
     db_engine: Engine,
     seed_camera: Callable[..., int],
-    seed_clip: Callable[..., None],
+    seed_clip: Callable[..., int],
 ) -> None:
-    """``has_cat=False`` + ``manual_has_cat=True`` (operator promote) DOES count toward the threshold."""
+    """Reviewed clips with ``has_cat=False`` but cat membership DOES count (FN correction)."""
     cam_id = seed_camera(db_engine)
+    subj_id = _seed_cat_subject(db_engine)
     for i in range(8):
-        seed_clip(
+        clip_id = seed_clip(
             db_engine,
             camera_id=cam_id,
             start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
             has_cat=False,
-            manual_has_cat=True,
         )
+        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=_NOW - timedelta(minutes=30))
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
         cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
     assert cand is not None
+    assert "(8 in 6h)" in cand.content.subject
+
+
+def _set_reviewed_at(engine: Engine, clip_id: int, reviewed_at: datetime | None) -> None:
+    """Stamp ``reviewed_at`` on an existing Clip row."""
+    with get_session(engine) as session:
+        clip = session.get(Clip, clip_id)
+        assert clip is not None
+        clip.reviewed_at = reviewed_at
+
+
+def _seed_cat_subject(engine: Engine, *, slug: str = "test-cat") -> int:
+    """Insert one cat Subject and return its id."""
+    with get_session(engine) as session:
+        subj = Subject(slug=slug, display_name=slug.capitalize(), kind="cat", display_order=1)
+        session.add(subj)
+        session.flush()
+        return subj.id
+
+
+# --- FREQUENCY parity tests: effective_has_cat cross-product ------------------------------------
+
+
+def test_frequency_effective_has_cat_unreviewed_detector_true(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """Unreviewed clip, detector says cat → counts toward threshold (effective_has_cat = detector)."""
+    cam_id = seed_camera(db_engine)
+    for i in range(8):
+        _ = seed_clip(
+            db_engine,
+            camera_id=cam_id,
+            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
+            has_cat=True,
+        )
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is not None, "unreviewed detector-cat clips must count toward threshold"
+    assert "(8 in 6h)" in cand.content.subject
+
+
+def test_frequency_false_positive_correction_reviewed_no_memberships(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """FP correction: detector says cat, clip reviewed, no cat memberships → does NOT count.
+
+    This is the false-positive correction loop: a reviewer confirms no cat was present by
+    leaving the clip with no cat-subject tags. The alert engine must not fire even though
+    ``has_cat=True``.
+    """
+    cam_id = seed_camera(db_engine)
+    for i in range(8):
+        clip_id = seed_clip(
+            db_engine,
+            camera_id=cam_id,
+            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
+            has_cat=True,
+        )
+        _set_reviewed_at(db_engine, clip_id, _NOW - timedelta(minutes=30))
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is None, "reviewed clips with no cat memberships must not count (FP correction)"
+
+
+def test_frequency_false_negative_correction_reviewed_with_cat_membership(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """FN correction: detector says no cat, clip reviewed, cat membership present → DOES count.
+
+    This is the false-negative correction loop: a reviewer tags a cat subject on the clip.
+    The alert engine must now count these clips even though ``has_cat=False``.
+    """
+    cam_id = seed_camera(db_engine)
+    subj_id = _seed_cat_subject(db_engine)
+    clip_ids = [
+        seed_clip(
+            db_engine,
+            camera_id=cam_id,
+            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
+            has_cat=False,
+        )
+        for i in range(8)
+    ]
+    for clip_id in clip_ids:
+        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=_NOW - timedelta(minutes=30))
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is not None, "reviewed clips tagged with cat subject must count toward threshold (FN correction)"
+    assert "(8 in 6h)" in cand.content.subject
+
+
+def test_frequency_unreviewed_with_cat_membership_uses_detector(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """Unreviewed clip with cat membership tags → detector verdict still governs (clip not reviewed).
+
+    Tagging subjects before review does not flip ``effective_has_cat``; the flip only takes
+    effect once ``reviewed_at`` is set.
+    """
+    cam_id = seed_camera(db_engine)
+    subj_id = _seed_cat_subject(db_engine)
+    clip_ids = [
+        seed_clip(
+            db_engine,
+            camera_id=cam_id,
+            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
+            has_cat=False,
+        )
+        for i in range(8)
+    ]
+    for clip_id in clip_ids:
+        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id)
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is None, "unreviewed clips use detector verdict regardless of subject tags"
+
+
+def test_frequency_reviewed_with_cat_membership_fires(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    seed_clip: Callable[..., int],
+) -> None:
+    """Reviewed clip, detector says cat, cat membership present → still counts.
+
+    Both detector and manual label agree; the alert engine must fire as expected.
+    """
+    cam_id = seed_camera(db_engine)
+    subj_id = _seed_cat_subject(db_engine)
+    clip_ids = [
+        seed_clip(
+            db_engine,
+            camera_id=cam_id,
+            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
+            has_cat=True,
+        )
+        for i in range(8)
+    ]
+    for clip_id in clip_ids:
+        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=_NOW - timedelta(minutes=30))
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+
+    assert cand is not None, "reviewed+tagged clips must count"
     assert "(8 in 6h)" in cand.content.subject
 
 
@@ -980,7 +1166,7 @@ def test_main_wires_log_level_from_config(
         patch("cat_watcher.alerts.load_config", return_value=config),
         patch("cat_watcher.alerts.storage_available", return_value=True),
         patch("cat_watcher.alerts.ensure_storage_layout"),
-        patch("cat_watcher.alerts.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.alerts.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.alerts.run_alerts_tick"),
     ):
         rc = alerts_main([])
@@ -1009,7 +1195,7 @@ def test_main_skips_storage_layout_when_storage_offline(
         patch("cat_watcher.alerts.load_config", return_value=config),
         patch("cat_watcher.alerts.storage_available", return_value=False),
         patch("cat_watcher.alerts.ensure_storage_layout", mock_ensure_storage_layout),
-        patch("cat_watcher.alerts.create_engine", return_value=MagicMock(spec=Engine)),
+        patch("cat_watcher.alerts.engine_for", return_value=MagicMock(spec=Engine)),
         patch("cat_watcher.alerts.run_alerts_tick", mock_run_alerts_tick),
     ):
         rc = alerts_main([])

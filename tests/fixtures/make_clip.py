@@ -66,7 +66,7 @@ def make_clip(duration_seconds: float = 2.0, *, fps: int = 5, width: int = _DEFA
     ]
     # ``check=False`` + manual exit-code handling produces a clearer error message (full stderr +
     # the exact command line) than the default ``CalledProcessError`` repr.
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603  # cmd is a fixed ffmpeg/ffprobe invocation, no shell, no untrusted input
     if result.returncode != 0:
         tmp_output.unlink(missing_ok=True)
         msg = f"ffmpeg failed (rc={result.returncode}):\n{result.stderr}\ncmd: {shlex.join(cmd)}"
