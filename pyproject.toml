@@ -57,12 +57,12 @@ actionlint = ">=1.7.12,<2"
 dprint = ">=0.50.0,<0.51"
 ffmpeg = ">=8.1.1,<9"
 markdownlint-cli = ">=0.48.0,<0.49"
-numpy = ">=2.4.5,<3"
+numpy = ">=2.4.6,<3"
 opencv = ">=4.13.0,<5"
 pytorch = ">=2.10.0,<3"
 shellcheck = ">=0.11.0,<0.12"
 torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
-ultralytics = ">=8.4.51,<9"
+ultralytics = ">=8.4.72,<9"
 zizmor = ">=1.26.1,<2"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
