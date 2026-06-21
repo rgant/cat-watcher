@@ -30,6 +30,7 @@ from cat_watcher.db import (
     Subject,
     get_session,
 )
+from cat_watcher.labels import is_manual_override
 from cat_watcher.web._app_state import get_state
 from cat_watcher.web.clips_routes import clips_router
 
@@ -402,7 +403,11 @@ def _load_timeline_data(
                     clip,
                     label={
                         "effective_has_cat": summary.effective_has_cat,
-                        "show_manual_badge": summary.has_manual_cat and clip.reviewed_at is not None,
+                        "show_manual_badge": is_manual_override(
+                            has_cat=clip.has_cat,
+                            has_manual_cat=summary.has_manual_cat,
+                            reviewed=clip.reviewed_at is not None,
+                        ),
                     },
                     start_window=start_window,
                     total_seconds=total_seconds,
@@ -469,8 +474,8 @@ def _clip_marker(
     so Jinja stays free of timezone arithmetic.
 
     ``label`` carries ``effective_has_cat`` from the ``clip_label_summary`` view and
-    ``show_manual_badge`` (``has_manual_cat AND reviewed_at IS NOT NULL``) — the badge fires only
-    when the clip is reviewed AND has cat frame tags, not for partially-tagged unreviewed clips.
+    ``show_manual_badge`` (see :func:`cat_watcher.labels.is_manual_override`) — the badge fires only
+    when the reviewed verdict disagrees with the detector, not when the operator merely agrees.
     """
     offset_seconds = (clip.start_ts - start_window).total_seconds()
     effective_has_cat = label["effective_has_cat"]

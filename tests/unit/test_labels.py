@@ -8,8 +8,10 @@ the counts are passed in pre-ordered, as the real caller supplies them.
 
 from datetime import UTC, datetime
 
+import pytest
+
 from cat_watcher.db import Subject
-from cat_watcher.labels import build_tag_summary
+from cat_watcher.labels import build_tag_summary, is_manual_override
 
 # Matches the row shape ``query_cat_frame_counts`` returns: (slug, display_name, archived_at, count).
 # Annotating literals with this keeps the invariant ``list`` element type from narrowing to
@@ -22,6 +24,22 @@ _ARCHIVED_AT = datetime(2026, 1, 1, tzinfo=UTC)
 def _event(slug: str, order: int = 1) -> Subject:
     """Build an unsaved event ``Subject`` (``build_tag_summary`` only reads ``.slug``)."""
     return Subject(slug=slug, display_name=slug.capitalize(), kind="event", display_order=order)
+
+
+@pytest.mark.parametrize(
+    ("has_cat", "has_manual_cat", "reviewed", "expected"),
+    [
+        (True, True, False, False),  # unreviewed: never an override regardless of tags
+        (False, True, False, False),  # unreviewed, tagged: still not yet an override
+        (True, True, True, False),  # reviewed agreement: both say cat
+        (False, False, True, False),  # reviewed agreement: both say no cat
+        (False, True, True, True),  # rescued false negative: detector missed, operator tagged
+        (True, False, True, True),  # rejected false positive: detector found, operator says none
+    ],
+)
+def test_is_manual_override_truth_table(*, has_cat: bool, has_manual_cat: bool, reviewed: bool, expected: bool) -> None:
+    """The manual badge fires only when a reviewed verdict disagrees with the detector."""
+    assert is_manual_override(has_cat=has_cat, has_manual_cat=has_manual_cat, reviewed=reviewed) is expected
 
 
 def test_empty_returns_dash() -> None:

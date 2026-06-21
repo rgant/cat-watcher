@@ -14,6 +14,7 @@ from db_helpers import AUTH_HEADER, DEFAULT_START_TS, make_clip_frame, seed_came
 from sqlalchemy import event as sa_event
 
 from cat_watcher.db import Camera, Clip, ClipFrame, ClipFrameSubject, Subject, create_engine, get_session
+from cat_watcher.labels import query_cat_frame_counts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -341,7 +342,7 @@ def test_tag_table_button_glyph_and_title(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """Button glyph is the first letter of display_name uppercased; title is the full display_name."""
+    """Button text is the full display_name; title is the full display_name with any description."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
@@ -358,8 +359,8 @@ def test_tag_table_button_glyph_and_title(
 
     assert response.status_code == 200
     assert 'title="Marcel"' in response.text
-    # Glyph is the uppercased first letter rendered as the button's text content.
-    assert ">M</button>" in response.text
+    # Full display_name is rendered as the button's text content (not a single-letter glyph).
+    assert ">Marcel</button>" in response.text
 
 
 def test_tag_table_button_title_includes_description(
@@ -625,6 +626,71 @@ def test_tag_summary_cats_with_frame_counts_no_events(
 
     assert response.status_code == 200
     assert "marcel: 3, rufus: 0" in response.text
+
+
+def test_query_cat_frame_counts_isolates_by_clip(
+    storage_dirs: tuple[Path, Path],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Counts are scoped to the requested clip — memberships on other clips must not leak in.
+
+    Regression: a count over ``clip_frame_subjects.clip_frame_id`` (always non-null) ignored the
+    ``clip_frames.clip_id`` join filter, so every clip reported the global per-cat total.
+    """
+    internal_root, _ = storage_dirs
+    cam_id, clip_a = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_dirs[1])
+    engine = _detail_engine_for(internal_root)
+    try:
+        marcel_id = db_helpers.seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=1)
+        _ = db_helpers.seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=2)
+        with get_session(engine) as session:
+            clip_b = db_helpers.build_test_clip(cam_id, start_ts=datetime(2026, 5, 2, 8, 0, 0, tzinfo=UTC))
+            session.add(clip_b)
+            session.flush()
+            clip_b_id = clip_b.id
+            for i in range(4):
+                frame = ClipFrame(clip_id=clip_a, ordinal=i, t_offset_seconds=float(i), score=0.9, thumb_path=f"thumbs/a{i}.jpg")
+                session.add(frame)
+                session.flush()
+                session.add(ClipFrameSubject(clip_frame_id=frame.id, subject_id=marcel_id))
+
+        counts_a = {slug: count for slug, _name, _archived, count in query_cat_frame_counts(engine, clip_a)}
+        counts_b = {slug: count for slug, _name, _archived, count in query_cat_frame_counts(engine, clip_b_id)}
+    finally:
+        engine.dispose()
+
+    assert counts_a == {"marcel": 4, "rufus": 0}
+    assert counts_b == {"marcel": 0, "rufus": 0}
+
+
+def test_label_summary_endpoint_returns_recomputed_fields(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """GET /clips/{id}/label-summary returns the same tag_summary / has_manual_cat the page renders."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    engine = _detail_engine_for(internal_root)
+    try:
+        marcel_id = db_helpers.seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=1)
+        _ = db_helpers.seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=2)
+        with get_session(engine) as session:
+            for i in range(2):
+                frame = ClipFrame(clip_id=clip_id, ordinal=i, t_offset_seconds=float(i), score=0.9, thumb_path=f"thumbs/f{i}.jpg")
+                session.add(frame)
+                session.flush()
+                session.add(ClipFrameSubject(clip_frame_id=frame.id, subject_id=marcel_id))
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(config) as client:
+        response = client.get(f"/clips/{clip_id}/label-summary", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert response.json() == {"tag_summary": "marcel: 2, rufus: 0", "has_manual_cat": True}
 
 
 def _seed_cats_and_events_for_summary(engine: Engine, clip_id: int) -> None:

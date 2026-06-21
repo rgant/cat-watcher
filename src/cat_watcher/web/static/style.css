@@ -1059,3 +1059,176 @@ video {
   cursor: not-allowed;
   color: var(--color-muted);
 }
+
+/* Small round "?" affordance on the tag table — the only on-screen way to discover the keyboard
+   shortcuts dialog (otherwise '?'-key only). Native title attribute supplies the tooltip. */
+.kbd-help-open {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+
+  inline-size: 1.75rem;
+  block-size: 1.75rem;
+  min-block-size: auto;
+  padding: 0;
+  border: var(--hairline) solid var(--color-border);
+  border-radius: 50%;
+
+  font-size: .9rem;
+  font-weight: 600;
+  color: var(--color-muted);
+
+  background: var(--color-bg-card);
+}
+
+@media (hover: hover) {
+  .kbd-help-open:hover {
+    color: var(--color-text);
+    background: var(--color-bg-stripe);
+  }
+}
+
+.kbd-help {
+  max-inline-size: min(32rem, 92vi);
+  border: var(--hairline) solid var(--color-border);
+  border-radius: .5rem;
+
+  & .kbd-help-close {
+    float: inline-end;
+
+    min-block-size: auto;
+    padding: 0 var(--space-sm);
+    border: none;
+
+    font-size: 1.25rem;
+    line-height: 1;
+    color: var(--color-muted);
+
+    background: transparent;
+  }
+
+  & table {
+    border-collapse: collapse;
+  }
+
+  & td {
+    padding: var(--space-xs) var(--space-sm);
+  }
+
+  & kbd {
+    padding: .1rem .35rem;
+    border: var(--hairline) solid var(--color-border);
+    border-radius: .2rem;
+
+    font-family: var(--font-mono), monospace;
+    font-size: .8rem;
+
+    background: var(--color-bg-stripe);
+  }
+}
+
+/* =================================================================================================
+ * Clip-detail per-frame tag table
+ * ============================================================================================== */
+
+.tag-table {
+  margin-block: var(--space-md);
+}
+
+.tag-table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-block-end: var(--space-xs);
+}
+
+/* Horizontal scroll keeps full-word subject buttons reachable on a narrow phone without wrapping the
+   per-frame row into an unreadable stack. The toolbar sits outside this so the help icon never
+   scrolls away. */
+.tag-table-scroll {
+  scrollbar-gutter: stable;
+  overflow-inline: auto;
+
+  /* stylelint-disable-next-line plugin/use-baseline -- logical longhand not yet Baseline */
+  overscroll-behavior-inline: contain;
+
+  & table {
+    border-collapse: collapse;
+    inline-size: 100%;
+  }
+}
+
+.tag-row {
+  border-block-end: var(--hairline) solid var(--color-border);
+
+  & td {
+    padding: var(--space-xs) var(--space-sm);
+    vertical-align: middle;
+  }
+}
+
+/* The keyboard ↑/↓ cursor: a left accent bar + tint so the operator can see which frame the digit
+   keys will tag. */
+.tag-row.active-frame {
+  background: var(--color-bg-stripe);
+  box-shadow: inset .25rem 0 0 var(--color-link);
+}
+
+.tag-row-thumb img {
+  display: block;
+  border-radius: 4px;
+}
+
+.tag-btn-group {
+  white-space: nowrap;
+}
+
+.tag-btn {
+  min-block-size: var(--tap-target);
+  margin: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 2px solid var(--color-border);
+  border-radius: .25rem;
+
+  font-size: .9rem;
+  color: var(--color-text);
+
+  background: var(--color-bg-card);
+}
+
+/* The pressed (tagged) state must be unmistakable next to its unpressed sibling: filled accent +
+   light text. The subject's own color stays on the border (set inline) as an identity hint. */
+.tag-btn-on {
+  font-weight: 600;
+  color: var(--color-bg-card);
+  background: var(--color-link);
+}
+
+@media (hover: hover) {
+  .tag-btn-off:hover {
+    background: var(--color-bg-stripe);
+  }
+}
+
+/* Transient "Save failed (NNN)" notice inserted after a button when its PUT/DELETE errors. */
+.tag-btn-error {
+  margin-inline-start: var(--space-xs);
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--color-error);
+}
+
+.review-control {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+
+  margin-block: var(--space-md);
+}
+
+.review-badge {
+  font-size: .875rem;
+  color: var(--color-muted);
+}

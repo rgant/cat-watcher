@@ -41,15 +41,40 @@ function showInlineError(btn, status) {
   }, 4000);
 }
 
-// Called by hx-on::after-request on each tag button. On 2xx, flips the button's pressed state and
-// swaps hx-put/hx-delete in place. On 4xx/5xx, shows a brief inline error message next to the
-// button.
+// Re-fetches the server-computed tag_summary / has_manual_cat after a membership change and writes
+// them into the Detection <dl>, so the aggregate matches a full reload without one. Recomputing in
+// the browser would miss archived-subject contributions the button row doesn't render.
+function updateLabelSummary(clipId) {
+  'use strict';
+  fetch('/clips/' + encodeURIComponent(clipId) + '/label-summary', {headers: {Accept: 'application/json'}})
+    .then(function (resp) {
+      return resp.ok ? resp.json() : null;
+    })
+    .then(function (data) {
+      if (!data) {
+        return;
+      }
+      var summaryEl = document.getElementById('detail-tag-summary');
+      if (summaryEl) {
+        summaryEl.textContent = data.tag_summary;
+      }
+      var manualEl = document.getElementById('detail-has-manual-cat');
+      if (manualEl) {
+        manualEl.textContent = data.has_manual_cat ? 'Yes' : 'No';
+      }
+    });
+}
+
+// Called by hx-on::after-request on each tag button. On 2xx, flips the button's pressed state,
+// swaps hx-put/hx-delete in place, and refreshes the tag_summary. On 4xx/5xx, shows a brief inline
+// error message next to the button.
 function handleTagResponse(evt, btn) {
   'use strict';
   var status = evt.detail.xhr.status;
   if (status >= 200 && status < 300) {
     var pressed = btn.getAttribute('aria-pressed') === 'true';
     var url = btn.getAttribute('hx-put') || btn.getAttribute('hx-delete') || '';
+    var clipId = url.split('/')[2];
     if (pressed) {
       btn.setAttribute('aria-pressed', 'false');
       btn.classList.replace('tag-btn-on', 'tag-btn-off');
@@ -63,15 +88,36 @@ function handleTagResponse(evt, btn) {
     }
     // Re-process so HTMX picks up the swapped attribute.
     htmx.process(btn);
+    updateLabelSummary(clipId);
   } else {
     showInlineError(btn, status);
+  }
+}
+
+// Mirrors the just-toggled reviewed state into the Detection <dl>'s reviewed_at row so it matches
+// without a reload. The server returns 204 (no timestamp), so the client clock stands in until the
+// next full page load replaces it with the persisted value.
+function updateReviewedAtRow(reviewed) {
+  'use strict';
+  var dd = document.getElementById('detail-reviewed-at');
+  if (!dd) {
+    return;
+  }
+  if (reviewed) {
+    var iso = new Date().toISOString();
+    var time = document.createElement('time');
+    time.setAttribute('datetime', iso);
+    time.textContent = iso;
+    dd.replaceChildren(time);
+  } else {
+    dd.textContent = '—';
   }
 }
 
 // Called by hx-on::after-request on the Mark reviewed / Re-open for review button.
 // On 2xx POST: flips label to "Re-open for review", swaps hx-post to hx-delete, inserts badge.
 // On 2xx DELETE: flips label to "Mark reviewed", swaps hx-delete to hx-post, removes badge.
-// On 4xx/5xx: shows an inline error span.
+// Both branches sync the Detection reviewed_at row. On 4xx/5xx: shows an inline error span.
 function handleReviewResponse(evt, btn) {
   'use strict';
   var status = evt.detail.xhr.status;
@@ -99,6 +145,7 @@ function handleReviewResponse(evt, btn) {
         }
       }
     }
+    updateReviewedAtRow(wasPost);
     htmx.process(btn);
   } else {
     showInlineError(btn, status);

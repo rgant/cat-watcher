@@ -284,6 +284,32 @@ def test_clips_list_filter_by_has_cat_true(
     assert "070000" not in response.text
 
 
+def test_clips_list_empty_has_cat_is_unfiltered(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """``?has_cat=`` (the filter form's "Any" option) is treated as no filter, not a 422 bool error."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _ = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, has_cat=True)
+    _seed_extra_clip(
+        db_session_factory,
+        internal_root,
+        source_filename="070000.mp4",
+        start_ts=datetime(2026, 5, 1, 7, 0, 0, tzinfo=UTC),
+        has_cat=False,
+    )
+
+    with alembic_web_test_client(config) as client:
+        response = client.get("/clips?camera=&has_cat=&date_str=&reviewed=any", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert "064704" in response.text
+    assert "070000" in response.text
+
+
 def test_clips_list_filter_by_date_str(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
@@ -1097,19 +1123,50 @@ def test_clips_list_badge_class_unreviewed_no_memberships(
     assert "(manual)" not in response.text
 
 
-def test_clips_list_badge_class_reviewed_with_cat_memberships(
+def test_clips_list_no_manual_badge_when_operator_agrees(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """``has_cat=TRUE``, reviewed, cat memberships → ``badge-cat badge-manual`` class, ``(manual)`` text.
+    """``has_cat=TRUE``, reviewed, cat memberships → ``badge-cat`` with NO ``(manual)`` marker.
 
-    Uses ``?reviewed=yes`` because the default ``reviewed=no`` queue excludes already-reviewed clips.
+    The operator's label agrees with the detector, so the manual badge is suppressed — it fires only
+    on disagreement. Uses ``?reviewed=yes`` because the default queue excludes reviewed clips.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, has_cat=True)
+    engine = _clips_engine_for(internal_root)
+    try:
+        subj_id = seed_cat_subject(engine)
+        tag_clip_frame(engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=DEFAULT_START_TS)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(config) as client:
+        response = client.get("/clips?reviewed=yes", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert "badge-cat" in response.text
+    assert "badge-manual" not in response.text
+    assert "(manual)" not in response.text
+
+
+def test_clips_list_manual_badge_for_rescued_false_negative(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """``has_cat=FALSE``, reviewed, cat memberships → ``badge-cat badge-manual`` + ``(manual)``.
+
+    The detector missed a cat the operator tagged — a disagreement, so the manual badge fires and the
+    effective verdict flips to cat-positive.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, has_cat=False)
     engine = _clips_engine_for(internal_root)
     try:
         subj_id = seed_cat_subject(engine)
@@ -1132,12 +1189,11 @@ def test_clips_list_badge_class_reviewed_no_memberships_fp_correction(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """``has_cat=TRUE``, reviewed, no memberships → ``badge-no-cat``, no ``(manual)`` text.
+    """``has_cat=TRUE``, reviewed, no memberships → ``badge-no-cat badge-manual`` + ``(manual)``.
 
     This is the false-positive correction case: the detector said cat, the operator reviewed but
-    tagged no cat frames, so ``effective_has_cat`` flips to FALSE. ``has_manual_cat`` is 0 (no
-    cat frame memberships), so the manual badge does not fire — the spec requires
-    ``has_manual_cat IS TRUE AND reviewed_at IS NOT NULL`` for the badge.
+    tagged no cat frames, so ``effective_has_cat`` flips to FALSE. That disagreement with the detector
+    fires the manual badge.
 
     Uses ``?reviewed=yes`` because the default ``reviewed=no`` queue excludes already-reviewed clips.
     """
@@ -1159,8 +1215,8 @@ def test_clips_list_badge_class_reviewed_no_memberships_fp_correction(
 
     assert response.status_code == 200
     assert "badge-no-cat" in response.text
-    assert "badge-manual" not in response.text
-    assert "(manual)" not in response.text
+    assert "badge-manual" in response.text
+    assert "(manual)" in response.text
 
 
 def test_clips_list_badge_class_partially_tagged_unreviewed(

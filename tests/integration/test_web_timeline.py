@@ -76,9 +76,10 @@ def _state_clip_kwargs(
     reference_now: datetime,
     label: str,
     *,
+    has_cat: bool = False,
     analysis_error: str | None = None,
 ) -> dict[str, object]:
-    """Build a Clip-row kwargs dict that includes ``analysis_error``.
+    """Build a Clip-row kwargs dict, overriding ``has_cat`` / ``analysis_error`` as needed.
 
     ``_seed_clip_rows`` doesn't surface those fields, so tests that need them construct rows
     directly via this helper to keep field boilerplate out of test bodies.
@@ -93,7 +94,7 @@ def _state_clip_kwargs(
         "file_path": f"clips/pantry/state-{label}.mp4",
         "thumb_path": f"thumbs/pantry/state-{label}.jpg",
         "file_size_bytes": 1024,
-        "has_cat": False,
+        "has_cat": has_cat,
         "analysis_error": analysis_error,
         "detector_version": "yolov11n@deadbeef",
         "ingested_at": reference_now,
@@ -656,6 +657,39 @@ def test_clip_manual_badge_present_for_reviewed_clip_with_frame_membership(
     assert "clip-manual" in response.text, "reviewed + tagged clip must carry clip-manual badge"
 
 
+def test_clip_manual_badge_absent_when_operator_agrees_with_detector(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """``has_cat=True`` + reviewed + cat-tagged → ``clip-cat`` but NO ``clip-manual``.
+
+    The operator's label agrees with the detector, so the manual marker is suppressed.
+    """
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    reference_now = datetime.now(UTC).replace(microsecond=0)
+    with db_session_factory(internal_root) as session:
+        clip = Clip(**_state_clip_kwargs(cam_id, reference_now, "reviewed-agree", has_cat=True))
+        session.add(clip)
+        session.flush()
+        clip_id = clip.id
+
+    engine = _engine_for(internal_root)
+    try:
+        subj_id = seed_cat_subject(engine)
+        tag_clip_frame(engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=reference_now)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/?range=24h", headers=AUTH_HEADER).text
+
+    assert "clip-cat" in body
+    assert "clip-manual" not in body, "agreement with the detector must not carry clip-manual"
+
+
 def test_effective_has_cat_unreviewed_clip_uses_detector_verdict(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
@@ -667,10 +701,8 @@ def test_effective_has_cat_unreviewed_clip_uses_detector_verdict(
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)
     reference_now = datetime.now(UTC).replace(microsecond=0)
-    kwargs = _state_clip_kwargs(cam_id, reference_now, "unreviewed-detector")
-    kwargs["has_cat"] = True
     with db_session_factory(internal_root) as session:
-        session.add(Clip(**kwargs))
+        session.add(Clip(**_state_clip_kwargs(cam_id, reference_now, "unreviewed-detector", has_cat=True)))
 
     with alembic_web_test_client(config) as client:
         response = client.get("/?range=24h", headers=AUTH_HEADER)

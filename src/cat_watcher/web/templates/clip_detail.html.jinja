@@ -57,57 +57,67 @@
     </section>
     <section class="tag-table" aria-labelledby="tag-table-heading">
       <h2 id="tag-table-heading" class="sr-only">Frame labels</h2>
-      <table>
-        <tbody>
-          {% for row in frame_tag_rows %}
-            <tr class="{{ 'tag-row active-frame' if loop.first else 'tag-row' }}">
-              <td class="tag-row-thumb">
-                <img src="{{ url_for('media_frame', frame_id=row.frame.id) }}"
-                     alt="Frame {{ row.frame.ordinal }}"
-                     loading="lazy"
-                     width="160"
-                     height="90">
-              </td>
-              {% for group in row.button_groups %}
-                <td class="tag-btn-group tag-btn-group-{{ group.kind }}">
-                  {% for btn in group.buttons %}
-                    {% if btn.hx_put %}
-                      <button type="button"
-                              class="{{ btn.button_class }}"
-                              data-subject-slug="{{ btn.slug }}"
-                              data-frame-id="{{ btn.frame_id }}"
-                              data-subject-id="{{ btn.subject_id }}"
-                              title="{{ btn.title }}"
-                              aria-label="{{ btn.title }}"
-                              aria-pressed="false"
-                              hx-put="{{ btn.hx_put }}"
-                              hx-swap="none"
-                              hx-disabled-elt="this"
-                              hx-on::after-request="handleTagResponse(event, this)"
-                              {% if btn.color %}style="border-color: {{ btn.color }};"{% endif %}>{{ btn.glyph }}</button>
-                    {% endif %}
-                    {% if btn.hx_delete %}
-                      <button type="button"
-                              class="{{ btn.button_class }}"
-                              data-subject-slug="{{ btn.slug }}"
-                              data-frame-id="{{ btn.frame_id }}"
-                              data-subject-id="{{ btn.subject_id }}"
-                              title="{{ btn.title }}"
-                              aria-label="{{ btn.title }}"
-                              aria-pressed="true"
-                              hx-delete="{{ btn.hx_delete }}"
-                              hx-swap="none"
-                              hx-disabled-elt="this"
-                              hx-on::after-request="handleTagResponse(event, this)"
-                              {% if btn.color %}style="border-color: {{ btn.color }};"{% endif %}>{{ btn.glyph }}</button>
-                    {% endif %}
-                  {% endfor %}
+      <div class="tag-table-toolbar">
+        <button type="button"
+                id="kbd-help-open"
+                class="kbd-help-open"
+                aria-haspopup="dialog"
+                aria-label="Keyboard shortcuts"
+                title="Keyboard shortcuts (?)">?</button>
+      </div>
+      <div class="tag-table-scroll">
+        <table>
+          <tbody>
+            {% for row in frame_tag_rows %}
+              <tr class="{{ 'tag-row active-frame' if loop.first else 'tag-row' }}">
+                <td class="tag-row-thumb">
+                  <img src="{{ url_for('media_frame', frame_id=row.frame.id) }}"
+                       alt="Frame {{ row.frame.ordinal }}"
+                       loading="lazy"
+                       width="160"
+                       height="90">
                 </td>
-              {% endfor %}
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+                {% for group in row.button_groups %}
+                  <td class="tag-btn-group tag-btn-group-{{ group.kind }}">
+                    {% for btn in group.buttons %}
+                      {% if btn.hx_put %}
+                        <button type="button"
+                                class="{{ btn.button_class }}"
+                                data-subject-slug="{{ btn.slug }}"
+                                data-frame-id="{{ btn.frame_id }}"
+                                data-subject-id="{{ btn.subject_id }}"
+                                title="{{ btn.title }}"
+                                aria-label="{{ btn.title }}"
+                                aria-pressed="false"
+                                hx-put="{{ btn.hx_put }}"
+                                hx-swap="none"
+                                hx-disabled-elt="this"
+                                hx-on::after-request="handleTagResponse(event, this)"
+                                {% if btn.color %}style="border-color: {{ btn.color }};"{% endif %}>{{ btn.label }}</button>
+                      {% endif %}
+                      {% if btn.hx_delete %}
+                        <button type="button"
+                                class="{{ btn.button_class }}"
+                                data-subject-slug="{{ btn.slug }}"
+                                data-frame-id="{{ btn.frame_id }}"
+                                data-subject-id="{{ btn.subject_id }}"
+                                title="{{ btn.title }}"
+                                aria-label="{{ btn.title }}"
+                                aria-pressed="true"
+                                hx-delete="{{ btn.hx_delete }}"
+                                hx-swap="none"
+                                hx-disabled-elt="this"
+                                hx-on::after-request="handleTagResponse(event, this)"
+                                {% if btn.color %}style="border-color: {{ btn.color }};"{% endif %}>{{ btn.label }}</button>
+                      {% endif %}
+                    {% endfor %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </section>
   {% endif %}
   <div class="review-control">
@@ -128,17 +138,6 @@
       <span class="review-badge">Reviewed {{ reviewed_at_short }}</span>
     {% endif %}
   </div>
-  <section aria-labelledby="subjects-heading">
-    <h2 id="subjects-heading">Label</h2>
-    {% for kind, subjects in subjects_by_kind.items() %}
-      {% if subjects %}
-        <ul class="subject-list subject-list-{{ kind }}"
-            aria-label="{{ kind }} subjects">
-          {% for subj in subjects %}<li data-subject-id="{{ subj.id }}" data-subject-slug="{{ subj.slug }}">{{ subj.display_name }}</li>{% endfor %}
-        </ul>
-      {% endif %}
-    {% endfor %}
-  </section>
   <section aria-labelledby="detection-heading">
     <h2 id="detection-heading">Detection</h2>
     <dl class="detail-meta">
@@ -167,7 +166,7 @@
         {% endif %}
       </dd>
       <dt>reviewed_at</dt>
-      <dd>
+      <dd id="detail-reviewed-at">
         {% if reviewed_at_iso %}
           <time datetime="{{ reviewed_at_iso }}">{{ reviewed_at_iso }}</time>
         {% else %}
@@ -175,18 +174,18 @@
         {% endif %}
       </dd>
       <dt>has_manual_cat</dt>
-      <dd>
+      <dd id="detail-has-manual-cat">
         {{ "Yes" if has_manual_cat else "No" }}
       </dd>
       <dt>tag_summary</dt>
-      <dd>
+      <dd id="detail-tag-summary" data-clip-id="{{ clip.id }}">
         {{ tag_summary }}
       </dd>
     </dl>
   </section>
   <script src="{{ url_for('static', path='clip_detail.js') }}" defer></script>
   <script src="{{ url_for('static', path='clip_detail_keyboard.js') }}" defer></script>
-  <dialog id="kbd-help" aria-label="Keyboard shortcuts">
+  <dialog id="kbd-help" class="kbd-help" aria-label="Keyboard shortcuts">
     <form method="dialog">
       <button type="submit" class="kbd-help-close" aria-label="Close">×</button>
     </form>

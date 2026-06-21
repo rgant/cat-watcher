@@ -100,4 +100,15 @@
   }
 
   document.addEventListener('keydown', handleKeyDown);
+
+  // The dialog otherwise only opens via the '?' key; this gives it a discoverable on-screen trigger.
+  var helpOpenBtn = document.getElementById('kbd-help-open');
+  if (helpOpenBtn) {
+    helpOpenBtn.addEventListener('click', function () {
+      var overlay = document.getElementById('kbd-help');
+      if (overlay && typeof overlay.showModal === 'function' && !overlay.open) {
+        overlay.showModal();
+      }
+    });
+  }
 })();

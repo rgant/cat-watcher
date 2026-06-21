@@ -351,7 +351,7 @@ def _print_recent_alerts(session: Session, *, now: datetime) -> None:
     cutoff = now - timedelta(days=_RECENT_ALERTS_WINDOW_DAYS)
     alerts_by_type: dict[str, list[AlertSent]] = {}
     rows = session.scalars(
-        select(AlertSent)  # keep one query clause per line (ruff would join the chain)
+        select(AlertSent)  # fmt: wrap
         .where(AlertSent.sent_at >= cutoff)
         .order_by(desc(AlertSent.sent_at))
         .limit(_RECENT_ALERTS_QUERY_LIMIT),

@@ -294,7 +294,7 @@ def evaluate_inactivity_no_cats_global(
     a fleet-wide no-cats alert and a per-camera unreachable alert can coexist on the same tick.
     """
     cam = session.scalar(
-        select(Camera)  # keep one query clause per line (ruff would join the chain)
+        select(Camera)  # fmt: wrap
         .where(Camera.last_cat_seen_at.is_not(None))
         .order_by(Camera.last_cat_seen_at.desc())
         .limit(1),
@@ -413,7 +413,7 @@ def evaluate_web_flapping(  # noqa: PLR0913  # rule reads agent_starts against w
     cutoff = now - timedelta(minutes=window_minutes)
     rows = list(
         session.scalars(
-            select(AgentStart)  # keep one query clause per line (ruff would join the chain)
+            select(AgentStart)  # fmt: wrap
             .where(AgentStart.agent_name == "web")
             .where(AgentStart.started_at >= cutoff)
             .order_by(AgentStart.started_at),

@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import desc, func, select
 
 from cat_watcher.db import Camera, Clip, ClipFrameSubject, ClipLabelSummary, Subject, get_session
-from cat_watcher.labels import build_tag_summary, query_cat_frame_counts
+from cat_watcher.labels import build_tag_summary, is_manual_override, query_cat_frame_counts
 from cat_watcher.web._app_state import get_state
 
 if TYPE_CHECKING:
@@ -162,7 +162,7 @@ def _build_subject_button(
     is_pressed = subj.id in tagged
     membership_url = f"/clips/{clip_id}/frames/{frame_id}/subjects/{subj.id}"
     return {
-        "glyph": subj.display_name[0].upper(),
+        "label": subj.display_name,
         "title": _button_title(subj),
         "slug": subj.slug,
         "subject_id": subj.id,
@@ -201,6 +201,20 @@ def _build_frame_tag_rows(
     return rows
 
 
+def _parse_has_cat(raw: str | None) -> bool | None:
+    """Map a raw ``has_cat`` query value to a tri-state filter.
+
+    The filter form's "Any" option submits ``has_cat=`` (empty string); only ``"true"``/``"false"``
+    select a value. Anything else — including the empty string — means "no filter". Declaring the
+    route param as ``bool`` instead would make FastAPI 422 on the empty string.
+    """
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    return None
+
+
 def _extract_tagged_slugs(label_row: ClipLabelSummary | None) -> set[str]:
     """Parse ``tagged_subject_slugs`` from a ``clip_label_summary`` row into a slug set."""
     if label_row is None:
@@ -209,13 +223,35 @@ def _extract_tagged_slugs(label_row: ClipLabelSummary | None) -> set[str]:
     return set(raw_slugs.split(",")) if raw_slugs else set()
 
 
+def _compute_label_summary(engine: Engine, clip_id: int) -> tuple[str, bool]:
+    """Compute ``(tag_summary, has_manual_cat)`` for a clip from its current frame memberships.
+
+    Shared by the detail-page render and the ``/clips/{id}/label-summary`` endpoint so the value
+    shown live after a frame-tag toggle matches a full page reload exactly.
+    """
+    cat_frame_counts = query_cat_frame_counts(engine, clip_id)
+    with get_session(engine) as session:
+        label_row = session.scalars(select(ClipLabelSummary).where(ClipLabelSummary.clip_id == clip_id)).one_or_none()
+        tagged_slugs = _extract_tagged_slugs(label_row)
+        has_manual_cat = label_row.has_manual_cat if label_row is not None else False
+        event_subjects = list(
+            session.scalars(
+                select(Subject)  # fmt: wrap
+                .where(Subject.kind == "event", Subject.archived_at.is_(None))
+                .order_by(Subject.display_order),
+            ),
+        )
+        tag_summary = build_tag_summary(cat_frame_counts, tagged_slugs, event_subjects)
+    return tag_summary, has_manual_cat
+
+
 @clips_router.get("/clips")
 async def list_clips(
     request: Request,
     *,
     reviewed: Literal["any", "no", "yes"] = "no",
     camera: str | None = None,
-    has_cat: bool | None = None,
+    has_cat: str | None = None,
     date_str: str | None = None,
 ) -> object:
     """Render the clip-listing page.
@@ -223,10 +259,13 @@ async def list_clips(
     ``reviewed=no`` (default) shows unreviewed clips oldest-first — the operator review queue.
     ``reviewed=yes`` shows reviewed clips newest-reviewed-first. ``reviewed=any`` preserves
     ``start_ts DESC``. Capped at :data:`_CLIPS_LIST_LIMIT`; ``date_str`` is interpreted as a UTC day.
+    ``has_cat`` is parsed as a tri-state string (see :func:`_parse_has_cat`) so the filter form's
+    empty "Any" value is accepted rather than rejected as an invalid bool.
     """
     state = get_state(request)
     display_tz = ZoneInfo(state.config.web.display_timezone)
-    clip_filter = _ClipsFilter(reviewed=reviewed, camera=camera, has_cat=has_cat, date_str=date_str)
+    has_cat_filter = _parse_has_cat(has_cat)
+    clip_filter = _ClipsFilter(reviewed=reviewed, camera=camera, has_cat=has_cat_filter, date_str=date_str)
     clip_rows, cameras, total_count, reviewed_count = _query_clips_list(state.engine, clip_filter, display_tz=display_tz)
     return state.templates.TemplateResponse(
         request,
@@ -234,7 +273,7 @@ async def list_clips(
         {
             "clip_rows": clip_rows,
             "cameras": cameras,
-            "filters": {"camera": camera, "has_cat": has_cat, "date": date_str, "reviewed": reviewed},
+            "filters": {"camera": camera, "has_cat": has_cat_filter, "date": date_str, "reviewed": reviewed},
             "filter_qs": _build_filter_qs(clip_filter),
             "progress": {"reviewed": reviewed_count, "total": total_count},
             "tz": state.config.web.display_timezone,
@@ -256,7 +295,11 @@ def _project_one_clip_row(
             cameras,
             display_tz=display_tz,
             effective_has_cat=summary.effective_has_cat,
-            show_manual_badge=summary.has_manual_cat and clip.reviewed_at is not None,
+            show_manual_badge=is_manual_override(
+                has_cat=clip.has_cat,
+                has_manual_cat=summary.has_manual_cat,
+                reviewed=clip.reviewed_at is not None,
+            ),
         ),
         **_reviewed_at_fields(clip.reviewed_at),
     }
@@ -384,22 +427,12 @@ async def clip_detail(request: Request, clip_id: int) -> object:
 
     prev_url, next_url = _resolve_nav_urls(state.engine, data.clip, request)
 
-    with get_session(state.engine) as label_session:
-        label_row = label_session.scalars(
-            select(ClipLabelSummary).where(ClipLabelSummary.clip_id == clip_id),
-        ).one_or_none()
-        if label_row is not None:
-            label_session.expunge(label_row)
-
-    cat_frame_counts = query_cat_frame_counts(state.engine, clip_id)
-    tagged_slugs = _extract_tagged_slugs(label_row)
+    tag_summary, has_manual_cat = _compute_label_summary(state.engine, clip_id)
 
     # The Amcrest video has the camera-local clock burned into the OSD; rendering the heading in
     # display_timezone keeps the page label aligned with what the user sees in the player.
     display_start = data.clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
     frame_tag_rows = _build_frame_tag_rows(clip_id, data.frames, data.subjects_by_kind, data.frame_memberships)
-    tag_summary = build_tag_summary(cat_frame_counts, tagged_slugs, data.subjects_by_kind["event"])
-    has_manual_cat = label_row.has_manual_cat if label_row is not None else False
 
     return state.templates.TemplateResponse(
         request,
@@ -416,13 +449,20 @@ async def clip_detail(request: Request, clip_id: int) -> object:
             "tz": state.config.web.display_timezone,
             "subjects_by_kind": data.subjects_by_kind,
             "frame_memberships": data.frame_memberships,
-            "label_summary": label_row,
             "frame_tag_rows": frame_tag_rows,
             "tag_summary": tag_summary,
             "has_manual_cat": has_manual_cat,
             **_build_review_context(clip_id, data.clip.reviewed_at),
         },
     )
+
+
+@clips_router.get("/clips/{clip_id}/label-summary")
+async def clip_label_summary(request: Request, clip_id: int) -> dict[str, object]:
+    """Return the recomputed ``tag_summary`` / ``has_manual_cat`` as JSON for live update after a tag toggle."""
+    state = get_state(request)
+    tag_summary, has_manual_cat = _compute_label_summary(state.engine, clip_id)
+    return {"tag_summary": tag_summary, "has_manual_cat": has_manual_cat}
 
 
 def _clip_summary(

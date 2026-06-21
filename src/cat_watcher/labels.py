@@ -29,7 +29,7 @@ def query_cat_frame_counts(engine: Engine, clip_id: int) -> list[tuple[str, str,
             Subject.slug,
             Subject.display_name,
             Subject.archived_at,
-            func.count(ClipFrameSubject.clip_frame_id).label("frame_count"),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
+            func.count(ClipFrame.id).label("frame_count"),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
         )
         .select_from(Subject)
         .outerjoin(ClipFrameSubject, ClipFrameSubject.subject_id == Subject.id)
@@ -44,6 +44,17 @@ def query_cat_frame_counts(engine: Engine, clip_id: int) -> list[tuple[str, str,
     with get_session(engine) as session:
         rows = session.execute(stmt).all()
     return [(cast("str", r[0]), cast("str", r[1]), cast("datetime | None", r[2]), cast("int", r[3])) for r in rows]
+
+
+def is_manual_override(*, has_cat: bool, has_manual_cat: bool, reviewed: bool) -> bool:
+    """Return whether the operator's reviewed verdict disagrees with the detector.
+
+    Drives the ``badge-manual`` / ``clip-manual`` marker, which flags only clips where review
+    *changed* the cat verdict: a rescued false negative (detector missed a cat the operator tagged)
+    or a rejected false positive (detector found a cat the operator confirmed absent). Agreement and
+    unreviewed clips are unmarked, keeping the listing quiet for the common case.
+    """
+    return reviewed and has_manual_cat != has_cat
 
 
 def build_tag_summary(
