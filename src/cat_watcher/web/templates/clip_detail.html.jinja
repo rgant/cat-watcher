@@ -93,7 +93,9 @@
                                 hx-swap="none"
                                 hx-disabled-elt="this"
                                 hx-on::after-request="handleTagResponse(event, this)"
-                                {% if btn.color %}style="border-color: {{ btn.color }};"{% endif %}>{{ btn.label }}</button>
+                                {% if btn.color %}
+                                  style="border-color: {{ btn.color }};"
+                                {% endif %}>{{ btn.label }}</button>
                       {% endif %}
                       {% if btn.hx_delete %}
                         <button type="button"
@@ -108,7 +110,9 @@
                                 hx-swap="none"
                                 hx-disabled-elt="this"
                                 hx-on::after-request="handleTagResponse(event, this)"
-                                {% if btn.color %}style="border-color: {{ btn.color }};"{% endif %}>{{ btn.label }}</button>
+                                {% if btn.color %}
+                                  style="border-color: {{ btn.color }};"
+                                {% endif %}>{{ btn.label }}</button>
                       {% endif %}
                     {% endfor %}
                   </td>

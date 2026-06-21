@@ -28,7 +28,7 @@ def test_detect_pipeline_runs_end_to_end(synthetic_clip_path: Path) -> None:
     ground-truth-based accuracy benchmark.
     """
     # YOLO is exposed via ultralytics' module-level __getattr__; type-checkers can't follow it.
-    from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]
+    from ultralytics import YOLO  # type: ignore[attr-defined]
 
     model_name = "yolo11n.pt"
     _ = YOLO(model_name)  # triggers ~6 MB cache-or-download into CWD

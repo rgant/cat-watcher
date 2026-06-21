@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     # YOLO is exposed via ultralytics' module-level __getattr__; type-checkers can't follow it.
-    from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]
+    from ultralytics import YOLO  # type: ignore[attr-defined]
     from ultralytics.engine.results import Results
 
 
@@ -98,7 +98,7 @@ def _yolo_factory(model_path: Path) -> YOLO:  # pragma: no cover  # boundary; te
     """
     # ``ultralytics`` exposes YOLO via a module-level ``__getattr__`` lazy-loader; neither
     # basedpyright nor mypy can follow that indirection, so both flag this canonical import.
-    from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]  # noqa: PLC0415
+    from ultralytics import YOLO  # type: ignore[attr-defined]  # noqa: PLC0415
 
     return YOLO(str(model_path))
 

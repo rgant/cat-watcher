@@ -33,22 +33,22 @@ cat-watcher-backup = "cat_watcher.backup:main"
 [dependency-groups]
 dev = [
   "arel>=0.4.0,<0.5",
-  "basedpyright>=1.39.5,<2",
+  "basedpyright>=1.39.8,<2",
   "deptry>=0.25.1,<0.26",
   "detect-secrets>=1.5.0,<2",
-  "djlint>=1.36.4,<2",
+  "djlint>=1.39.2,<2",
   "mypy>=2.1.0,<3",
   "pre-commit>=4.6.0,<5",
-  "pylint>=4.0.5,<5",
+  "pylint>=4.0.6,<5",
   "pylint-per-file-ignores>=3.2.1,<4",
   "pylint-pytest>=2.0.0a1",
   "pylint-venv>=3.0.4,<4",
-  "pyproject-fmt>=2.21.2,<3",
-  "pytest>=9.0.3,<10",
+  "pyproject-fmt>=2.21.2,<2.22",       # 2.22+ corrupts multiline task cmd strings -> tox-dev/toml-fmt#388
+  "pytest>=9.1.1,<10",
   "pytest-cov>=7.1.0,<8",
   "pytest-randomly>=4.1.0,<5",
   "respx>=0.23.1,<0.24",
-  "ruff>=0.15.13,<0.16",
+  "ruff>=0.15.18,<0.16",
 ]
 
 [tool.pixi.dependencies]
@@ -63,7 +63,7 @@ pytorch = ">=2.10.0,<3"
 shellcheck = ">=0.11.0,<0.12"
 torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
 ultralytics = ">=8.4.51,<9"
-zizmor = ">=1.25.2,<2"
+zizmor = ">=1.26.1,<2"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
 [tool.pixi.pypi-dependencies]
@@ -220,15 +220,15 @@ ignore = [
 ]
 
 [tool.pylint]
+jobs = 0  # Auto-detect CPU count
 load-plugins = [
   "pylint.extensions.check_elif",
   "pylint.extensions.eq_without_hash",
   "pylint.extensions.redefined_loop_name",
   "pylint.extensions.typing",
-  "pylint_pytest",
   "pylint_per_file_ignores",
+  "pylint_pytest",
 ]
-jobs = 0  # Auto-detect CPU count
 [tool.pylint.basic]
 good-names = [ "i", "j", "k", "v", "ex", "Run", "_", "id" ]
 bad-names = [ "foo", "bar", "baz", "qux", "toto", "tutu", "tata" ]
@@ -533,15 +533,15 @@ table_format = "long"
 collapse_tables = [ "project.authors" ]
 
 [tool.mypy]
-disallow_any_unimported = true
-enable_error_code = "ignore-without-code"
-files = [ "src", "tests" ]
 # ``tests/fixtures`` mirrors ``[tool.pytest.ini_options].pythonpath`` so mypy resolves
 # ``from make_clip import make_clip`` in tests/conftest.py the same way pytest does.
 mypy_path = [ "src", "tests/fixtures" ]
-show_column_numbers = true
-strict = true
+files = [ "src", "tests" ]
+disallow_any_unimported = true
 warn_unreachable = true
+enable_error_code = "ignore-without-code"
+strict = true
+show_column_numbers = true
 
 [tool.pytest.ini_options]
 # Show logs during test runs for better debugging
@@ -588,26 +588,26 @@ profile = "jinja"
 extension = "html.jinja"
 indent = 2
 max_line_length = 140
-ignore = "H025,H031"
+format_attribute_template_tags = true
 format_css = true
 format_js = true
-format_attribute_template_tags = true
+ignore = "H025,H031"
 
 [tool.basedpyright]
+venv = "default"
 # Pixi-managed virtualenv; required so basedpyright can resolve installed dependencies.
 venvPath = ".pixi/envs/"
-venv = "default"
-# Disabled because ruff's ISC001 is also ignored project-wide (it conflicts with the formatter).
-# Both tools agree to not flag implicit string concatenation.
-reportImplicitStringConcatenation = false
-# Mirrors ``[tool.pytest.ini_options].pythonpath`` so basedpyright resolves
-# ``from make_clip import make_clip`` in tests/conftest.py the same way pytest does at runtime.
-extraPaths = [ "tests/fixtures" ]
 exclude = [
   "**/.*",
   "**/__pycache__",
   "node_modules",
 ]
+# Mirrors ``[tool.pytest.ini_options].pythonpath`` so basedpyright resolves
+# ``from make_clip import make_clip`` in tests/conftest.py the same way pytest does at runtime.
+extraPaths = [ "tests/fixtures" ]
+# Disabled because ruff's ISC001 is also ignored project-wide (it conflicts with the formatter).
+# Both tools agree to not flag implicit string concatenation.
+reportImplicitStringConcatenation = false
 # Tests may access ``_underscored`` private members of the modules they exercise; this is the
 # basedpyright analog of ruff's ``SLF001`` per-file-ignore for tests.
 executionEnvironments = [

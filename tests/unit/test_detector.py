@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from ultralytics import YOLO  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateImportUsage]  # ultralytics lazily loads models
+from ultralytics import YOLO  # type: ignore[attr-defined]  # ultralytics lazily loads models
 from ultralytics.engine.results import Boxes, Results
 
 from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
