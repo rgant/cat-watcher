@@ -258,6 +258,48 @@ def render_web_flapping(  # noqa: PLR0913  # spec §4.14 WEB_FLAPPING body has 7
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
+def render_camera_clock(  # noqa: PLR0913  # body carries camera + drift + streak + threshold + NTP state + tz/clock
+    *,
+    camera_display_name: str,
+    drift_seconds: float | None,
+    streak: int,
+    streak_threshold: int,
+    ntp_enabled: bool | None,
+    public_url: str,
+    tz_name: str,
+    now: datetime,
+) -> AlertContent:
+    """Render ``CAMERA_CLOCK``. Names whichever condition fired so the fix is unambiguous.
+
+    ``tz_name`` and ``now`` are unused in the body today, and stay in the signature to match every
+    other renderer here. Callers pass them uniformly.
+    """
+    del tz_name, now
+    drift_text = "unknown" if drift_seconds is None else f"{drift_seconds:+.1f}s"
+    ntp_text = {None: "unknown", True: "on", False: "off"}[ntp_enabled]
+    subject = f"[cat-watcher] CAMERA_CLOCK: {camera_display_name}"
+    lines = [
+        f"Camera:         {camera_display_name}\n",
+        f"Last drift:     {drift_text}\n",
+        f"Corrected on:   {streak} consecutive ticks (threshold {streak_threshold})\n",
+        f"Camera NTP:     {ntp_text}\n",
+    ]
+    if ntp_enabled:
+        lines.append(
+            "\nNTP.Enable is true on this camera. It applies a fixed UTC offset with no DST\n"
+            "handling and overwrites the clock the poller sets. Turn NTP off in the camera web UI.\n",
+        )
+        summary = f"{camera_display_name}: camera NTP is back on"
+    else:
+        lines.append(
+            "\nThe clock will not hold. The poller corrected it on every recent tick, so something\n"
+            "is resetting it between ticks. Check the camera's date and time settings.\n",
+        )
+        summary = f"{camera_display_name}: clock will not hold ({streak} ticks)"
+    lines.append(f"\nWeb UI:         {public_url}\n")
+    return AlertContent(subject=subject, body="".join(lines), macos_summary=_capped_summary(summary))
+
+
 def render_disk_low(
     *,
     storage_root: Path,

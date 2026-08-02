@@ -8,6 +8,7 @@ poll-tick exercise lives in tests/integration/test_poller_end_to_end.py.
 import fcntl
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations are evaluated by collectors
 from typing import TYPE_CHECKING, Self, final
@@ -18,7 +19,7 @@ import pytest
 from db_helpers import scored_frames_with_boxes, tag_clip_frame
 from tz_helpers import pinned_tz
 
-from cat_watcher.amcrest_client import CameraUnreachableError, Recording
+from cat_watcher.amcrest_client import CameraUnreachableError, NtpConfig, Recording
 from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
 from cat_watcher.db import (
     AlertSent,
@@ -814,6 +815,21 @@ def test_check_alerts_stuck_silent_when_heartbeat_missing(
 
 
 @final
+@dataclass
+class _StubClock:
+    """Camera-clock state the poller reads and writes, kept together off the client stub.
+
+    ``write_holds=False`` reproduces the hardware case where ``setCurrentTime`` answers OK and the
+    clock does not actually move.
+    """
+
+    drift_seconds: float = 0.0
+    write_holds: bool = True
+    ntp_enabled: bool = False
+    read_error: Exception | None = None
+    set_time_calls: list[datetime] = field(default_factory=list)
+
+
 class _StubAmcrestClient:
     """Drop-in stub for :class:`cat_watcher.amcrest_client.AmcrestClient` in poller-tick tests.
 
@@ -828,11 +844,19 @@ class _StubAmcrestClient:
     recordings: tuple[Recording, ...]
     calls: list[tuple[datetime, datetime]]
     pending_raises: list[Exception]
+    clock: _StubClock
 
-    def __init__(self, recordings: tuple[Recording, ...] = (), *, raises: tuple[Exception, ...] = ()) -> None:
+    def __init__(
+        self,
+        recordings: tuple[Recording, ...] = (),
+        *,
+        raises: tuple[Exception, ...] = (),
+        clock: _StubClock | None = None,
+    ) -> None:
         self.recordings = recordings
         self.calls = []
         self.pending_raises = list(raises)
+        self.clock = clock if clock is not None else _StubClock()
 
     def __call__(self, *_args: object, **_kwargs: object) -> Self:
         return self
@@ -849,6 +873,197 @@ class _StubAmcrestClient:
         if self.pending_raises:
             raise self.pending_raises.pop(0)
         return list(self.recordings)
+
+    @property
+    def set_time_calls(self) -> list[datetime]:
+        """Clock writes the poller issued, in order."""
+        return self.clock.set_time_calls
+
+    def get_camera_time(self) -> datetime:
+        """Report the camera clock as ``_NOW`` offset by the stub's current drift."""
+        if self.clock.read_error is not None:
+            raise self.clock.read_error
+        return _NOW + timedelta(seconds=self.clock.drift_seconds)
+
+    def set_camera_time(self, when: datetime) -> None:
+        """Record the write and zero the drift, unless the stub is set to refuse the write."""
+        self.clock.set_time_calls.append(when)
+        if self.clock.write_holds:
+            self.clock.drift_seconds = 0.0
+
+    def get_ntp_config(self) -> NtpConfig:
+        return NtpConfig(enabled=self.clock.ntp_enabled, timezone="24")
+
+
+# --- camera clock sync ---------------------------------------------------------------------------
+
+
+def _poll_with_stub(
+    stub: _StubAmcrestClient,
+    *,
+    config: Config,
+    db_engine: Engine,
+    cam_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Camera:
+    """Run one tick against ``stub`` and hand back the reloaded camera row."""
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        _ = _poll_camera(
+            config=config,
+            db_camera=cam,
+            cam_cfg=config.cameras[0],
+            engine=db_engine,
+            args=PollerArgs(),
+            detector=None,
+            now=_NOW,
+        )
+        session.flush()
+    with get_session(db_engine) as session:
+        reloaded = session.get(Camera, cam_id)
+        assert reloaded is not None
+        return reloaded
+
+
+def test_clock_within_threshold_is_not_written(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Small drift records a measurement without writing to the camera."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5))
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-5.0))
+
+    cam = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    assert not stub.set_time_calls
+    assert cam.clock_correction_streak == 0
+    assert cam.clock_drift_seconds == -5.0
+    assert cam.clock_checked_at == _NOW
+
+
+def test_clock_past_threshold_is_corrected_and_widens_window(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A camera two hours behind is corrected, and this tick re-scans what the old window missed."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    last_polled = _NOW - timedelta(minutes=5)
+    cam_id = seed_camera(db_engine, last_polled_at=last_polled)
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-7200.0))
+
+    cam = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    assert len(stub.set_time_calls) == 1
+    assert cam.clock_correction_streak == 1
+    # Clips written while the clock was two hours slow carry stamps outside the normal window.
+    expected_since = last_polled - timedelta(seconds=7200) - timedelta(minutes=config.poller.overlap_minutes)
+    assert stub.calls == [(expected_since, _NOW)]
+
+
+def test_clock_rewind_floors_at_retention_window(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drift larger than retention cannot make the tick scan further back than retention."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5))
+    huge_drift = timedelta(days=config.retention.clip_days * 3)
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-huge_drift.total_seconds()))
+
+    _ = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    since, _until = stub.calls[0]
+    assert since == _NOW - timedelta(days=config.retention.clip_days)
+
+
+def test_clock_write_that_does_not_hold_leaves_window_alone(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write answering OK without moving the clock must not widen the window.
+
+    Observed on hardware: ``setCurrentTime`` returned OK and the clock stayed put. Widening on an
+    unverified write would scan a range the camera's stamps still do not occupy.
+    """
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    last_polled = _NOW - timedelta(minutes=5)
+    cam_id = seed_camera(db_engine, last_polled_at=last_polled)
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-7200.0, write_holds=False))
+
+    cam = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    assert len(stub.set_time_calls) == 1
+    assert cam.clock_correction_streak == 1
+    assert stub.calls == [(last_polled, _NOW)]
+
+
+def test_clock_read_failure_leaves_tick_otherwise_normal(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A camera that will not report its clock still gets polled, and the streak stays put."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    last_polled = _NOW - timedelta(minutes=5)
+    cam_id = seed_camera(db_engine, last_polled_at=last_polled, clock_correction_streak=2)
+    stub = _StubAmcrestClient(clock=_StubClock(read_error=CameraUnreachableError("clock read failed")))
+
+    cam = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    assert not stub.set_time_calls
+    assert cam.clock_correction_streak == 2
+    assert stub.calls == [(last_polled, _NOW)]
+
+
+def test_clock_within_threshold_resets_a_running_streak(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clock that holds clears the streak, so the alert only reflects consecutive failures."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5), clock_correction_streak=2)
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=0.0))
+
+    cam = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    assert cam.clock_correction_streak == 0
+
+
+def test_clock_correction_records_camera_ntp_state(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NTP state is read on correction, because NTP back on explains a clock that will not hold."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5))
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-7200.0, ntp_enabled=True))
+
+    cam = _poll_with_stub(stub, config=config, db_engine=db_engine, cam_id=cam_id, monkeypatch=monkeypatch)
+
+    assert cam.clock_ntp_enabled is True
 
 
 def test_safety_net_not_triggered_at_exact_threshold(

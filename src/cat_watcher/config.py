@@ -86,6 +86,7 @@ class AlertConfig(BaseModel, extra="forbid"):
     web_flapping_threshold_count: Annotated[int, Field(ge=1)] = 5
     backup_stale_hours: Annotated[int, Field(gt=0)] = 36
     disk_low_threshold_fraction: Annotated[float, Field(gt=0, lt=1)] = 0.10
+    camera_clock_streak_threshold: Annotated[int, Field(gt=0)] = 3
     email: EmailRulesConfig = Field(default_factory=EmailRulesConfig)
     macos: MacOsRulesConfig = Field(default_factory=MacOsRulesConfig)
 
@@ -206,6 +207,9 @@ class PollerConfig(BaseModel, extra="forbid"):
     cadence_seconds: Annotated[int, Field(gt=0)] = 300
     overlap_minutes: Annotated[int, Field(ge=0)] = 15
     safety_net_hours: Annotated[int, Field(ge=1, le=168)] = 6
+    # Correct the camera clock past this much absolute drift. Sixty seconds keeps clip timestamps
+    # accurate to under a minute without writing to the device on every tick.
+    clock_drift_threshold_seconds: Annotated[int, Field(gt=0)] = 60
 
     @model_validator(mode="after")
     def _overlap_within_soft_cap(self) -> PollerConfig:

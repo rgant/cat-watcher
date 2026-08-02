@@ -250,6 +250,9 @@ def _toml_with_field(section: str, field: str, value: float) -> str:
         (("alerts", "cadence_seconds", 0), True),
         # One representative _count field (ge=1).
         (("alerts", "frequency_threshold_count", 0), True),
+        # Clock-sync thresholds (gt=0) -- 0 would correct on every tick / alert on the first one.
+        (("poller", "clock_drift_threshold_seconds", 0), True),
+        (("alerts", "camera_clock_streak_threshold", 0), True),
         # One representative _minutes field (gt=0).
         (("alerts", "poller_stuck_minutes", 0), True),
         # CameraConfig.port + WebConfig.port (ge=1, le=65535).
@@ -478,6 +481,37 @@ def test_poller_cursor_guards_default_when_keys_absent(tmp_path: Path, monkeypat
 
     assert cfg.poller.overlap_minutes == 15
     assert cfg.poller.safety_net_hours == 6
+
+
+def test_clock_sync_thresholds_default_when_keys_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clock-sync tuning falls back to defaults so an existing config.toml keeps loading."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_VALID_TOML)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.poller.clock_drift_threshold_seconds == 60
+    assert cfg.alerts.camera_clock_streak_threshold == 3
+
+
+def test_clock_sync_thresholds_custom_values_honored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom clock-sync thresholds round-trip through the loader."""
+    body = _VALID_TOML + "\n[poller]\nclock_drift_threshold_seconds = 30\n"
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(
+        body.replace("frequency_threshold_count = 8", "frequency_threshold_count = 8\ncamera_clock_streak_threshold = 5"),
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    cfg = load_config()
+
+    assert cfg.poller.clock_drift_threshold_seconds == 30
+    assert cfg.alerts.camera_clock_streak_threshold == 5
 
 
 def test_poller_cursor_guards_custom_values_honored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

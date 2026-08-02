@@ -571,7 +571,7 @@ def _probe_camera(cam_cfg: CameraConfig, *, config: Config, host_now: datetime) 
                 print(f"  connectivity: FAIL ({exc.__class__.__name__}: {exc})")
             if reachable:
                 _check_clock_drift(client, host_now=host_now)
-                _check_timezone_drift(client, expected=tz_name)
+                _check_ntp_state(client)
     except CameraError as exc:
         print(f"  connectivity: FAIL during teardown ({exc.__class__.__name__}: {exc})")
     return reachable
@@ -594,25 +594,26 @@ def _check_clock_drift(client: AmcrestClient, *, host_now: datetime) -> None:
         print(f"  clock-drift: OK drift={drift:+.1f}s")
 
 
-def _check_timezone_drift(client: AmcrestClient, *, expected: str) -> None:
-    """Compare the camera's reported NTP timezone against ``expected``.
+def _check_ntp_state(client: AmcrestClient) -> None:
+    """Report whether the camera's own NTP client is disabled, as this project requires.
 
-    Non-blocking advisory per spec resolution #6: a mismatch prints a loud line but does not change
-    the exit code. ``cameras[].timezone`` in config.toml is the operator's escape hatch when the
-    camera's internal numeric code can't be cleanly mapped to an IANA name.
+    Non-blocking per the clock-sync spec: NTP left on prints a loud line but does not change the
+    exit code, so the loop still reports every camera. The camera applies ``NTP.TimeZone`` as a
+    fixed UTC offset with no DST handling, so an enabled NTP client silently overwrites whatever
+    clock the poller sets.
     """
     try:
-        camera_tz = client.get_camera_timezone()
+        ntp = client.get_ntp_config()
     except CameraError as exc:
-        print(f"  timezone-drift: FAIL ({exc.__class__.__name__}: {exc})")
+        print(f"  ntp: FAIL ({exc.__class__.__name__}: {exc})")
         return
-    if camera_tz != expected:
+    if ntp.enabled:
         print(
-            f"  timezone-drift: ADVISORY camera reports {camera_tz!r} but config expects {expected!r}; "
-            "set cameras[].timezone explicitly in config.toml if this is intentional",
+            f"  ntp: !!! FAIL NTP.Enable=true (camera tz code {ntp.timezone!r}); "
+            "the camera will overwrite the clock the poller sets — disable NTP in the camera web UI",
         )
         return
-    print(f"  timezone-drift: OK (camera reports {camera_tz!r})")
+    print(f"  ntp: OK (NTP.Enable=false, camera tz code {ntp.timezone!r})")
 
 
 # --- test-notification ---------------------------------------------------------------------------

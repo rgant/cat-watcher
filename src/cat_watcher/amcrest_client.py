@@ -59,10 +59,12 @@ _CONFIG_MANAGER_ENDPOINT = "/cgi-bin/configManager.cgi"
 # ``=`` and unpadded numeric fields. ``re.MULTILINE`` keeps the anchor pair safe in case the camera
 # sneaks a trailing ``ok`` line.
 _GETCURRENTTIME_VALUE_PATTERN = re.compile(r"^\s*result\s*=\s*(?P<value>.+?)\s*$", re.MULTILINE)
-# NTP config response per §4.6.6: a ``table.NTP.X=Y`` block. We only care about ``TimeZone`` (a
-# numeric Amcrest code) — the doc gives no IANA name surface, so we return the literal value and
-# let the caller compare it against the configured IANA zone literally.
+# NTP config response per §4.8.11: a ``table.NTP.X=Y`` block. ``TimeZone`` is a numeric Amcrest
+# code with no IANA equivalent in the API doc, so it is returned as the literal string the camera
+# reports. ``TimeZoneDesc`` is deliberately not parsed — cameras have been observed reporting a
+# stale description that contradicts the code beside it.
 _NTP_TIMEZONE_VALUE_PATTERN = re.compile(r"^\s*table\.NTP\.TimeZone\s*=\s*(?P<value>.+?)\s*$", re.MULTILINE)
+_NTP_ENABLE_VALUE_PATTERN = re.compile(r"^\s*table\.NTP\.Enable\s*=\s*(?P<value>\S+?)\s*$", re.MULTILINE)
 
 # Transient HTTP failures that warrant retry. ``httpx2.RemoteProtocolError`` covers the
 # camera-disconnected-mid-response case the spec calls out alongside connect/read timeouts.
@@ -100,6 +102,18 @@ class CameraAPIError(CameraError):
         """Construct with ``message`` and an optional HTTP ``status`` for status-based dispatch."""
         super().__init__(message)
         self.status = status
+
+
+@dataclass(frozen=True)
+class NtpConfig:
+    """The camera's NTP settings as reported by ``configManager.cgi``.
+
+    ``timezone`` is the numeric Amcrest code verbatim. The API doc publishes no mapping from that
+    code to an IANA zone, so callers treat it as an opaque identity value.
+    """
+
+    enabled: bool
+    timezone: str
 
 
 @dataclass(frozen=True)
@@ -294,26 +308,56 @@ class AmcrestClient:
         local = datetime.strptime(match.group("value"), _AMCREST_TIME_FORMAT).replace(tzinfo=self._tz)
         return local.astimezone(UTC)
 
-    def get_camera_timezone(self) -> str:
-        """Fetch the camera's NTP-configured timezone as the literal string the camera reports.
+    def set_camera_time(self, when: datetime) -> None:
+        """Set the camera's wall clock to ``when``, expressed in the camera's own timezone.
 
-        Calls ``configManager.cgi?action=getConfig&name=NTP`` (Amcrest API §4.6.6) and returns the
-        ``table.NTP.TimeZone=`` value verbatim. Amcrest reports a numeric code (e.g. ``9``) rather
-        than an IANA name; the API does not surface the IANA equivalent. Callers compare this string
-        against the configured IANA zone literally — a mismatch is the operator-actionable signal
-        regardless of whether the Amcrest code happens to "really mean" the same zone. Raises
-        :class:`CameraAPIError` if the response lacks a ``TimeZone`` line.
+        Calls ``global.cgi?action=setCurrentTime`` (Amcrest API §4.6.3). The camera has no DST
+        handling of its own, so the host converts through ``camera_tz`` and writes plain local wall
+        clock. Only the space is percent-encoded — colons stay literal, matching every example in
+        the API doc and the accepted form verified against hardware.
+
+        A ``200 OK`` response does not prove the clock moved. One observed call returned ``OK``
+        while the clock stayed put, so callers that need certainty must read the clock back with
+        :meth:`get_camera_time` rather than trusting the status.
+        """
+        # Naive input would be read as host-local by ``astimezone`` and write a clock that is wrong
+        # by the host's UTC offset. Same guard, and same reasoning, as ``iter_recordings``.
+        if when.tzinfo is None:
+            msg = "set_camera_time: when must be tz-aware (naive datetimes rejected)"
+            raise ValueError(msg)
+        stamp = when.astimezone(self._tz).strftime(_AMCREST_TIME_FORMAT)
+        # Built by hand rather than through ``_amcrest_query``: that helper leaves brackets safe but
+        # percent-encodes colons, and this endpoint wants them literal. Appended to the path so
+        # ``httpx2`` forwards the query untouched.
+        query = f"action=setCurrentTime&time={quote(stamp, safe=':')}"
+        _ = self._request_with_retries("GET", f"{_GLOBAL_CGI_ENDPOINT}?{query}")
+
+    def get_ntp_config(self) -> NtpConfig:
+        """Fetch the camera's NTP settings via ``configManager.cgi?action=getConfig&name=NTP``.
+
+        ``enabled`` is the operator-actionable field: this project keeps camera NTP off and drives
+        the clock from the host, because the camera applies ``NTP.TimeZone`` as a fixed UTC offset
+        with no DST handling. A camera that re-enables NTP overwrites any clock the poller sets.
+        Raises :class:`CameraAPIError` when either field is missing, rather than defaulting, so a
+        malformed response cannot read as "NTP is off".
         """
         response = self._request_with_retries(
             "GET",
             _CONFIG_MANAGER_ENDPOINT,
             params={"action": "getConfig", "name": "NTP"},
         )
-        match = _NTP_TIMEZONE_VALUE_PATTERN.search(response.text)
-        if match is None:
+        enable_match = _NTP_ENABLE_VALUE_PATTERN.search(response.text)
+        if enable_match is None:
+            msg = f"camera {self._camera.name!r} getConfig name=NTP returned no Enable line"
+            raise CameraAPIError(msg)
+        timezone_match = _NTP_TIMEZONE_VALUE_PATTERN.search(response.text)
+        if timezone_match is None:
             msg = f"camera {self._camera.name!r} getConfig name=NTP returned no TimeZone line"
             raise CameraAPIError(msg)
-        return match.group("value")
+        return NtpConfig(
+            enabled=enable_match.group("value").lower() == "true",
+            timezone=timezone_match.group("value"),
+        )
 
     def _iter_pages(self, find_handle: str, *, local_since: str, local_until: str) -> Iterator[Recording]:
         """Inner loop: drain the camera's pagination once the search handle is open."""

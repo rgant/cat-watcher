@@ -41,7 +41,7 @@ from sqlalchemy import func, select
 from cat_watcher import retention, thumbnails
 from cat_watcher.alert_templates import render_poller_empty_after_quiet
 from cat_watcher.alerts import AlertCandidate, dispatch_candidate, evaluate_heartbeat_watchdog
-from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuthError, CameraUnreachableError
+from cat_watcher.amcrest_client import AmcrestClient, CameraAPIError, CameraAuthError, CameraError, CameraUnreachableError
 from cat_watcher.config import Config, load_config
 from cat_watcher.db import (
     AgentStart,
@@ -561,6 +561,69 @@ class _CameraTickResult:  # pylint: disable=too-many-instance-attributes  # flat
     listed: int = 0
 
 
+def _sync_camera_clock(
+    client: AmcrestClient,
+    db_camera: Camera,
+    *,
+    threshold_seconds: int,
+    now: datetime,
+) -> timedelta | None:
+    """Measure the camera clock, correct it past ``threshold_seconds``, and record what happened.
+
+    Returns the size of a correction that verifiably held, which the caller uses to widen this
+    tick's query window. Returns ``None`` when no correction was needed, when the camera would not
+    answer, or when the write did not take.
+
+    Never raises. A camera that cannot be clock-checked is still worth polling, so every failure
+    here is logged and swallowed — the same contract clip-level failures follow.
+
+    ``clock_correction_streak`` counts consecutive ticks that *needed* correcting, not ticks whose
+    write failed. A camera needing correction every tick is broken even when each write sticks, and
+    that is the condition ``CAMERA_CLOCK`` alerts on.
+    """
+    try:
+        camera_now = client.get_camera_time()
+    except CameraError as exc:
+        logger.warning("camera %s clock read failed: %s", db_camera.name, exc)
+        return None
+
+    drift = camera_now - now
+    db_camera.clock_drift_seconds = drift.total_seconds()
+    db_camera.clock_checked_at = now
+    if abs(drift) <= timedelta(seconds=threshold_seconds):
+        db_camera.clock_correction_streak = 0
+        return None
+
+    db_camera.clock_correction_streak += 1
+    residual: timedelta | None = None
+    try:
+        client.set_camera_time(now)
+        # A 200 OK does not prove the clock moved: one observed camera answered OK and stayed put.
+        # Read it back so the caller only widens the window on a correction that actually landed.
+        residual = client.get_camera_time() - now
+    except CameraError as exc:
+        logger.warning("camera %s clock write failed: %s", db_camera.name, exc)
+
+    # NTP back on is the known cause of a clock that will not hold, so record it either way.
+    try:
+        db_camera.clock_ntp_enabled = client.get_ntp_config().enabled
+    except CameraError as exc:
+        logger.warning("camera %s NTP state read failed: %s", db_camera.name, exc)
+
+    if residual is None or abs(residual) > timedelta(seconds=threshold_seconds):
+        logger.warning(
+            "camera %s clock correction did not hold: drift was %+.1fs, still %s",
+            db_camera.name,
+            drift.total_seconds(),
+            "unknown" if residual is None else f"{residual.total_seconds():+.1f}s",
+        )
+        return None
+
+    db_camera.clock_drift_seconds = residual.total_seconds()
+    logger.warning("camera %s clock corrected by %+.1fs", db_camera.name, -drift.total_seconds())
+    return abs(drift)
+
+
 def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchestration helper; dataclass-bundling these would just nest the noise
     *,
     config: Config,
@@ -624,6 +687,27 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
 
     try:
         with client:
+            # Clock first: a camera running behind stamps its recordings before the window this
+            # tick would otherwise query, so correcting after the query would miss them for another
+            # ``safety_net_hours``.
+            correction = _sync_camera_clock(
+                client,
+                db_camera,
+                threshold_seconds=config.poller.clock_drift_threshold_seconds,
+                now=now,
+            )
+            if correction is not None:
+                # Recordings already on the camera keep the stamps they were written with, so they
+                # sit outside the window by the size of the correction. Floor at retention — there
+                # is no point scanning past what we would keep.
+                rewound = since - correction - timedelta(minutes=config.poller.overlap_minutes)
+                floor = now - timedelta(days=config.retention.clip_days)
+                since = max(min(since, rewound), floor)
+                window = _PollWindow(
+                    local_since=since.astimezone(camera_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                    local_until=until.astimezone(camera_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                    tz_name=tz_name,
+                )
             for rec in _limited(client.iter_recordings(since=since, until=until), args.limit):
                 find_file_row_count += 1
                 if args.list_only:

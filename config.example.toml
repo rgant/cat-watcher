@@ -53,6 +53,7 @@ frames_to_sample = 5
 cadence_seconds = 300 # how often the poller LaunchAgent fires (rendered into the plist at install)
 overlap_minutes = 15 # how far behind now the steady-state cursor lags so transient findFile lag is tolerated
 safety_net_hours = 6 # quiet duration after which the next tick widens its window to [last_clip_at - overlap_minutes, now]
+clock_drift_threshold_seconds = 60 # correct the camera clock when it drifts further than this from Mac mini time
 
 [storage]
 wait_interval_seconds = 10 # poll interval while waiting for the external drive to mount
@@ -81,6 +82,7 @@ web_flapping_window_minutes = 30 # WEB_FLAPPING window
 web_flapping_threshold_count = 5 # WEB_FLAPPING fires when web restarts >= this in the window
 backup_stale_hours = 36 # BACKUP_STALE if newest backup file is older than this
 disk_low_threshold_fraction = 0.10 # DISK_LOW fires when free / total falls below this
+camera_clock_streak_threshold = 3 # CAMERA_CLOCK fires after this many consecutive ticks needing a clock correction
 
 [alerts.email]
 enabled = true

@@ -16,6 +16,7 @@ from cat_watcher.alert_templates import (
     AlertContent,
     inactivity_branch_unreachable,
     render_backup_stale,
+    render_camera_clock,
     render_disk_low,
     render_frequency,
     render_heartbeat_watchdog,
@@ -227,6 +228,46 @@ def test_poller_empty_after_quiet_renders_window_and_quiet_duration() -> None:
     assert "What to check:" in content.body
     assert f"Web UI:         {_PUBLIC_URL}\n" in content.body
     assert content.macos_summary == "Pantry Litter Box Camera: no clips after 14h 0m quiet"
+
+
+def test_camera_clock_streak_names_the_streak_condition() -> None:
+    """A repeating correction reports the streak, so the operator knows it is not a one-off unplug."""
+    content = render_camera_clock(
+        camera_display_name="Office Litter Box Camera",
+        drift_seconds=-7198.3,
+        streak=3,
+        streak_threshold=3,
+        ntp_enabled=False,
+        public_url=_PUBLIC_URL,
+        tz_name=_TZ_NY,
+        now=_NOW,
+    )
+
+    assert content.subject == "[cat-watcher] CAMERA_CLOCK: Office Litter Box Camera"
+    assert "Camera:         Office Litter Box Camera\n" in content.body
+    assert "Last drift:     -7198.3s\n" in content.body
+    assert "Corrected on:   3 consecutive ticks (threshold 3)\n" in content.body
+    assert "Camera NTP:     off\n" in content.body
+    assert f"Web UI:         {_PUBLIC_URL}\n" in content.body
+    assert "clock will not hold" in content.body
+
+
+def test_camera_clock_ntp_enabled_names_the_ntp_condition() -> None:
+    """NTP back on gets its own line, because the fix is a camera web-UI change, not a retry."""
+    content = render_camera_clock(
+        camera_display_name="Office Litter Box Camera",
+        drift_seconds=-7198.3,
+        streak=1,
+        streak_threshold=3,
+        ntp_enabled=True,
+        public_url=_PUBLIC_URL,
+        tz_name=_TZ_NY,
+        now=_NOW,
+    )
+
+    assert "Camera NTP:     on\n" in content.body
+    assert "NTP.Enable" in content.body
+    assert "clock will not hold" not in content.body
 
 
 def test_disk_low_renders_fraction_and_threshold() -> None:

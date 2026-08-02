@@ -76,6 +76,21 @@ def _seed_amcrest_mocks(payload: bytes) -> None:
     )
 
 
+def _seed_clock_mocks(base_url: str = _BASE_URL, *, unreachable: bool = False) -> None:
+    """Answer the poller's clock read with a camera clock equal to ``_NOW``.
+
+    Test cameras are configured ``timezone="UTC"``, so the camera's local wall clock is ``_NOW``
+    verbatim. Reporting zero drift keeps the clock step from correcting and widening the query
+    window that these tests assert on. ``unreachable=True`` fails the read instead, for the tests
+    whose camera is meant to be entirely dead.
+    """
+    route = respx.get(f"{base_url}/cgi-bin/global.cgi", params={"action": "getCurrentTime"})
+    if unreachable:
+        _ = route.mock(side_effect=httpx.ConnectError("dead"))
+        return
+    _ = route.mock(return_value=httpx.Response(200, text=f"result={_NOW.strftime('%Y-%m-%d %H:%M:%S')}\r\n"))
+
+
 def _make_detector(
     *,
     has_cat: bool,
@@ -415,6 +430,7 @@ def test_full_tick_camera_unreachable_records_status(
     monkeypatch.setattr("cat_watcher.amcrest_client.time.sleep", no_sleep)
     # Every factory.create attempt raises ConnectError; AmcrestClient retries 3x then surfaces
     # CameraUnreachableError.
+    _seed_clock_mocks(unreachable=True)
     _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(side_effect=httpx.ConnectError("dead"))
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
@@ -463,6 +479,7 @@ def test_full_tick_isolates_per_camera_failures(  # pylint: disable=too-many-loc
     _ = respx.get("http://cam-a.example.com:80/cgi-bin/mediaFileFind.cgi", params={"action": "factory.create"}).mock(
         side_effect=httpx.ConnectError("dead"),
     )
+    _seed_clock_mocks("http://cam-a.example.com:80", unreachable=True)
     # Camera B: normal happy path against the standard cam.example.com mocks.
     _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
     detector = _make_detector(has_cat=True)
@@ -550,6 +567,7 @@ def test_full_tick_respects_limit_cap(
         "items[1].EndTime=2026-05-01 07:11:00\r\n"
         f"items[1].Length={len(payload)}\r\n"
     )
+    _seed_clock_mocks()
     _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"))
     _ = respx.get(_FIND_URL, params__contains={"action": "findFile", "object": _FIND_HANDLE}).mock(
         return_value=httpx.Response(200, text="OK\r\n"),
@@ -892,6 +910,7 @@ def _seed_amcrest_mocks_for_clip(
         fname = f"{start_ts:%H.%M.%S}-{end_ts:%H.%M.%S}[M][0@0][0].mp4"
         file_path = f"/mnt/sd/{start_ts:%Y-%m-%d}/001/dav/{start_ts:%H}/{fname}"
     download_url = f"{_BASE_URL}/cgi-bin/RPC_Loadfile{file_path}"
+    _seed_clock_mocks()
     _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(
         return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"),
     )
@@ -915,6 +934,7 @@ def _seed_amcrest_mocks_for_clip(
 
 def _seed_empty_amcrest_mocks() -> None:
     """Wire respx so ``findFile`` returns ``found=0`` (zero rows)."""
+    _seed_clock_mocks()
     _ = respx.get(_FIND_URL, params={"action": "factory.create"}).mock(
         return_value=httpx.Response(200, text=f"result={_FIND_HANDLE}\r\n"),
     )

@@ -41,8 +41,8 @@ from cat_watcher.__main__ import (
     _run_test_notification,
     main,
 )
-from cat_watcher.amcrest_client import AmcrestClient, CameraUnreachableError
-from cat_watcher.config import CameraConfig, Config, _resolve_config_path
+from cat_watcher.amcrest_client import AmcrestClient, CameraUnreachableError, NtpConfig
+from cat_watcher.config import Config, _resolve_config_path
 from cat_watcher.db import (
     AgentStart,
     AlertSent,
@@ -429,7 +429,7 @@ def _amcrest_client_mock(
     *,
     recordings: list[object] | None = None,
     time_drift_seconds: float = 0.0,
-    camera_tz: str = "America/New_York",
+    ntp_enabled: bool = False,
 ) -> MagicMock:
     """Autospec'd ``AmcrestClient`` instance with ``__enter__`` re-pointed at the mock itself.
 
@@ -441,7 +441,7 @@ def _amcrest_client_mock(
     client.__exit__.return_value = False
     client.iter_recordings.return_value = iter(recordings or [])
     client.get_camera_time.return_value = datetime.now(UTC) + timedelta(seconds=time_drift_seconds)
-    client.get_camera_timezone.return_value = camera_tz
+    client.configure_mock(**{"get_ntp_config.return_value": NtpConfig(enabled=ntp_enabled, timezone="24")})
     return client
 
 
@@ -540,40 +540,45 @@ def test_test_cameras_clock_drift_loud_fail_above_five_minutes(
     assert "NoneType" not in out
 
 
-def test_test_cameras_timezone_drift_emits_advisory_with_both_zones(
+def test_test_cameras_ntp_enabled_reports_loud_failure(
     tmp_path: Path,
-    make_config: Callable[
-        ...,
-        Config,
-    ],  # widened: forwards a ``cameras=`` override per the conftest fixture's ``Callable[..., Config]`` signature
+    make_config: Callable[[Path, Path], Config],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Camera reporting ``"America/Denver"`` with config ``"America/New_York"`` advises both zones.
-
-    Per-camera ``timezone`` is set explicitly so the seeded ``CameraConfig`` is the source of the
-    expected zone (rather than the ``web.display_timezone`` fallback) — keeps the assertion focused
-    on the comparison contract.
-    """
-
-    def _build_with_ny_camera(internal_root: Path, storage_root: Path) -> Config:
-        return make_config(
-            internal_root,
-            storage_root,
-            cameras=[CameraConfig(name="pantry", display_name="Pantry", host="cam.example.com", port=80, timezone="America/New_York")],
-        )
-
-    config = config_with_dirs(tmp_path, _build_with_ny_camera)
-    client = _amcrest_client_mock(camera_tz="America/Denver")
+    """NTP left on means the camera overwrites the clock the poller just set."""
+    config = config_with_dirs(tmp_path, make_config)
+    client = _amcrest_client_mock(ntp_enabled=True)
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.AmcrestClient", return_value=client),
     ):
         _ = _run_test_cameras(make_handler_args())
     out = capsys.readouterr().out
-    assert "timezone-drift: ADVISORY" in out
-    assert "America/Denver" in out
-    assert "America/New_York" in out
-    assert "cameras[].timezone" in out
+    assert "ntp: !!! FAIL" in out
+    assert "NTP.Enable" in out
+    assert "{_fmt" not in out
+    assert "{self." not in out
+    assert "{cam." not in out
+    assert "{cfg." not in out
+    assert "NoneType" not in out
+
+
+def test_test_cameras_ntp_disabled_reports_ok(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """NTP off is the supported state, so it reports OK rather than an advisory."""
+    config = config_with_dirs(tmp_path, make_config)
+    client = _amcrest_client_mock(ntp_enabled=False)
+    with (
+        patch("cat_watcher.__main__.load_config", return_value=config),
+        patch("cat_watcher.__main__.AmcrestClient", return_value=client),
+    ):
+        _ = _run_test_cameras(make_handler_args())
+    out = capsys.readouterr().out
+    assert "ntp: OK" in out
+    assert "FAIL" not in out
     assert "{_fmt" not in out
     assert "{self." not in out
     assert "{cam." not in out

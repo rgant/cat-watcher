@@ -18,6 +18,7 @@ from cat_watcher.amcrest_client import (
     CameraAPIError,
     CameraAuthError,
     CameraUnreachableError,
+    NtpConfig,
     Recording,
 )
 from cat_watcher.config import CameraConfig, CameraSecrets
@@ -601,3 +602,125 @@ def test_request_answers_digest_challenge_with_authorization_header() -> None:
     # A derived MD5 digest, not the shared secret itself.
     assert re.search(r'response="[0-9a-f]{32}"', authorization) is not None
     assert camera_time == datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
+
+
+# --- get_ntp_config ------------------------------------------------------------------------------
+
+_NTP_URL = f"{_BASE_URL}/cgi-bin/configManager.cgi"
+_NTP_BODY_ENABLED = (
+    "table.NTP.Address=time.nist.gov\r\n"
+    "table.NTP.Enable=true\r\n"
+    "table.NTP.Port=123\r\n"
+    "table.NTP.TimeZone=24\r\n"
+    "table.NTP.TimeZoneDesc=Beijing, Chongqing, Hong Kong, Urumqi\r\n"
+    "table.NTP.UpdatePeriod=10\r\n"
+)
+
+
+def _ntp_route(body: str) -> respx.Route:
+    return respx.get(_NTP_URL, params={"action": "getConfig", "name": "NTP"}).mock(
+        return_value=httpx.Response(200, text=body),
+    )
+
+
+@respx.mock
+def test_get_ntp_config_parses_enabled_and_timezone() -> None:
+    """A live camera body yields ``enabled=True`` and the literal timezone code."""
+    _ = _ntp_route(_NTP_BODY_ENABLED)
+
+    assert _make_client().get_ntp_config() == NtpConfig(enabled=True, timezone="24")
+
+
+@respx.mock
+def test_get_ntp_config_reads_disabled_ntp() -> None:
+    """``Enable=false`` yields ``enabled=False`` rather than a truthy non-empty string."""
+    _ = _ntp_route(_NTP_BODY_ENABLED.replace("Enable=true", "Enable=false"))
+
+    assert _make_client().get_ntp_config().enabled is False
+
+
+@respx.mock
+def test_get_ntp_config_missing_enable_raises_api_error() -> None:
+    """A body without an ``Enable`` line is malformed, not a silent default."""
+    _ = _ntp_route("table.NTP.TimeZone=24\r\n")
+
+    with pytest.raises(CameraAPIError, match="Enable"):
+        _ = _make_client().get_ntp_config()
+
+
+@respx.mock
+def test_get_ntp_config_missing_timezone_raises_api_error() -> None:
+    """A body without a ``TimeZone`` line is malformed, not a silent default."""
+    _ = _ntp_route("table.NTP.Enable=true\r\n")
+
+    with pytest.raises(CameraAPIError, match="TimeZone"):
+        _ = _make_client().get_ntp_config()
+
+
+# --- set_camera_time -----------------------------------------------------------------------------
+
+_GLOBAL_URL = f"{_BASE_URL}/cgi-bin/global.cgi"
+
+
+def _set_time_route(status: int = 200) -> respx.Route:
+    return respx.get(_GLOBAL_URL, params__contains={"action": "setCurrentTime"}).mock(
+        return_value=httpx.Response(status, text="OK\r\n"),
+    )
+
+
+@respx.mock
+def test_set_camera_time_encodes_space_and_keeps_colons_literal() -> None:
+    """The Amcrest CGI parser rejects ``+`` for the space and wants literal colons.
+
+    Verified against hardware: ``%20`` with literal colons is accepted and moves the clock.
+    """
+    route = _set_time_route()
+
+    _make_client().set_camera_time(datetime(2026, 8, 2, 15, 10, 55, tzinfo=UTC))
+
+    assert route.call_count == 1
+    url = str(route.calls.last.request.url)
+    assert "time=2026-08-02%2015:10:55" in url
+    assert "+" not in url
+    assert "%3A" not in url
+
+
+@respx.mock
+def test_set_camera_time_writes_camera_local_wall_clock() -> None:
+    """A UTC input is written in the camera's own zone, not as UTC."""
+    route = _set_time_route()
+
+    client = _make_client(camera_tz=ZoneInfo("America/New_York"))
+    client.set_camera_time(datetime(2026, 8, 2, 19, 10, 55, tzinfo=UTC))
+
+    assert "time=2026-08-02%2015:10:55" in str(route.calls.last.request.url)
+
+
+@respx.mock
+def test_set_camera_time_naive_datetime_raises_value_error() -> None:
+    """A naive datetime would be silently read as host-local and write a wrong clock."""
+    route = _set_time_route()
+
+    with pytest.raises(ValueError, match="tz-aware"):
+        _make_client().set_camera_time(datetime(2026, 8, 2, 15, 10, 55))  # noqa: DTZ001  # naive input is the case under test
+
+    assert route.call_count == 0
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [401, 403])
+def test_set_camera_time_auth_status_raises_auth_error(status: int) -> None:
+    """Auth failures surface as ``CameraAuthError`` rather than a silent no-op."""
+    _ = _set_time_route(status)
+
+    with pytest.raises(CameraAuthError):
+        _make_client().set_camera_time(datetime(2026, 8, 2, 15, 10, 55, tzinfo=UTC))
+
+
+@respx.mock
+def test_set_camera_time_other_4xx_raises_api_error() -> None:
+    """A rejected query surfaces as ``CameraAPIError`` carrying the status."""
+    _ = _set_time_route(400)
+
+    with pytest.raises(CameraAPIError):
+        _make_client().set_camera_time(datetime(2026, 8, 2, 15, 10, 55, tzinfo=UTC))

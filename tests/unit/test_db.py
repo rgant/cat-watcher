@@ -128,6 +128,23 @@ def test_round_trip_camera_clip_alert(db_engine: Engine) -> None:
         assert loaded_alert.macos_ok is False
 
 
+def test_camera_clock_columns_default_to_unmeasured(db_engine: Engine) -> None:
+    """A camera the poller has not clock-checked yet reads as unmeasured, not as drift-free.
+
+    ``clock_correction_streak`` starts at 0 so the alert rule can count up from a real baseline.
+    The other three stay ``None`` so "never checked" is distinguishable from "checked and fine".
+    """
+    with get_session(db_engine) as session:
+        session.add(_make_camera())
+
+    with get_session(db_engine) as session:
+        loaded = session.scalars(select(Camera).where(Camera.name == "pantry")).one()
+        assert loaded.clock_correction_streak == 0
+        assert loaded.clock_drift_seconds is None
+        assert loaded.clock_checked_at is None
+        assert loaded.clock_ntp_enabled is None
+
+
 def test_clip_unique_camera_source_filename(db_engine: Engine) -> None:
     """Inserting two clips with the same (camera_id, source_filename) raises IntegrityError."""
     camera = _make_camera()

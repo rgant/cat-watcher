@@ -37,6 +37,7 @@ from cat_watcher.alert_templates import (
     AlertContent,
     inactivity_branch_unreachable,
     render_backup_stale,
+    render_camera_clock,
     render_disk_low,
     render_frequency,
     render_heartbeat_watchdog,
@@ -386,6 +387,43 @@ def evaluate_heartbeat_watchdog(  # noqa: PLR0913  # watchdog needs the alert id
     return AlertCandidate(alert_type=alert_type, camera_id=None, content=content)
 
 
+def evaluate_camera_clock(
+    cam: Camera,
+    *,
+    streak_threshold: int,
+    public_url: str,
+    tz_name: str,
+    now: datetime,
+) -> AlertCandidate | None:
+    """Evaluate ``CAMERA_CLOCK`` for one camera. Fires on either of two operator-actionable states.
+
+    1. ``clock_correction_streak`` at or past ``streak_threshold`` — the clock will not hold. A
+       single correction is the expected result of unplugging a camera, so it stays silent.
+    2. ``clock_ntp_enabled`` true — the camera's own NTP client is back on and overwrites whatever
+       the poller sets. ``None`` means the poller has had no cause to read it, which is not a fault.
+
+    One alert type covers both because NTP returning is itself a cause of the streak. They arrive
+    together and warrant one notification, not two.
+    """
+    ntp_back_on = cam.clock_ntp_enabled is True
+    if not ntp_back_on and cam.clock_correction_streak < streak_threshold:
+        return None
+    return AlertCandidate(
+        alert_type=AlertType.CAMERA_CLOCK,
+        camera_id=cam.id,
+        content=render_camera_clock(
+            camera_display_name=cam.display_name,
+            drift_seconds=cam.clock_drift_seconds,
+            streak=cam.clock_correction_streak,
+            streak_threshold=streak_threshold,
+            ntp_enabled=cam.clock_ntp_enabled,
+            public_url=public_url,
+            tz_name=tz_name,
+            now=now,
+        ),
+    )
+
+
 def _read_log_tail(log_path: Path, line_count: int = _LOG_TAIL_LINES) -> str:
     """Best-effort read of the last ``line_count`` lines of ``log_path`` (empty string on miss/IO error)."""
     if not log_path.is_file():
@@ -598,6 +636,15 @@ def _camera_candidates(
     )
     if fc is not None:
         yield fc
+    cc = evaluate_camera_clock(
+        cam,
+        streak_threshold=config.alerts.camera_clock_streak_threshold,
+        public_url=public_url,
+        tz_name=tz_name,
+        now=now,
+    )
+    if cc is not None:
+        yield cc
 
 
 def _watchdog_candidates(

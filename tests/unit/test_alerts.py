@@ -24,6 +24,7 @@ from cat_watcher.alerts import (
     cooldown_for,
     dispatch_alert,
     evaluate_backup_stale,
+    evaluate_camera_clock,
     evaluate_frequency,
     evaluate_heartbeat_watchdog,
     evaluate_inactivity,
@@ -811,6 +812,103 @@ def test_backup_stale_suppressed_during_storage_unavailable_cooldown(db_engine: 
 
 
 # --- cooldown_for + dispatch_alert ---------------------------------------------------------------
+
+
+def _clock_camera(
+    *,
+    streak: int = 0,
+    ntp_enabled: bool | None = None,
+    drift_seconds: float | None = -7198.3,
+) -> Camera:
+    """Build a camera row carrying only the clock state the evaluator reads."""
+    return Camera(
+        id=1,
+        name="office",
+        display_name="Office Litter Box Camera",
+        host="cam.example.com",
+        poll_status=PollStatus.OK,
+        clock_correction_streak=streak,
+        clock_ntp_enabled=ntp_enabled,
+        clock_drift_seconds=drift_seconds,
+    )
+
+
+def test_camera_clock_fires_at_streak_threshold() -> None:
+    """Reaching the threshold means the clock is not holding between ticks."""
+    candidate = evaluate_camera_clock(
+        _clock_camera(streak=3),
+        streak_threshold=3,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
+    )
+
+    assert candidate is not None
+    assert candidate.alert_type is AlertType.CAMERA_CLOCK
+    assert candidate.camera_id == 1
+
+
+def test_camera_clock_silent_below_streak_threshold() -> None:
+    """One correction is the expected result of an unplug, so it must stay quiet."""
+    assert (
+        evaluate_camera_clock(
+            _clock_camera(streak=2),
+            streak_threshold=3,
+            public_url=_URL,
+            tz_name=_TZ,
+            now=_NOW,
+        )
+        is None
+    )
+
+
+def test_camera_clock_fires_on_ntp_enabled_regardless_of_streak() -> None:
+    """NTP back on overwrites the clock every sync, so it warrants an alert on its own."""
+    candidate = evaluate_camera_clock(
+        _clock_camera(streak=0, ntp_enabled=True),
+        streak_threshold=3,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
+    )
+
+    assert candidate is not None
+    assert "NTP.Enable" in candidate.content.body
+
+
+def test_camera_clock_silent_when_ntp_state_never_read() -> None:
+    """``None`` means the poller has not had cause to read NTP, which is not a fault."""
+    assert (
+        evaluate_camera_clock(
+            _clock_camera(streak=0, ntp_enabled=None),
+            streak_threshold=3,
+            public_url=_URL,
+            tz_name=_TZ,
+            now=_NOW,
+        )
+        is None
+    )
+
+
+def test_camera_clock_cooldown_suppresses_repeat(
+    db_engine: Engine,
+    cfg: Config,
+    seed_camera: Callable[..., int],
+) -> None:
+    """A second dispatch inside the cool-down writes no new row."""
+    cam_id = seed_camera(db_engine)
+    for _ in range(2):
+        with get_session(db_engine) as session:
+            dispatch_alert(
+                AlertType.CAMERA_CLOCK,
+                camera_id=cam_id,
+                content=_TRIVIAL_CONTENT,
+                env=_dispatch_env(cfg, session, now=_NOW),
+            )
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).where(AlertSent.alert_type == AlertType.CAMERA_CLOCK).all()
+    assert len(rows) == 1
 
 
 def test_cooldown_for_returns_hardcoded_overrides(cfg: Config) -> None:

@@ -162,6 +162,7 @@ class AlertType(enum.Enum):
     DISK_LOW = "DISK_LOW"
     STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE"
     BACKUP_STALE = "BACKUP_STALE"
+    CAMERA_CLOCK = "CAMERA_CLOCK"
 
 
 class Base(DeclarativeBase):
@@ -183,6 +184,15 @@ class Camera(Base):
     poll_status: Mapped[PollStatus] = mapped_column(Enum(PollStatus, name="poll_status"), nullable=False, default=PollStatus.OK)
     poll_status_since: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     poll_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Clock-sync state, written by the poller each tick. The camera's own NTP client is kept off,
+    # so the host is the only thing correcting these clocks. ``clock_correction_streak`` counts
+    # consecutive ticks that needed a correction, which is what distinguishes an expected one-off
+    # (a camera unplugged for cleaning) from a clock that will not hold.
+    clock_drift_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    clock_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    # ``server_default`` matches the migration, which needs it to backfill pre-existing rows.
+    clock_correction_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    clock_ntp_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # ``cascade="all, delete-orphan"`` mirrors the FK ``ondelete="CASCADE"`` on Clip.camera_id so
     # removing a Camera (rare — only when the operator deletes it from config) drops its clips.
