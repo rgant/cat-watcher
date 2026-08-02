@@ -1,6 +1,6 @@
 """Daily SQLite hot-copy of ``cat_watcher.sqlite`` to ``storage_root/backups/``.
 
-Per spec §4.12. The backup runs as a 4th LaunchAgent (``cat-watcher-backup --once``) at 03:00 local
+Per spec §4.12. The backup runs as a 4th LaunchAgent (``cat-watcher-backup``) at 03:00 local
 time. The cross-volume direction is intentional: the live DB lives on internal storage and the
 backup lives on the external drive, so a single-drive failure on either side is recoverable.
 
@@ -11,7 +11,7 @@ Three responsibilities:
   ``[backup].keep_count`` newest files by mtime. The online API is safe under WAL without blocking
   writers; it opens its own dedicated connections rather than reusing SQLAlchemy's pool, since the
   copy iterates pages independently of the ORM session.
-* :func:`main` + ``--once`` CLI — the LaunchAgent entry point. Performs the §4.13 storage-
+* :func:`main` — the LaunchAgent entry point. Performs the §4.13 storage-
   availability wait first (the backup target is on the external drive); only after the drive is
   reachable does the agent insert ``agent_starts(agent_name='backup', ...)`` and run the backup.
   Returns exit 2 on storage timeout (operator-actionable: drive offline / unlock dismissed).
@@ -94,7 +94,6 @@ def _prune(backups_dir: Path, *, keep_count: int) -> None:
 class _ParsedArgs(argparse.Namespace):
     """Typed view over the parsed ``cat-watcher-backup`` Namespace."""
 
-    once: bool = False
     config: Path | None = None
 
 
@@ -102,11 +101,6 @@ def _parse_args(argv: Sequence[str] | None) -> _ParsedArgs:
     parser = argparse.ArgumentParser(
         prog="cat-watcher-backup",
         description="Hot-copy the cat-watcher SQLite DB to storage_root/backups/ and prune to keep_count.",
-    )
-    _ = parser.add_argument(
-        "--once",
-        action="store_true",
-        help="kept for LaunchAgent compat; the backup agent is always one-shot",
     )
     _ = parser.add_argument("--config", type=Path, default=None, help="Override config.toml path")
     return parser.parse_args(argv, namespace=_ParsedArgs())

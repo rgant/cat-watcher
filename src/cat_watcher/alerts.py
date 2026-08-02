@@ -16,7 +16,7 @@ Per spec §4.5 + Task 18 plan. Three responsibilities, one module:
    log at INFO and write **no** ``alerts_sent`` row (per Task 18: an active 24h-cool-down alert
    must not generate ~96 rows/day per type).
 
-3. **Tick orchestrator** (:func:`run_alerts_tick`) + ``main`` — for the ``cat-watcher-alerts --once``
+3. **Tick orchestrator** (:func:`run_alerts_tick`) + ``main`` — for the ``cat-watcher-alerts``
    LaunchAgent. Skips the §4.13 storage wait (the alerts agent's state lives on internal storage, so
    it must run even when the external drive is offline so it can fire ``STORAGE_UNAVAILABLE``).
 """
@@ -705,13 +705,11 @@ def run_alerts_tick(*, config: Config, engine: Engine, now: datetime) -> None:
 class _ParsedArgs(argparse.Namespace):
     """Typed view over the parsed ``cat-watcher-alerts`` Namespace."""
 
-    once: bool = False
     config: Path | None = None
 
 
 def _parse_args(argv: Sequence[str] | None) -> _ParsedArgs:
     parser = argparse.ArgumentParser(prog="cat-watcher-alerts", description="Evaluate alert rules and dispatch one tick.")
-    _ = parser.add_argument("--once", action="store_true", help="kept for LaunchAgent compat; the alerts agent is always one-shot")
     _ = parser.add_argument("--config", type=Path, default=None, help="Override config.toml path")
     return parser.parse_args(argv, namespace=_ParsedArgs())
 

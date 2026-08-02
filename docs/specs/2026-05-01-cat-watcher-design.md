@@ -204,7 +204,7 @@ Periodic entrypoint. On startup the poller:
 
 1. Acquires an exclusive file lock on `<internal_root>/.poller.pid`
    (`fcntl.flock` with `LOCK_EX | LOCK_NB`). If another poller process holds the
-   lock — for example, a manual `pixi run poll-once` overlapping with a
+   lock — for example, a manual `pixi run cat-watcher-poller` overlapping with a
    LaunchAgent tick — the new process exits cleanly with code 0. This prevents
    concurrent downloads and partial-byte races on the same files.
 2. Performs the storage-availability wait (§4.13) — the poller writes to the
@@ -486,17 +486,17 @@ cat-watcher-web = "cat_watcher.web.app:main"
 cat-watcher-backup = "cat_watcher.backup:main"
 ```
 
-Each `main()` accepts `--once` (run a single iteration and exit) and
-`--config PATH` overrides for testing. The umbrella `cat-watcher` command
-exposes sub-commands for ad-hoc operations (e.g.,
-`cat-watcher inspect <clip-id>`).
+Each agent runs exactly one iteration and exits; the LaunchAgent's
+`StartInterval` supplies the cadence. Each `main()` accepts a `--config PATH`
+override for testing. The umbrella `cat-watcher` command exposes sub-commands
+for ad-hoc operations (e.g., `cat-watcher inspect <clip-id>`).
 
 **Config-path precedence:** `--config PATH` (CLI flag) > `CAT_WATCHER_CONFIG`
 (env var) > `./config.toml` (default). The CLI flag exists primarily for tests;
 LaunchAgents in production set the env var via `EnvironmentVariables` in their
 plists (§11.4).
 
-Additionally, `cat-watcher-poller --once` accepts these scoping flags for ad-hoc
+Additionally, `cat-watcher-poller` accepts these scoping flags for ad-hoc
 fetches, first-run backfill control, and dev-cache priming:
 
 - `--camera NAME` — restrict to one camera (default: all configured cameras)
@@ -1235,8 +1235,9 @@ session start, `make_clip.py` runs ffmpeg to build a few seconds of synthetic
 
 The test pipeline never uses real camera footage — tests must remain
 reproducible from a clean clone with no network access. For ad-hoc development
-and exploration, `pixi run fetch-clips` populates `data/clips/` from real
-cameras; those files are gitignored and are not referenced from any test.
+and exploration, `pixi run cat-watcher-poller --no-detect` populates
+`data/clips/` from real cameras; those files are gitignored and are not
+referenced from any test.
 
 ### 9.4. Critical paths with explicit tests
 
@@ -1456,9 +1457,9 @@ environment, so an explicit `pixi run` prefix would be redundant.
 A few translation notes vs. the reference justfile:
 
 - **Variadic args (`*flags`, `*paths`, `*args` in just)** — omit any `args`
-  block and let pixi forward trailing CLI arguments. Example: a `poll-once` task
-  whose `cmd` is just `cat-watcher-poller --once` will, when invoked as
-  `pixi run poll-once --since 2026-04-30 --limit 5`, append those flags.
+  block and let pixi forward trailing CLI arguments. Example: a `logs` task
+  whose `cmd` is just `cat-watcher logs` will, when invoked as
+  `pixi run logs --agent poller --follow`, append those flags.
 - **Positional defaults (`m=""`, `path="."` in just)** — declared as a list of
   `args` entries with a `default` field, then templated with Jinja-style
   `{{ name }}` placeholders inside `cmd`. (See the `db-revision` example below
@@ -1480,9 +1481,7 @@ implementation time):
 # === app ===
 [tool.pixi.tasks]
 dev = { cmd = "cat-watcher-web --reload", description = "Run web app with reload" }
-poll-once = { cmd = "cat-watcher-poller --once", description = "One-shot poll (extra flags forwarded)" }
-fetch-clips = { cmd = "cat-watcher-poller --once --no-detect", description = "Poll without YOLO inference" }
-alerts-once = { cmd = "cat-watcher-alerts --once" }
+alerts-once = { cmd = "cat-watcher-alerts" }
 backup = { cmd = "cat-watcher-backup" }
 status = { cmd = "cat-watcher status" }
 test-cameras = { cmd = "cat-watcher test-cameras" }
@@ -1537,14 +1536,14 @@ pixi run alembic upgrade head
 
 # verify wiring (must be on home LAN or SSH-tunneled)
 pixi run test-cameras
-pixi run poll-once --since 2026-04-30T00:00:00 --limit 5  # small ad-hoc fetch
-pixi run dev                                              # web app on localhost:8000
+pixi run cat-watcher-poller --since 2026-04-30T00:00:00 --limit 5  # small ad-hoc fetch
+pixi run dev                                                       # web app on localhost:8000
 ```
 
 No LaunchAgents on dev. The poller and alerts agent are driven manually with
-`pixi run poll-once` / `pixi run alerts-once` / `pixi run backup`. Storage
-availability checks (§4.13) pass trivially because `./data` always exists in the
-repo.
+`pixi run cat-watcher-poller` / `pixi run alerts-once` / `pixi run backup`.
+Storage availability checks (§4.13) pass trivially because `./data` always
+exists in the repo.
 
 ### 11.1. Initial setup (Mac mini)
 
@@ -1601,11 +1600,11 @@ process only new recordings since `cameras.last_polled_at`.
 If you want a smaller initial cache (e.g., on the dev MacBook or a fresh
 production install), run a one-shot poller invocation with
 `--since
-<recent-iso8601>` (via `cat-watcher-poller --once --since ...`) before
+<recent-iso8601>` (via `cat-watcher-poller --since ...`) before
 `pixi run install-agents`. That seeds `cameras.last_polled_at` to the requested
-start time; the LaunchAgent's subsequent ticks pick up from there. Combine with
-`--no-detect` (or use `pixi run fetch-clips`) to skip the YOLO model entirely
-while priming a dev cache.
+start time; the LaunchAgent's subsequent ticks pick up from there. Add
+`--no-detect` to skip the YOLO model entirely while priming a dev cache — those
+clips ingest unscored, so follow up with `cat-watcher reanalyze` to score them.
 
 ### 11.2. Updates
 

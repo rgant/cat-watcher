@@ -93,7 +93,7 @@ class PollerLockedError(PollerError):
 def pid_lock(internal_root: Path) -> Generator[None]:
     """Hold an exclusive non-blocking ``fcntl.flock`` on ``<internal_root>/.poller.pid``.
 
-    Per spec §4.4 step 1: a manual ``pixi run poll-once`` that overlaps with a LaunchAgent tick
+    Per spec §4.4 step 1: a manual ``pixi run cat-watcher-poller`` that overlaps with a LaunchAgent tick
     should see ``PollerLockedError`` (which ``main`` translates into a clean exit 0). The PID file
     is created if absent; on entry we truncate and write the current PID for diagnostic value.
     """
@@ -686,7 +686,6 @@ class _ParsedArgs(argparse.Namespace):
     limit: int | None = None
     no_detect: bool = False
     list_only: bool = False
-    once: bool = False
     verbose: bool = False
 
 
@@ -695,11 +694,6 @@ def _parse_args(argv: Sequence[str] | None) -> PollerArgs:
     parser = argparse.ArgumentParser(
         prog="cat-watcher-poller",
         description="Poll configured Amcrest cameras for new motion clips and ingest them.",
-    )
-    _ = parser.add_argument(
-        "--once",
-        action="store_true",
-        help="kept for LaunchAgent compat; the poller is always one-shot",
     )
     _ = parser.add_argument(
         "--config",

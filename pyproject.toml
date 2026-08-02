@@ -74,8 +74,8 @@ cat-watcher = { path = ".", editable = true }
 cmd = "launchctl list | grep cat-watcher"
 description = "Show status of cat-watcher launchd agents"
 [tool.pixi.tasks.alerts-once]
-cmd = "cat-watcher-alerts --once"
-description = "Run alerts pipeline once (no daemon)"
+cmd = "cat-watcher-alerts"
+description = "Evaluate alert rules and dispatch one tick"
 [tool.pixi.tasks.check]
 cmd = "pytest"
 depends-on = [ "format", "lint" ]
@@ -106,9 +106,6 @@ description = "Pull, install, migrate, reload all agents (re-renders plists), an
 [tool.pixi.tasks.dev]
 cmd = "cat-watcher-web --reload"
 description = "Run web app with reload"
-[tool.pixi.tasks.fetch-clips]
-cmd = "cat-watcher-poller --once --no-detect"
-description = "Poll without YOLO inference"
 [tool.pixi.tasks.fmt-dprint]
 cmd = '''bash -c 'p="$1"
   shift
@@ -172,9 +169,6 @@ description = "Print the resolved ML stack versions (torch/torchvision/opencv/ul
 [tool.pixi.tasks.outdated]
 cmd = "pixi update --dry-run"
 description = "Show what would be updated"
-[tool.pixi.tasks.poll-once]
-cmd = "cat-watcher-poller --once"
-description = "One-shot poll; trailing flags forward (e.g., --since, --limit)"
 [tool.pixi.tasks.test-ml]
 # The real-model test is opt-in via CAT_WATCHER_RUN_REAL_MODEL because it loads the full torch stack
 # and downloads ~6 MB of weights on first run. Nothing in src/ imports cv2, so this task is the only
