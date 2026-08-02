@@ -98,11 +98,14 @@ description = 'Create alembic auto-revision; pass message="..."'
 cmd = "alembic upgrade head"
 description = "Apply pending alembic migrations to head"
 [tool.pixi.tasks.deploy-update]
+# Agents are stopped across the migration so no tick runs new code against the old schema, and no
+# tick holds a SQLite write lock while alembic works. A failed migration therefore leaves every
+# agent down on purpose; recover with `pixi run start-agents` once the schema is sorted out.
 cmd = """\
-  git pull && pixi install && pixi run alembic upgrade head && pixi run install-agents && pixi run agents-status && \
-  curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health -w '\\n'\
+  git pull && pixi install && pixi run stop-agents && pixi run alembic upgrade head && pixi run start-agents && pixi \
+  run agents-status && curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health -w '\\n'\
   """
-description = "Pull, install, migrate, reload all agents (re-renders plists), and verify web /health."
+description = "Pull, install, stop agents, migrate, restart agents, and verify web /health."
 [tool.pixi.tasks.dev]
 cmd = "cat-watcher-web --reload"
 description = "Run web app with reload"
@@ -169,6 +172,12 @@ description = "Print the resolved ML stack versions (torch/torchvision/opencv/ul
 [tool.pixi.tasks.outdated]
 cmd = "pixi update --dry-run"
 description = "Show what would be updated"
+[tool.pixi.tasks.start-agents]
+cmd = "bash scripts/install_launchagents.sh --start"
+description = "Render plists and bootstrap every cat-watcher agent (this Mac)"
+[tool.pixi.tasks.stop-agents]
+cmd = "bash scripts/install_launchagents.sh --stop"
+description = "Bootout every cat-watcher agent and leave them down (this Mac)"
 [tool.pixi.tasks.test-ml]
 # The real-model test is opt-in via CAT_WATCHER_RUN_REAL_MODEL because it loads the full torch stack
 # and downloads ~6 MB of weights on first run. Nothing in src/ imports cv2, so this task is the only
@@ -178,8 +187,8 @@ env = { CAT_WATCHER_RUN_REAL_MODEL = "1" }
 depends-on = [ "ml-versions" ]
 description = "Run the ML-stack tests against real YOLO weights, after reporting resolved versions"
 [tool.pixi.tasks.test-on-mini]
-cmd = "ssh media-center 'cd ~/Programming/cat-watcher && git pull && pixi install && pixi run pytest'"
-description = "Pull and run pytest on media-center over SSH"
+cmd = "bash scripts/test_on_mini.sh"
+description = "Run pytest against the code currently deployed on media-center"
 [tool.pixi.tasks.uninstall-agents]
 cmd = "bash scripts/uninstall_launchagents.sh"
 description = "Remove cat-watcher launchd agents (this Mac)"
