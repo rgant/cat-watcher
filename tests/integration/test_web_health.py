@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from cat_watcher.db import AgentStart, Heartbeat, create_engine, get_session
+from cat_watcher.web.app import build_app
 from cat_watcher.web.app import main as web_main
 
 if TYPE_CHECKING:
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
+    from fastapi.templating import Jinja2Templates
     from fastapi.testclient import TestClient
 
     from cat_watcher.config import Config
@@ -278,3 +280,21 @@ def test_main_reload_mode_invokes_factory_uvicorn_run(
     assert call.args[0] == "cat_watcher.web.app:reload_app"
     assert call.kwargs["factory"] is True
     assert call.kwargs["reload"] is True
+
+
+def test_templates_autoescape_is_enabled(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
+    """Autoescape must be on for every template, regardless of filename.
+
+    ``Jinja2Templates(directory=...)`` configures ``select_autoescape()``, which keys off the final
+    extension and therefore does NOT enable escaping for this project's ``*.html.jinja`` names.
+    ``build_app`` passes its own Environment to force it on; without that, every ``{{ value }}`` in
+    the UI renders attacker-controlled text unescaped.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+
+    app = build_app(config)
+    templates = cast("Jinja2Templates", app.state.templates)
+
+    assert templates.env.autoescape is True
+    assert templates.env.from_string("{{ v }}").render(v="<script>x</script>") == "&lt;script&gt;x&lt;/script&gt;"

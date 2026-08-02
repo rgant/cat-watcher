@@ -13,12 +13,13 @@ import sys
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import select
 from starlette.routing import WebSocketRoute
 
@@ -40,7 +41,7 @@ from cat_watcher.web.routes import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import AsyncGenerator, MutableMapping, Sequence
 
     import arel
     from sqlalchemy.engine import Engine
@@ -87,9 +88,19 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.state.config = config
     app.state.engine = engine
-    templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+    # Build the Environment explicitly rather than letting Jinja2Templates(directory=...) do it: that
+    # path uses ``select_autoescape()``, which keys off the final extension and so leaves autoescape
+    # OFF for this project's ``*.html.jinja`` names. Every template here emits HTML, so force it on.
+    jinja_env = Environment(
+        loader=FileSystemLoader(str(Path(__file__).parent / "templates")),
+        autoescape=True,
+    )
+    templates = Jinja2Templates(env=jinja_env)
+    # jinja2 assigns ``Environment.globals`` from a dict literal without annotating it, so its value
+    # type infers as the union of the six defaults rather than the "anything" the API documents.
+    env_globals = cast("MutableMapping[str, object]", jinja_env.globals)
     # Empty string in non-dev builds so the template's ``{{ ... | safe }}`` renders nothing.
-    templates.env.globals["dev_hot_reload_script"] = hotreload.script(_HOT_RELOAD_URL) if hotreload is not None else ""  # pyright: ignore[reportUnknownMemberType]  # Jinja2Templates doesn't type env propery
+    env_globals["dev_hot_reload_script"] = hotreload.script(_HOT_RELOAD_URL) if hotreload is not None else ""
     app.state.templates = templates
     app.add_middleware(
         BasicAuthMiddleware,

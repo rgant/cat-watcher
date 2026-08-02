@@ -10,7 +10,7 @@ root logger:
   ``docs/specs/2026-05-05-structured-logging-design.md``.
 * A :class:`logging.StreamHandler` on stderr at the same ``level`` as the root logger, so genuine
   problems hit the LaunchAgent's ``<agent>.stderr.log`` fallback even if no one is reading the
-  JSONL file. Under ``--verbose``/``level=INFO``, diagnostic detail (httpxyz requests, the
+  JSONL file. Under ``--verbose``/``level=INFO``, diagnostic detail (httpx2 requests, the
   empty-window note from amcrest_client, retries) also surfaces on stderr.
 
 The formatter stamps each record with the agent slug and current PID, so existing

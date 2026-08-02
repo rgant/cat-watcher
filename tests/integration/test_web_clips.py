@@ -832,7 +832,7 @@ def test_media_frame_returns_410_when_file_missing(
     ],
     ids=["malformed", "missing-prefix", "inverted", "start-past-eof"],
 )
-def test_media_clip_returns_rfc_correct_status_for_bad_range_headers(  # noqa: PLR0913  # pylint: disable=too-many-positional-arguments  # parametrized: 4 fixtures + 2 parametrize values
+def test_media_clip_returns_rfc_correct_status_for_bad_range_headers(  # noqa: PLR0913, PLR0917  # parametrized: 4 fixtures + 2 parametrize values
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],

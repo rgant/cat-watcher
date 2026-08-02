@@ -1,7 +1,5 @@
 """Shared pytest fixtures for the cat-watcher test suite."""
 
-import respx_httpxyz  # noqa: F401, I001  # pyright: ignore[reportUnusedImport]  # side-effect import; must run first; registers HTTPCoreXYZMocker + repoints respx.mock default.
-
 import logging
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -9,13 +7,13 @@ from typing import TYPE_CHECKING
 import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from fastapi.testclient import TestClient
 from db_helpers import (
     apply_clip_label_summary_view,
     build_test_clip,
     seed_camera_and_clip,
     seed_camera_and_clip_with_files,
 )
+from fastapi.testclient import TestClient
 from make_clip import make_clip
 from pydantic import SecretStr
 
@@ -35,7 +33,6 @@ from cat_watcher.config import (
     WebAuth,
     WebConfig,
 )
-
 from cat_watcher.db import Base, Camera, PollStatus, create_engine, get_session
 from cat_watcher.web.app import build_app
 

@@ -2,12 +2,13 @@
 
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003  # runtime import: respx.mock calls inspect.getfullargspec, which forces annotation evaluation
 from typing import TYPE_CHECKING, override
 from zoneinfo import ZoneInfo
 
-import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at runtime.
+import httpx  # respx returns httpx types; the httpx2_alias plugin aliases httpx to httpx2 at runtime.
 import pytest
 import respx
 from pydantic import SecretStr
@@ -556,5 +557,47 @@ def test_iter_recordings_destroy_failure_logged_not_raised(caplog: pytest.LogCap
 def test_client_context_manager_closes_underlying_httpx() -> None:
     """``with AmcrestClient(...) as c:`` exits cleanly and the httpx client is closed."""
     with _make_client() as client:
-        assert isinstance(client._client, httpx.Client)  # type: ignore[unreachable]  # mypy sees httpx/httpxyz as distinct classes; the shim aliases them at runtime, so this runs
-    assert client._client.is_closed  # type: ignore[unreachable]  # same: reachable at runtime via the httpxyz alias
+        assert isinstance(client._client, httpx.Client)  # type: ignore[unreachable]  # mypy sees httpx/httpx2 as distinct classes; the shim aliases them at runtime, so this runs
+    assert client._client.is_closed  # type: ignore[unreachable]  # same: reachable at runtime via the httpx2 alias
+
+
+@respx.mock
+def test_request_answers_digest_challenge_with_authorization_header() -> None:
+    """A ``WWW-Authenticate: Digest`` challenge is answered on the retry, which is how cameras authenticate.
+
+    Every other auth test here mocks a *bare* 401, which httpx2's ``DigestAuth`` never engages with:
+    it needs the challenge header to compute a response, so those tests exercise the fail-fast path
+    only. This one pins the actual credential exchange the poller depends on against every camera.
+    """
+    seen_authorization: list[str | None] = []
+
+    def _challenge_then_accept(request: httpx.Request) -> httpx.Response:
+        # ``Headers.get`` is typed as returning Any; materialize a plain dict for a checkable str.
+        seen_authorization.append(dict(request.headers).get("authorization"))
+        if len(seen_authorization) == 1:
+            # Non-hex nonce/opaque: real cameras send hex, but the digest is computed over whatever
+            # string arrives, and hex literals here trip detect-secrets as high-entropy strings.
+            challenge = 'Digest realm="Login to cam", qop="auth", nonce="test-nonce-value", opaque="test-opaque-value"'
+            return httpx.Response(401, headers={"WWW-Authenticate": challenge})
+        return httpx.Response(200, text="result = 2026-05-01 06:47:04\r\n")
+
+    route = respx.get(f"{_BASE_URL}/cgi-bin/global.cgi", params={"action": "getCurrentTime"}).mock(
+        side_effect=_challenge_then_accept,
+    )
+
+    client = _make_client()
+    camera_time = client.get_camera_time()
+
+    assert route.call_count == 2
+    # The first request is unauthenticated; the credential only appears after the challenge.
+    assert seen_authorization[0] is None
+    authorization = seen_authorization[1]
+    assert authorization is not None
+    assert authorization.startswith("Digest ")
+    assert 'username="u"' in authorization
+    assert 'realm="Login to cam"' in authorization
+    assert 'nonce="test-nonce-value"' in authorization
+    assert 'uri="/cgi-bin/global.cgi?action=getCurrentTime"' in authorization
+    # A derived MD5 digest, not the shared secret itself.
+    assert re.search(r'response="[0-9a-f]{32}"', authorization) is not None
+    assert camera_time == datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)

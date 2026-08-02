@@ -15,7 +15,7 @@ from pathlib import Path  # noqa: TC003  # runtime: respx.mock evaluates fixture
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-import httpx  # respx returns httpx types; httpxyz aliases httpx to httpxyz at runtime.
+import httpx  # respx returns httpx types; the httpx2_alias plugin aliases httpx to httpx2 at runtime.
 import numpy as np
 import pytest  # noqa: TC002  # runtime: respx.mock evaluates pytest.MonkeyPatch annotations at decoration time
 import respx

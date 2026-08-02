@@ -312,7 +312,7 @@ video {
 
 .detail-meta {
   display: grid;
-  grid-template-columns: [meta-start] 1fr [meta-end];
+  grid-template-columns: [meta-start] minmax(0, 1fr) [meta-end];
   gap: var(--space-xs);
   margin-block-end: var(--space-lg);
 
@@ -485,7 +485,7 @@ video {
   }
 
   .detail-meta {
-    grid-template-columns: [meta-start] max-content [meta-divider] 1fr [meta-end];
+    grid-template-columns: [meta-start] max-content [meta-divider] minmax(0, 1fr) [meta-end];
     gap: var(--space-xs) var(--space-md);
 
     & dt {
@@ -668,7 +668,7 @@ video {
 
 .thumb-strip {
   display: grid;
-  grid-template-columns: [thumb-start] 1fr [thumb-end];
+  grid-template-columns: [thumb-start] minmax(0, 1fr) [thumb-end];
   gap: var(--space-md);
 
   margin: 0;
@@ -821,19 +821,19 @@ video {
 
 @media (width >= 30rem) {
   .thumb-strip {
-    grid-template-columns: [thumb-start] 1fr [col-2] 1fr [thumb-end];
+    grid-template-columns: [thumb-start] minmax(0, 1fr) [col-2] minmax(0, 1fr) [thumb-end];
   }
 }
 
 @media (width >= 48rem) {
   .thumb-strip {
-    grid-template-columns: [thumb-start] 1fr [col-2] 1fr [col-3] 1fr [thumb-end];
+    grid-template-columns: [thumb-start] minmax(0, 1fr) [col-2] minmax(0, 1fr) [col-3] minmax(0, 1fr) [thumb-end];
   }
 }
 
 @media (width >= 64rem) {
   .thumb-strip {
-    grid-template-columns: [thumb-start] 1fr [col-2] 1fr [col-3] 1fr [col-4] 1fr [thumb-end];
+    grid-template-columns: [thumb-start] minmax(0, 1fr) [col-2] minmax(0, 1fr) [col-3] minmax(0, 1fr) [col-4] minmax(0, 1fr) [thumb-end];
   }
 }
 
@@ -958,7 +958,7 @@ video {
 
 .contact-sheet-list {
   display: grid;
-  grid-template-columns: [contact-start] 1fr [col-2] 1fr [contact-end];
+  grid-template-columns: [contact-start] minmax(0, 1fr) [col-2] minmax(0, 1fr) [contact-end];
   gap: var(--space-sm);
 
   margin: var(--space-sm) 0 0;
@@ -1030,13 +1030,25 @@ video {
 
 @media (width >= 48rem) {
   .contact-sheet-list {
-    grid-template-columns: [contact-start] 1fr [col-2] 1fr [col-3] 1fr [col-4] 1fr [contact-end];
+    grid-template-columns:
+      [contact-start] minmax(0, 1fr)
+      [col-2] minmax(0, 1fr)
+      [col-3] minmax(0, 1fr)
+      [col-4] minmax(0, 1fr)
+      [contact-end];
   }
 }
 
 @media (width >= 64rem) {
   .contact-sheet-list {
-    grid-template-columns: [contact-start] 1fr [col-2] 1fr [col-3] 1fr [col-4] 1fr [col-5] 1fr [col-6] 1fr [contact-end];
+    grid-template-columns:
+      [contact-start] minmax(0, 1fr)
+      [col-2] minmax(0, 1fr)
+      [col-3] minmax(0, 1fr)
+      [col-4] minmax(0, 1fr)
+      [col-5] minmax(0, 1fr)
+      [col-6] minmax(0, 1fr)
+      [contact-end];
   }
 }
 

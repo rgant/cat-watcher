@@ -11,17 +11,17 @@ license = { text = "AGPL-3.0-or-later" }
 authors = [ { name = "J Rob Gant", email = "rgant@alum.wpi.edu" } ]
 requires-python = ">=3.14"
 dependencies = [
-  "alembic>=1.18.4,<2",
-  "fastapi>=0.136.3,<0.137",
-  "httpxyz>=0.31.2,<0.32",
+  "alembic>=1.18.5,<2",
+  "fastapi>=0.141.1,<0.142",
+  "httpx2>=2.9.1,<3",
   "jinja2>=3.1.6,<4",
-  "pillow>=12.2.0,<13",
+  "pillow>=12.3.0,<13",
   "pydantic>=2.13.4,<3",
   "pydantic-settings>=2.14.2,<3",
   "python-multipart>=0.0.32,<0.1",
   "sqlalchemy>=2.0.51,<3",
-  "starlette>=0.52.1,<0.53",
-  "uvicorn[standard]>=0.46.0,<0.47",
+  "starlette>=1.3.1,<2",
+  "uvicorn[standard]>=0.52.1,<0.53",
 ]
 [project.scripts]
 cat-watcher = "cat_watcher.__main__:main"
@@ -32,23 +32,25 @@ cat-watcher-backup = "cat_watcher.backup:main"
 
 [dependency-groups]
 dev = [
-  "arel>=0.4.0,<0.5",
-  "basedpyright>=1.39.8,<2",
+  # Starlette 1.x support is merged upstream but unreleased; PyPI's 0.4.0 still pins starlette==0.*.
+  # Release tracked in florimondmanca/arel#44; revert to a plain "arel>=0.5.0,<0.6" once it lands.
+  "arel @ git+https://github.com/florimondmanca/arel@8a466bfb1d24702481e6893ab305ce05e851dd02?rev_type=rev",
+  "basedpyright>=1.39.9,<2",
   "deptry>=0.25.1,<0.26",
   "detect-secrets>=1.5.0,<2",
-  "djlint>=1.39.2,<2",
-  "mypy>=2.1.0,<3",
-  "pre-commit>=4.6.0,<5",
+  "djlint>=1.43.2,<2",
+  "mypy>=2.3.0,<3",
+  "pre-commit>=4.6.1,<5",
   "pylint>=4.0.6,<5",
   "pylint-per-file-ignores>=3.2.1,<4",
   "pylint-pytest>=2.0.0a1",
   "pylint-venv>=3.0.4,<4",
-  "pyproject-fmt>=2.21.2,<2.22",       # 2.22+ corrupts multiline task cmd strings -> tox-dev/toml-fmt#388
+  "pyproject-fmt>=2.26,<3",
   "pytest>=9.1.1,<10",
   "pytest-cov>=7.1.0,<8",
   "pytest-randomly>=4.1.0,<5",
   "respx>=0.23.1,<0.24",
-  "ruff>=0.15.18,<0.16",
+  "ruff>=0.16.1,<0.17",
 ]
 
 [tool.pixi.dependencies]
@@ -56,14 +58,14 @@ python = "3.14.*"
 actionlint = ">=1.7.12,<2"
 dprint = ">=0.50.0,<0.51"
 ffmpeg = ">=8.1.1,<9"
-markdownlint-cli = ">=0.48.0,<0.49"
-numpy = ">=2.4.6,<3"
-opencv = ">=4.13.0,<5"
-pytorch = ">=2.10.0,<3"
+markdownlint-cli = ">=0.49.1,<0.50"
+numpy = ">=2.5.1,<3"
+opencv = ">=5,<6"
+pytorch = ">=2.12,<3"
 shellcheck = ">=0.11.0,<0.12"
-torchvision = "==0.25"  # version required for pytorch 2.10, conda doesn't have 2.11 yet.
-ultralytics = ">=8.4.72,<9"
-zizmor = ">=1.26.1,<2"
+torchvision = "==0.27.1"  # version required for pytorch 2.12; 0.28 is py312-only on conda-forge.
+ultralytics = ">=8.4.115,<9"
+zizmor = ">=1.29.0,<2"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
 [tool.pixi.pypi-dependencies]
@@ -108,11 +110,9 @@ description = "Run web app with reload"
 cmd = "cat-watcher-poller --once --no-detect"
 description = "Poll without YOLO inference"
 [tool.pixi.tasks.fmt-dprint]
-cmd = """\
-  bash -c 'p="$1"
+cmd = '''bash -c 'p="$1"
   shift
-  if [ -d "$p" ]; then dprint "$@" "${p%/}/**"; else dprint "$@" "$p"; fi' _ "{{ path }}" {{ dprint_cmd }}\
-  """
+  if [ -d "$p" ]; then dprint "$@" "${p%/}/**"; else dprint "$@" "$p"; fi' _ "{{ path }}" {{ dprint_cmd }}'''
 args = [ { arg = "path", default = "." }, { arg = "dprint_cmd", default = "fmt --allow-no-files" } ]
 description = "dprint with the directory-recursion glob fix; pass dprint_cmd=check for dry-run"
 [tool.pixi.tasks.fmt-sh]
@@ -122,8 +122,7 @@ description = "Format shell scripts with shfmt"
 cmd = "pyproject-fmt --no-print-diff pyproject.toml"
 description = "Format pyproject.toml with pyproject-fmt"
 [tool.pixi.tasks.format]
-cmd = """\
-  bash -c 'e=0
+cmd = '''bash -c 'e=0
   pyproject-fmt --no-print-diff pyproject.toml || e=$?
   shfmt --write scripts/ tests/fixtures/ || e=$?
   markdownlint --fix . || e=$?
@@ -132,8 +131,7 @@ cmd = """\
   npx --no-install eslint --fix "src/cat_watcher/web/static/**/*.js" || e=$?
   ruff check --fix --silent "$@" || e=$?
   ruff format "$@" || e=$?
-  exit $e' _ {{ paths }}\
-  """
+  exit $e' _ {{ paths }}'''
 args = [ { arg = "paths", default = "." } ]
 description = "Auto-format; pass a path to scope dprint + ruff"
 [[tool.pixi.tasks.format.depends-on]]
@@ -143,8 +141,7 @@ args = [ "{{ paths }}", "fmt --allow-no-files" ]
 cmd = "bash scripts/install_launchagents.sh"
 description = "Install cat-watcher launchd agents (this Mac)"
 [tool.pixi.tasks.lint]
-cmd = """\
-  bash -c 'e=0
+cmd = '''bash -c 'e=0
   ruff check "$@" || e=$?
   basedpyright "$@" || e=$?
   mypy "$@" || e=$?
@@ -156,8 +153,7 @@ cmd = """\
   find scripts tests/fixtures -name "*.sh" -type f -exec shellcheck "{}" + || e=$?
   actionlint || e=$?
   zizmor .github/workflows || e=$?
-  exit $e' _ {{ paths }}\
-  """
+  exit $e' _ {{ paths }}'''
 args = [ { arg = "paths", default = "." } ]
 description = "Run all linters; pass a path to scope the Python linters"
 [tool.pixi.tasks.lint-sh]
@@ -166,12 +162,27 @@ description = "Lint shell scripts with shellcheck (across scripts/ and tests/fix
 [tool.pixi.tasks.logs]
 cmd = "cat-watcher logs --follow"
 description = "Tail structured logs from all agents (live)"
+[tool.pixi.tasks.ml-versions]
+cmd = """\
+  python -c 'import cv2, numpy, torch, torchvision, ultralytics, PIL; print(f\"numpy {numpy.__version__} | torch \
+  {torch.__version__} | torchvision {torchvision.__version__} | ultralytics {ultralytics.__version__} | opencv \
+  {cv2.__version__} | pillow {PIL.__version__}\")'\
+  """
+description = "Print the resolved ML stack versions (torch/torchvision/opencv/ultralytics/numpy/pillow)"
 [tool.pixi.tasks.outdated]
 cmd = "pixi update --dry-run"
 description = "Show what would be updated"
 [tool.pixi.tasks.poll-once]
 cmd = "cat-watcher-poller --once"
 description = "One-shot poll; trailing flags forward (e.g., --since, --limit)"
+[tool.pixi.tasks.test-ml]
+# The real-model test is opt-in via CAT_WATCHER_RUN_REAL_MODEL because it loads the full torch stack
+# and downloads ~6 MB of weights on first run. Nothing in src/ imports cv2, so this task is the only
+# thing that exercises opencv, torch, torchvision, and ultralytics together against real inference.
+cmd = "pytest tests/unit/test_detector.py tests/integration/test_detector_real_model.py -v"
+env = { CAT_WATCHER_RUN_REAL_MODEL = "1" }
+depends-on = [ "ml-versions" ]
+description = "Run the ML-stack tests against real YOLO weights, after reporting resolved versions"
 [tool.pixi.tasks.test-on-mini]
 cmd = "ssh media-center 'cd ~/Programming/cat-watcher && git pull && pixi install && pixi run pytest'"
 description = "Pull and run pytest on media-center over SSH"
@@ -181,6 +192,21 @@ description = "Remove cat-watcher launchd agents (this Mac)"
 [tool.pixi.workspace]
 channels = [ "conda-forge" ]
 platforms = [ "linux-64", "osx-64", "osx-arm64" ]
+
+# Tool Configuration
+[tool.djlint]
+# ``jinja`` profile enables the T### template-syntax rules; the ``html`` profile would skip them.
+# Disabled rules: H031 (meta keywords — actively deprecated, Google ignores it); H025
+# (orphan-tag heuristic that misfires on multi-line tags with boolean attributes — djlint's own
+# formatter produces such tags, so the rule fires on its own output).
+profile = "jinja"
+extension = "html.jinja"
+indent = 2
+max_line_length = 140
+format_attribute_template_tags = true
+format_css = true
+format_js = true
+ignore = "H025,H031"
 
 [tool.ruff]
 target-version = "py314"
@@ -204,6 +230,7 @@ line-ending = "lf"
 [tool.ruff.lint]
 select = [ "ALL" ]
 ignore = [
+  "CPY001", # Per-file copyright notice; AGPL-3.0 is declared in LICENSE and pyproject
   "D203",   # 1 blank line before class (incompatible with D211)
   "D213",   # Multi-line docstring summary start on second line (incompatible with D212)
   "FIX002", # Allow TODO comments with author and link
@@ -275,7 +302,7 @@ disable = [
   "init-is-generator",                   # Duplicated with Ruff (PLE0100)
   "invalid-all-format",                  # Duplicated with Ruff (PLE0605)
   "invalid-all-object",                  # Duplicated with Ruff (PLE0604)
-  # "invalid-bool-returned",             # Duplicated with Ruff (PLE0304) Preview
+  "invalid-bool-returned",               # Duplicated with Ruff (PLE0304)
   "invalid-bytes-returned",              # Duplicated with Ruff (PLE0308)
   "invalid-character-backspace",         # Duplicated with Ruff (PLE2510)
   "invalid-character-esc",               # Duplicated with Ruff (PLE2513)
@@ -381,7 +408,7 @@ disable = [
   "subprocess-popen-preexec-fn",         # Duplicated with Ruff (PLW1509)
   "subprocess-run-check",                # Duplicated with Ruff (PLW1510)
   "super-without-brackets",              # Duplicated with Ruff (PLW0245)
-  # "try-except-raise",                  # Duplicated with Ruff (TRY203)
+  "try-except-raise",                    # Duplicated with Ruff (TRY203)
   "unnecessary-ellipsis",                # Duplicated with Ruff (PIE790)
   "unnecessary-lambda",                  # Duplicated with Ruff (PLW0108)
   "unnecessary-pass",                    # Duplicated with Ruff (PIE790)
@@ -476,7 +503,7 @@ disable = [
   # "too-complex",                       # Duplicated with Ruff (C901) pylint.extensions.mccabe not loaded
   "too-many-arguments",                  # Duplicated with Ruff (PLR0913)
   # "too-many-boolean-expressions",      # Duplicated with Ruff (PLR0916) Preview
-  # "too-many-positional-arguments",     # Duplicated with Ruff (PLR0917) Preview
+  "too-many-positional-arguments",       # Duplicated with Ruff (PLR0917)
   "too-many-branches",                   # Duplicated with Ruff (PLR0912)
   # "too-many-locals",                   # Duplicated with Ruff (PLR0914) Preview
   # "too-many-nested-blocks",            # Duplicated with Ruff (PLR1702) Preview
@@ -555,7 +582,7 @@ addopts = [
   "--strict-markers",        # Require all @pytest.mark.* decorators to be registered (prevents typos)
   "--tb=short",              # Shorter traceback format for cleaner output
   "-ra",                     # Show summary of all test outcomes (passed, failed, skipped, etc.)
-  "-p httpxyz",              # Load httpxyz first so its sys.modules['httpx'] = httpxyz alias takes effect before any test imports httpx
+  "-p httpx2_alias",         # Load first so the httpx -> httpx2 / httpcore -> httpcore2 alias is in place before any test imports httpx
 ]
 testpaths = [ "tests" ]
 # Put tests/fixtures on sys.path so conftest can ``from make_clip import make_clip`` directly,
@@ -577,21 +604,6 @@ exclude_lines = [
 branch = true
 source = [ "src" ]
 omit = [ "**/test_*.py", "**/tests/*" ]
-
-# Tool Configuration
-[tool.djlint]
-# ``jinja`` profile enables the T### template-syntax rules; the ``html`` profile would skip them.
-# Disabled rules: H031 (meta keywords — actively deprecated, Google ignores it); H025
-# (orphan-tag heuristic that misfires on multi-line tags with boolean attributes — djlint's
-# own formatter produces such tags, so the rule fires on its own output).
-profile = "jinja"
-extension = "html.jinja"
-indent = 2
-max_line_length = 140
-format_attribute_template_tags = true
-format_css = true
-format_js = true
-ignore = "H025,H031"
 
 [tool.basedpyright]
 venv = "default"

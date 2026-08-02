@@ -753,7 +753,7 @@ def _parse_args(argv: Sequence[str] | None) -> PollerArgs:
         "--verbose",
         "-v",
         action="store_true",
-        help="show diagnostic logs at INFO level (httpxyz requests, empty-window notes, retention details). "
+        help="show diagnostic logs at INFO level (httpx2 requests, empty-window notes, retention details). "
         "Default suppresses these; the per-tick summary always prints to stdout.",
     )
     ns = parser.parse_args(argv, namespace=_ParsedArgs())
@@ -1034,7 +1034,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     Stdout always carries the user-facing report — per-camera summary lines, retention sweep line,
     and (under ``--list-only``) the per-clip manifest — independent of log level. Log level comes
     from ``config.log_level``; ``--verbose`` upgrades it to at least ``INFO`` so diagnostic detail
-    (httpxyz requests, empty-window notes from ``amcrest_client``) lands on stderr and in the JSONL
+    (httpx2 requests, empty-window notes from ``amcrest_client``) lands on stderr and in the JSONL
     log even when the configured baseline is higher.
     """
     args = _parse_args(argv)
