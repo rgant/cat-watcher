@@ -539,7 +539,11 @@ video {
   }
 }
 
-.banner-offline {
+/* Shared box for every page-level notice. `.banner-offline` and `.banner-filter-notice` are markup
+   hooks the templates and tests key on; they carry no declarations because both notices want the
+   same treatment. A modifier that needs to diverge should set `border-color`, not the `border`
+   shorthand, which would reset width and style. */
+.banner {
   display: flex;
   flex-wrap: nowrap;
   gap: var(--space-sm);

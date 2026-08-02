@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
@@ -27,6 +28,7 @@ from cat_watcher.config import load_config
 from cat_watcher.db import AgentStart, Heartbeat, engine_for, get_session
 from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.subjects_sync import sync_subjects_at_startup
+from cat_watcher.timefmt import register_datetime_filters
 from cat_watcher.web.auth import BasicAuthMiddleware
 from cat_watcher.web.routes import (
     alerts_router,
@@ -101,6 +103,10 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     env_globals = cast("MutableMapping[str, object]", jinja_env.globals)
     # Empty string in non-dev builds so the template's ``{{ ... | safe }}`` renders nothing.
     env_globals["dev_hot_reload_script"] = hotreload.script(_HOT_RELOAD_URL) if hotreload is not None else ""
+    # Registered as filters rather than projected per route: per-route projection is how /cameras and
+    # /alerts came to render UTC while /clips rendered local. With a filter a new route has nothing
+    # to forget. The zone resolves once here; config validation guarantees it constructs.
+    register_datetime_filters(jinja_env, tz=ZoneInfo(config.web.display_timezone))
     app.state.templates = templates
     app.add_middleware(
         BasicAuthMiddleware,

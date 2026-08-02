@@ -16,8 +16,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
-from sqlalchemy import Integer, desc, func, select
-from sqlalchemy import cast as sql_cast
+from sqlalchemy import desc, select
 
 from cat_watcher.db import (
     AlertSent,
@@ -31,6 +30,7 @@ from cat_watcher.db import (
     get_session,
 )
 from cat_watcher.labels import is_manual_override
+from cat_watcher.timefmt import local_date, local_stamp
 from cat_watcher.web._app_state import get_state
 from cat_watcher.web.clips_routes import clips_router
 
@@ -47,7 +47,8 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
+    from datetime import date, tzinfo
     from pathlib import Path
     from typing import TypedDict
 
@@ -122,13 +123,28 @@ async def health(request: Request) -> dict[str, str | None]:
     return {"status": "ok", "heartbeat": heartbeat, "now": now.isoformat()}
 
 
-@review_router.post("/clips/{clip_id}/reviewed", status_code=204)
-async def mark_clip_reviewed(request: Request, clip_id: int) -> Response:
+def _reviewed_at_payload(reviewed_at: datetime | None, *, tz: tzinfo) -> dict[str, str | None]:
+    """Render ``reviewed_at`` the way the detail page would, for the client to insert verbatim.
+
+    The browser cannot derive these itself: ``new Date()`` near local midnight puts the badge on
+    tomorrow's date, and the display zone is a server-side config value the page never sees.
+    """
+    if reviewed_at is None:
+        return {"reviewed_at_iso": None, "reviewed_at_stamp": None, "reviewed_at_date": None}
+    return {
+        "reviewed_at_iso": reviewed_at.isoformat(),
+        "reviewed_at_stamp": local_stamp(reviewed_at, tz=tz),
+        "reviewed_at_date": local_date(reviewed_at, tz=tz),
+    }
+
+
+@review_router.post("/clips/{clip_id}/reviewed")
+async def mark_clip_reviewed(request: Request, clip_id: int) -> dict[str, str | None]:
     """Set ``clips.reviewed_at`` to now, marking the operator review complete.
 
-    Idempotent: a clip already reviewed is left unchanged (its original timestamp is preserved).
-    Returns 204 on success (both the state-change and idempotent no-op cases) and 404 if the clip
-    row does not exist.
+    Idempotent: a clip already reviewed is left unchanged (its original timestamp is preserved), and
+    the response repeats the stored value. Returns the rendered timestamp so the page can update
+    without a reload; 404 if the clip row does not exist.
     """
     state = get_state(request)
     with get_session(state.engine) as session:
@@ -139,16 +155,17 @@ async def mark_clip_reviewed(request: Request, clip_id: int) -> Response:
             clip.reviewed_at = datetime.now(UTC)
             logger.info("clip_reviewed", extra={"clip_id": clip.id})
         session.commit()
-    return Response(status_code=204)
+        reviewed_at = clip.reviewed_at
+    return _reviewed_at_payload(reviewed_at, tz=ZoneInfo(state.config.web.display_timezone))
 
 
-@review_router.delete("/clips/{clip_id}/reviewed", status_code=204)
-async def reopen_clip_review(request: Request, clip_id: int) -> Response:
+@review_router.delete("/clips/{clip_id}/reviewed")
+async def reopen_clip_review(request: Request, clip_id: int) -> dict[str, str | None]:
     """Clear ``clips.reviewed_at``, re-opening the clip for operator review.
 
     Idempotent: clearing an already-unreviewed clip is a no-op. Memberships
     (``clip_frame_subjects``) are NOT touched — the re-open workflow keeps existing frame tags
-    intact. Returns 204 on success and 404 if the clip row does not exist.
+    intact. Returns null timestamp fields; 404 if the clip row does not exist.
     """
     state = get_state(request)
     with get_session(state.engine) as session:
@@ -159,7 +176,7 @@ async def reopen_clip_review(request: Request, clip_id: int) -> Response:
             clip.reviewed_at = None
             logger.info("clip_review_reopened", extra={"clip_id": clip.id})
         session.commit()
-    return Response(status_code=204)
+    return _reviewed_at_payload(None, tz=ZoneInfo(state.config.web.display_timezone))
 
 
 def _validate_frame_membership(session: Session, *, clip_id: int, frame_id: int, subject_id: int) -> Subject:
@@ -367,7 +384,6 @@ def _render_timeline(request: Request, *, range_key: str) -> object:
             "ranges": list(_TIMELINE_RANGES),
             "use_buckets": use_buckets,
             "storage_online": _storage_root_available(state.config.storage_root),
-            "tz": state.config.web.display_timezone,
         },
     )
 
@@ -704,48 +720,59 @@ async def cameras_page(request: Request) -> object:
     return state.templates.TemplateResponse(
         request,
         "cameras.html.jinja",
-        {"cameras": camera_rows, "tz": state.config.web.display_timezone},
+        {"cameras": camera_rows},
     )
+
+
+def bucket_clips_by_local_day(
+    rows: Iterable[tuple[int, datetime, bool]],
+    *,
+    tz: tzinfo,
+) -> dict[tuple[int, date], tuple[int, int]]:
+    """Aggregate ``(camera_id, start_ts, effective_has_cat)`` into per-``(camera, local day)`` counts.
+
+    Returns ``{(camera_id, local_date): (total, cat_total)}``.
+
+    Bucketing happens here rather than in SQL because SQLite ships no timezone database, so
+    ``func.date(start_ts)`` can only produce UTC days and a fixed hour offset is wrong on either
+    side of a DST transition. Pure so both transitions are testable: through the route they are
+    reachable only during a 30-day window in autumn or spring.
+    """
+    buckets: dict[tuple[int, date], tuple[int, int]] = {}
+    for camera_id, start_ts, effective_has_cat in rows:
+        key = (camera_id, start_ts.astimezone(tz).date())
+        total, cat_total = buckets.get(key, (0, 0))
+        buckets[key] = (total + 1, cat_total + (1 if effective_has_cat else 0))
+    return buckets
 
 
 @stats_router.get("/stats")
 async def stats_page(request: Request) -> object:
     """Render the 30-day daily clip aggregation (spec §4.7).
 
-    Groups by ``(camera_id, date(start_ts))`` and computes total clips + cat-positive clips per
-    bucket. Cat-positive reads ``effective_has_cat`` from the ``clip_label_summary`` view.
-    ``CAST … AS INTEGER`` is required because SQLite doesn't sum booleans directly; with the cast
-    each truthy bit becomes 1 and the SUM gives a per-day integer count.
+    Groups by ``(camera_id, local day of start_ts)`` and computes total clips + cat-positive clips
+    per bucket, so the Date column names the same day the ``/clips`` Start column does. Cat-positive
+    reads ``effective_has_cat`` from the ``clip_label_summary`` view.
     """
     state = get_state(request)
     cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
-    cat_expr = sql_cast(ClipLabelSummary.effective_has_cat, Integer)
+    display_tz = ZoneInfo(state.config.web.display_timezone)
 
     with get_session(state.engine) as session:
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
         camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
-        date_label = func.date(Clip.start_ts).label("d")
-        # ``func.count`` is callable at runtime via SQLAlchemy's GenericFunction proxy; pylint can't
-        # see through the proxy and flags ``not-callable``, so we disable it on this one line.
         rows = session.execute(
-            select(
-                Clip.camera_id,
-                date_label,
-                func.count().label("total"),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
-                func.sum(cat_expr).label("cat_total"),
-            )
+            select(Clip.camera_id, Clip.start_ts, ClipLabelSummary.effective_has_cat)
             .join(ClipLabelSummary, ClipLabelSummary.clip_id == Clip.id)
-            .where(Clip.start_ts >= cutoff)
-            .group_by(Clip.camera_id, date_label)
-            .order_by(date_label.desc(), Clip.camera_id),
+            .where(Clip.start_ts >= cutoff),
         ).all()
 
-    stat_rows = [_stat_row(row, camera_display_by_id=camera_display_by_id) for row in rows]
-    return state.templates.TemplateResponse(
-        request,
-        "stats.html.jinja",
-        {"rows": stat_rows, "tz": state.config.web.display_timezone},
-    )
+    buckets = bucket_clips_by_local_day(_stat_inputs(rows), tz=display_tz)
+    stat_rows = [
+        _stat_row(camera_id, day, total, cat_total, camera_display_by_id=camera_display_by_id)
+        for (camera_id, day), (total, cat_total) in sorted(buckets.items(), key=_stat_sort_key)
+    ]
+    return state.templates.TemplateResponse(request, "stats.html.jinja", {"rows": stat_rows})
 
 
 @alerts_router.get("/alerts")
@@ -779,24 +806,33 @@ async def alerts_page(request: Request) -> object:
     return state.templates.TemplateResponse(
         request,
         "alerts.html.jinja",
-        {"alerts": alert_rows, "tz": state.config.web.display_timezone},
+        {"alerts": alert_rows},
     )
 
 
-def _stat_row(row: object, *, camera_display_by_id: dict[int, str]) -> dict[str, object]:
-    """Project a stats query Row into a flat dict the template can render.
+def _stat_inputs(rows: Iterable[object]) -> list[tuple[int, datetime, bool]]:
+    """Convert stats query Rows into plain tuples for :func:`bucket_clips_by_local_day`.
 
     Destructured positionally via ``cast`` + tuple-unpack because SQLAlchemy types Row column
-    accessors as ``Any`` and per-attribute access would blossom into ``reportAny`` warnings. The
-    nullable ``func.sum(cat_expr)`` is coerced to ``int`` for template arithmetic.
+    accessors as ``Any``, and per-element access would blossom into ``reportAny`` warnings.
     """
-    camera_id, date_value, total, cat_total = cast("tuple[int, object, int, int | None]", tuple(cast("Sequence[object]", row)))
+    return [cast("tuple[int, datetime, bool]", tuple(cast("Sequence[object]", row))) for row in rows]
+
+
+def _stat_sort_key(item: tuple[tuple[int, date], tuple[int, int]]) -> tuple[int, int]:
+    """Order stats rows newest day first, then camera_id ascending."""
+    (camera_id, day), _counts = item
+    return (-day.toordinal(), camera_id)
+
+
+def _stat_row(camera_id: int, day: date, total: int, cat_total: int, *, camera_display_by_id: dict[int, str]) -> dict[str, object]:
+    """Project one aggregated bucket into a flat dict the template can render."""
     return {
         "camera_id": camera_id,
         "camera_display_name": camera_display_by_id.get(camera_id, ""),
-        "date": date_value,
+        "date": day,
         "total": total,
-        "cat_total": int(cat_total or 0),
+        "cat_total": cat_total,
     }
 
 

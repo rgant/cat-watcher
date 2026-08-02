@@ -5,6 +5,7 @@ import io
 import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from tz_helpers import pinned_tz
@@ -12,7 +13,12 @@ from tz_helpers import pinned_tz
 from cat_watcher import logs_viewer
 from cat_watcher.logs_viewer import RunArgs
 
+# The household zone the CLI renders in; deliberately not UTC so a test that pins $TZ to UTC can
+# tell the configured zone from the OS one.
+_DISPLAY_TZ = ZoneInfo("America/New_York")
+
 if TYPE_CHECKING:
+    from datetime import tzinfo
     from pathlib import Path
 
 
@@ -72,10 +78,10 @@ def _build_args(  # noqa: PLR0913 — test-fixture builder; bundling args at the
     )
 
 
-def _run(internal_root: Path, args: RunArgs) -> str:
+def _run(internal_root: Path, args: RunArgs, *, tz: tzinfo = _DISPLAY_TZ) -> str:
     """Run the viewer with ``args``, capturing stdout to a StringIO; assert exit 0."""
     sink = io.StringIO()
-    rc = logs_viewer.run(args, internal_root=internal_root, out=sink)
+    rc = logs_viewer.run(args, internal_root=internal_root, tz=tz, out=sink)
     assert rc == 0
     return sink.getvalue()
 
@@ -326,3 +332,27 @@ def test_malformed_jsonl_lines_are_skipped(tmp_path: Path) -> None:
     out = _run(tmp_path, _build_args(json_mode=True))
     msgs = [cast("dict[str, object]", json.loads(line))["msg"] for line in out.splitlines() if line]
     assert msgs == ["good", "also good"]
+
+
+def test_pretty_timestamps_use_the_configured_zone_not_the_os_zone(tmp_path: Path) -> None:
+    """The line timestamp follows ``display_timezone``, with the zone marker that names it.
+
+    ``$TZ`` is pinned to UTC so the two zones are distinguishable; without pinning this passes
+    vacuously on any machine already set to Eastern.
+    """
+    _seed(tmp_path / "logs" / "poller.jsonl", [_record(ts="2026-07-02T02:00:00.000000+00:00", msg="boom")])
+    with pinned_tz("UTC"):
+        out = _run(tmp_path, _build_args())
+
+    # 02:00 UTC is 22:00 EDT the previous day — a different calendar day, not just a shifted hour.
+    assert "2026-07-01 22:00:00 EDT" in out
+    assert "2026-07-02" not in out
+
+
+def test_naive_timestamp_falls_back_to_the_raw_string(tmp_path: Path) -> None:
+    """A ``ts`` with no offset is not silently read as OS-local; the raw value is the honest answer."""
+    _seed(tmp_path / "logs" / "poller.jsonl", [_record(ts="2026-07-02T02:00:00", msg="boom")])
+    out = _run(tmp_path, _build_args())
+
+    assert "2026-07-02T02:00:00" in out
+    assert "EDT" not in out

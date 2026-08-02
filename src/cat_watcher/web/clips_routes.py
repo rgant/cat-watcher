@@ -3,10 +3,8 @@
 Routes read state via the SQLAlchemy engine and Jinja2 templates attached to ``app.state``.
 """
 
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Literal, cast
-from urllib.parse import urlencode
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
@@ -15,9 +13,18 @@ from sqlalchemy import desc, func, select
 from cat_watcher.db import Camera, Clip, ClipFrameSubject, ClipLabelSummary, Subject, get_session
 from cat_watcher.labels import build_tag_summary, is_manual_override, query_cat_frame_counts
 from cat_watcher.web._app_state import get_state
+from cat_watcher.web.clip_filters import (
+    ClipsFilter,
+    ParsedClipsFilter,
+    apply_clip_filters,
+    build_filter_qs,
+    build_ignored_notice,
+    parse_clips_filter,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from datetime import datetime, tzinfo
 
     from sqlalchemy.engine import Engine
     from sqlalchemy.sql import Select
@@ -28,53 +35,18 @@ _CLIPS_LIST_LIMIT = 200
 clips_router = APIRouter()
 
 
-@dataclass(frozen=True, slots=True)
-class _ClipsFilter:
-    """``/clips`` filter params bundled so query helpers stay under pylint's local-variable ceiling."""
+def _camera_names(engine: Engine) -> set[str]:
+    """Return the vocabulary a ``camera`` filter value is validated against.
 
-    reviewed: Literal["any", "no", "yes"]
-    camera: str | None
-    has_cat: bool | None
-    date_str: str | None
-
-
-def _build_filter_qs(f: _ClipsFilter) -> str:
-    """Serialize the filter set as a querystring for row-link carry-through.
-
-    ``reviewed`` is always included so the detail page can construct the back-link.
+    The ``cameras`` table, not ``config.cameras``: the filter form's Camera select is built from
+    these rows, so validating against config would let the page render an option that reports
+    itself ignored when chosen.
     """
-    params: list[tuple[str, str]] = [("reviewed", f.reviewed)]
-    if f.camera:
-        params.append(("camera", f.camera))
-    if f.has_cat is not None:
-        params.append(("has_cat", str(f.has_cat).lower()))
-    if f.date_str:
-        params.append(("date_str", f.date_str))
-    return urlencode(params)
+    with get_session(engine) as session:
+        return set(session.scalars(select(Camera.name)))
 
 
-def _clip_query(f: _ClipsFilter) -> Select[tuple[int]]:
-    """Return a base SELECT for ``Clip.id`` scoped to filter ``f``, without order/limit.
-
-    Callers add ``WHERE`` for relative position and ``ORDER BY`` / ``LIMIT 1`` to find prev/next.
-    """
-    stmt: Select[tuple[int]] = select(Clip.id).join(Camera)
-    if f.camera:
-        stmt = stmt.where(Camera.name == f.camera)
-    if f.has_cat is not None:
-        stmt = stmt.where(Clip.has_cat.is_(f.has_cat))
-    if f.date_str:
-        _d = date.fromisoformat(f.date_str)
-        day_start = datetime(_d.year, _d.month, _d.day, tzinfo=UTC)
-        stmt = stmt.where(Clip.start_ts >= day_start).where(Clip.start_ts < day_start + timedelta(days=1))
-    if f.reviewed == "no":
-        stmt = stmt.where(Clip.reviewed_at.is_(None))
-    elif f.reviewed == "yes":
-        stmt = stmt.where(Clip.reviewed_at.is_not(None))
-    return stmt
-
-
-def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: _ClipsFilter, filter_qs: str) -> tuple[str, str]:
+def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: ClipsFilter, filter_qs: str, *, display_tz: tzinfo) -> tuple[str, str]:
     """Return ``(prev_url, next_url)`` scoped to filter ``f``.
 
     ``prev_url`` points to the clip with ``start_ts > clip.start_ts`` (← Newer) within the filtered
@@ -84,7 +56,7 @@ def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: _ClipsFilter, filter
     When no neighboring clip satisfies the filter, the URL falls back to ``/clips?{filter_qs}`` so
     the keyboard handler's click returns the operator to the queue index.
     """
-    base = _clip_query(f)
+    base: Select[tuple[int]] = apply_clip_filters(select(Clip.id), f, display_tz=display_tz)
     fallback = f"/clips?{filter_qs}"
 
     if f.reviewed == "yes" and clip.reviewed_at is not None:
@@ -103,46 +75,17 @@ def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: _ClipsFilter, filter
     return prev_url, next_url
 
 
-def _parse_detail_filter(request: Request) -> _ClipsFilter | None:
-    """Extract filter params from the detail-page querystring.
-
-    Returns ``None`` when no recognized filter key is present, triggering legacy nav behavior.
-    ``reviewed`` defaults to ``"no"`` (matching the ``/clips`` default) when absent but another
-    filter key is present — matching how ``/clips`` behaves.
-    """
-    params = request.query_params
-    known_keys = {"reviewed", "camera", "has_cat", "date_str"}
-    if not known_keys.intersection(params.keys()):
-        return None
-    reviewed_raw = params.get("reviewed", "no")
-    valid_reviewed: tuple[Literal["any", "no", "yes"], ...] = ("any", "no", "yes")
-    reviewed: Literal["any", "no", "yes"] = reviewed_raw if reviewed_raw in valid_reviewed else "no"
-    has_cat_raw = params.get("has_cat")
-    has_cat: bool | None = None
-    if has_cat_raw == "true":
-        has_cat = True
-    elif has_cat_raw == "false":
-        has_cat = False
-    return _ClipsFilter(
-        reviewed=reviewed,
-        camera=params.get("camera"),
-        has_cat=has_cat,
-        date_str=params.get("date_str"),
-    )
-
-
-def _resolve_nav_urls(engine: Engine, clip: Clip, request: Request) -> tuple[str, str]:
+def _resolve_nav_urls(engine: Engine, clip: Clip, parsed: ParsedClipsFilter, *, display_tz: tzinfo) -> tuple[str, str]:
     """Return ``(prev_url, next_url)`` for the detail-page nav, scoped to the request filter if present.
 
-    Falls back to empty strings when no filter querystring is present — the template then renders
-    the legacy ``url_for``-based links using ``prev_clip_id`` / ``next_clip_id`` from the data
-    object.
+    Falls back to empty strings when the querystring carries no recognized filter key — the template
+    then renders the legacy ``url_for``-based links using ``prev_clip_id`` / ``next_clip_id`` from
+    the data object.
     """
-    clip_filter = _parse_detail_filter(request)
-    if clip_filter is None:
+    if not parsed.any_key_present:
         return "", ""
-    filter_qs = _build_filter_qs(clip_filter)
-    return _build_filtered_nav_urls(engine, clip, clip_filter, filter_qs)
+    filter_qs = build_filter_qs(parsed.clips_filter)
+    return _build_filtered_nav_urls(engine, clip, parsed.clips_filter, filter_qs, display_tz=display_tz)
 
 
 def _button_title(subj: Subject) -> str:
@@ -201,20 +144,6 @@ def _build_frame_tag_rows(
     return rows
 
 
-def _parse_has_cat(raw: str | None) -> bool | None:
-    """Map a raw ``has_cat`` query value to a tri-state filter.
-
-    The filter form's "Any" option submits ``has_cat=`` (empty string); only ``"true"``/``"false"``
-    select a value. Anything else — including the empty string — means "no filter". Declaring the
-    route param as ``bool`` instead would make FastAPI 422 on the empty string.
-    """
-    if raw == "true":
-        return True
-    if raw == "false":
-        return False
-    return None
-
-
 def _extract_tagged_slugs(label_row: ClipLabelSummary | None) -> set[str]:
     """Parse ``tagged_subject_slugs`` from a ``clip_label_summary`` row into a slug set."""
     if label_row is None:
@@ -246,89 +175,73 @@ def _compute_label_summary(engine: Engine, clip_id: int) -> tuple[str, bool]:
 
 
 @clips_router.get("/clips")
-async def list_clips(
-    request: Request,
-    *,
-    reviewed: Literal["any", "no", "yes"] = "no",
-    camera: str | None = None,
-    has_cat: str | None = None,
-    date_str: str | None = None,
-) -> object:
+async def list_clips(request: Request) -> object:
     """Render the clip-listing page.
 
     ``reviewed=no`` (default) shows unreviewed clips oldest-first — the operator review queue.
     ``reviewed=yes`` shows reviewed clips newest-reviewed-first. ``reviewed=any`` preserves
-    ``start_ts DESC``. Capped at :data:`_CLIPS_LIST_LIMIT`; ``date_str`` is interpreted as a UTC day.
-    ``has_cat`` is parsed as a tri-state string (see :func:`_parse_has_cat`) so the filter form's
-    empty "Any" value is accepted rather than rejected as an invalid bool.
+    ``start_ts DESC``. Capped at :data:`_CLIPS_LIST_LIMIT`; ``date_str`` selects a calendar day in
+    ``display_timezone``.
+
+    Filters are read from ``request.query_params`` rather than declared as typed route parameters:
+    a ``Literal`` parameter cannot accept the empty string the filter form submits for "unset", and
+    a parsed one cannot report a bad value instead of raising.
     """
     state = get_state(request)
     display_tz = ZoneInfo(state.config.web.display_timezone)
-    has_cat_filter = _parse_has_cat(has_cat)
-    clip_filter = _ClipsFilter(reviewed=reviewed, camera=camera, has_cat=has_cat_filter, date_str=date_str)
-    clip_rows, cameras, total_count, reviewed_count = _query_clips_list(state.engine, clip_filter, display_tz=display_tz)
+    parsed = parse_clips_filter(request.query_params, camera_names=_camera_names(state.engine))
+    clip_rows, cameras, total_count, reviewed_count = _query_clips_list(state.engine, parsed.clips_filter, display_tz=display_tz)
     return state.templates.TemplateResponse(
         request,
         "clips.html.jinja",
         {
             "clip_rows": clip_rows,
             "cameras": cameras,
-            "filters": {"camera": camera, "has_cat": has_cat_filter, "date": date_str, "reviewed": reviewed},
-            "filter_qs": _build_filter_qs(clip_filter),
+            "filters": parsed.clips_filter,
+            "filter_qs": build_filter_qs(parsed.clips_filter),
+            "filter_notice": build_ignored_notice(parsed.ignored),
             "progress": {"reviewed": reviewed_count, "total": total_count},
-            "tz": state.config.web.display_timezone,
         },
     )
 
 
-def _project_one_clip_row(
-    clip: Clip,
-    summary: ClipLabelSummary,
-    cameras: list[Camera],
-    *,
-    display_tz: ZoneInfo,
-) -> dict[str, object]:
+def _project_one_clip_row(clip: Clip, summary: ClipLabelSummary, cameras: list[Camera]) -> dict[str, object]:
     """Project a Clip + its label summary into a flat dict the template can render."""
-    return {
-        **_clip_summary(
-            clip,
-            cameras,
-            display_tz=display_tz,
-            effective_has_cat=summary.effective_has_cat,
-            show_manual_badge=is_manual_override(
-                has_cat=clip.has_cat,
-                has_manual_cat=summary.has_manual_cat,
-                reviewed=clip.reviewed_at is not None,
-            ),
+    return _clip_summary(
+        clip,
+        cameras,
+        effective_has_cat=summary.effective_has_cat,
+        show_manual_badge=is_manual_override(
+            has_cat=clip.has_cat,
+            has_manual_cat=summary.has_manual_cat,
+            reviewed=clip.reviewed_at is not None,
         ),
-        **_reviewed_at_fields(clip.reviewed_at),
-    }
+    )
 
 
 def _query_clips_list(
     engine: Engine,
-    f: _ClipsFilter,
+    f: ClipsFilter,
     *,
-    display_tz: ZoneInfo,
+    display_tz: tzinfo,
 ) -> tuple[list[dict[str, object]], list[Camera], int, int]:
-    """Run the clips-list + progress COUNT queries and return ``(clip_rows, cameras, total, reviewed)``."""
-    base_stmt = select(Clip).join(Camera)
-    count_stmt = select(func.count()).select_from(Clip).join(Camera)  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
-    if f.camera:
-        base_stmt = base_stmt.where(Camera.name == f.camera)
-        count_stmt = count_stmt.where(Camera.name == f.camera)
-    if f.has_cat is not None:
-        base_stmt = base_stmt.where(Clip.has_cat.is_(f.has_cat))
-        count_stmt = count_stmt.where(Clip.has_cat.is_(f.has_cat))
-    if f.date_str:
-        _d = date.fromisoformat(f.date_str)
-        day_start = datetime(_d.year, _d.month, _d.day, tzinfo=UTC)
-        base_stmt = base_stmt.where(Clip.start_ts >= day_start).where(Clip.start_ts < day_start + timedelta(days=1))
-        count_stmt = count_stmt.where(Clip.start_ts >= day_start).where(Clip.start_ts < day_start + timedelta(days=1))
+    """Run the clips-list + progress COUNT queries and return ``(clip_rows, cameras, total, reviewed)``.
+
+    The progress indicator deliberately counts across every review state — it answers "how far
+    through this camera/day/cat slice am I", which a ``reviewed``-scoped count cannot — so the COUNT
+    is built from a filter with ``reviewed`` neutralized and derives its reviewed half from the same
+    statement.
+    """
+    base_stmt = apply_clip_filters(select(Clip), f, display_tz=display_tz)
+    count_stmt = apply_clip_filters(
+        select(func.count()).select_from(Clip),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
+        replace(f, reviewed="any"),
+        display_tz=display_tz,
+    )
     if f.reviewed == "no":
-        stmt = base_stmt.where(Clip.reviewed_at.is_(None)).order_by(Clip.start_ts.asc(), Clip.id.asc()).limit(_CLIPS_LIST_LIMIT)
+        stmt = base_stmt.order_by(Clip.start_ts.asc(), Clip.id.asc()).limit(_CLIPS_LIST_LIMIT)
     elif f.reviewed == "yes":
-        stmt = base_stmt.where(Clip.reviewed_at.is_not(None)).order_by(desc(Clip.reviewed_at), Clip.id.asc()).limit(_CLIPS_LIST_LIMIT)
+        stmt = base_stmt.order_by(desc(Clip.reviewed_at), Clip.id.asc()).limit(_CLIPS_LIST_LIMIT)
     else:
         stmt = base_stmt.order_by(desc(Clip.start_ts)).limit(_CLIPS_LIST_LIMIT)
     with get_session(engine) as session:
@@ -342,7 +255,7 @@ def _query_clips_list(
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
         total_count = session.scalar(count_stmt) or 0
         reviewed_count = session.scalar(count_stmt.where(Clip.reviewed_at.is_not(None))) or 0
-        clip_rows = [_project_one_clip_row(clip, summary_by_clip[clip.id], cameras, display_tz=display_tz) for clip in clips]
+        clip_rows = [_project_one_clip_row(clip, summary_by_clip[clip.id], cameras) for clip in clips]
     return clip_rows, cameras, total_count, reviewed_count
 
 
@@ -425,13 +338,15 @@ async def clip_detail(request: Request, clip_id: int) -> object:
     display_tz = ZoneInfo(state.config.web.display_timezone)
     data = _query_clip_detail(state.engine, clip_id, state.config.detector.confidence_threshold)
 
-    prev_url, next_url = _resolve_nav_urls(state.engine, data.clip, request)
+    parsed = parse_clips_filter(request.query_params, camera_names=_camera_names(state.engine))
+    prev_url, next_url = _resolve_nav_urls(state.engine, data.clip, parsed, display_tz=display_tz)
+    # Carrying the filter back keeps the operator's queue alive across a round trip through a clip;
+    # without it "All clips" silently resets to the default queue.
+    filter_qs = build_filter_qs(parsed.clips_filter) if parsed.any_key_present else ""
+    all_clips_url = f"/clips?{filter_qs}" if filter_qs else "/clips"
 
     tag_summary, has_manual_cat = _compute_label_summary(state.engine, clip_id)
 
-    # The Amcrest video has the camera-local clock burned into the OSD; rendering the heading in
-    # display_timezone keeps the page label aligned with what the user sees in the player.
-    display_start = data.clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z")
     frame_tag_rows = _build_frame_tag_rows(clip_id, data.frames, data.subjects_by_kind, data.frame_memberships)
 
     return state.templates.TemplateResponse(
@@ -441,12 +356,12 @@ async def clip_detail(request: Request, clip_id: int) -> object:
             "clip": data.clip,
             "camera": data.camera,
             "frames": data.frames,
-            "display_start": display_start,
             "prev_clip_id": data.prev_clip_id,
             "next_clip_id": data.next_clip_id,
             "prev_url": prev_url,
             "next_url": next_url,
-            "tz": state.config.web.display_timezone,
+            "all_clips_url": all_clips_url,
+            "filter_notice": build_ignored_notice(parsed.ignored),
             "subjects_by_kind": data.subjects_by_kind,
             "frame_memberships": data.frame_memberships,
             "frame_tag_rows": frame_tag_rows,
@@ -469,17 +384,15 @@ def _clip_summary(
     clip: Clip,
     cameras: list[Camera],
     *,
-    display_tz: ZoneInfo,
     effective_has_cat: bool,
     show_manual_badge: bool,
 ) -> dict[str, object]:
     """Project a Clip + its Camera into a flat dict the template can render without lazy loads.
 
-    ``display_start`` is precomputed in ``display_tz`` so the visible cell aligns with the
-    camera-OSD time burned into the video; the raw ``start_ts`` (UTC) is also passed for the HTML5
-    ``<time datetime="…">`` attribute. ``badge_class`` and ``manual_badge`` are precomputed here
-    (not in the template) so djlint reflow cannot break test substring assertions on the class
-    attribute.
+    Datetimes are passed raw; the template renders them through the ``localstamp`` / ``localdate``
+    filters and keeps the UTC ISO value for the ``<time datetime="…">`` attribute. ``badge_class``
+    and ``manual_badge`` are precomputed here (not in the template) so djlint reflow cannot break
+    test substring assertions on the class attribute.
     """
     by_id = {cam.id: cam for cam in cameras}
     cam = by_id.get(clip.camera_id)
@@ -492,7 +405,7 @@ def _clip_summary(
         "camera_name": cam.name if cam is not None else "",
         "source_filename": clip.source_filename,
         "start_ts": clip.start_ts,
-        "display_start": clip.start_ts.astimezone(display_tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "reviewed_at": clip.reviewed_at,
         "duration_seconds": clip.duration_seconds,
         "max_score": clip.max_score,
         "effective_has_cat": effective_has_cat,
@@ -502,37 +415,12 @@ def _clip_summary(
 
 
 def _build_review_context(clip_id: int, reviewed_at: datetime | None) -> dict[str, str]:
-    """Precompute the review-button and reviewed_at display fields for the clip detail template.
+    """Precompute the review-button fields for the clip detail template.
 
-    Returns ``reviewed_url``, ``review_label``, ``review_hx_method``, ``reviewed_at_iso``,
-    and ``reviewed_at_short`` as a flat dict. Empty strings for the timestamp fields keep Jinja2
-    ``{% if %}`` checks at the display level rather than inside attribute strings (djlint reflows
-    multi-line attribute expressions and breaks test substring assertions).
+    Returns ``reviewed_url``, ``review_label``, and ``review_hx_method``. The timestamp itself is
+    read off ``clip.reviewed_at`` in the template, so this stays a flat string mapping.
     """
     url = f"/clips/{clip_id}/reviewed"
     if reviewed_at is not None:
-        return {
-            "reviewed_url": url,
-            "review_label": "Re-open for review",
-            "review_hx_method": "delete",
-            "reviewed_at_iso": reviewed_at.isoformat(),
-            "reviewed_at_short": reviewed_at.strftime("%Y-%m-%d"),
-        }
-    return {
-        "reviewed_url": url,
-        "review_label": "Mark reviewed",
-        "review_hx_method": "post",
-        "reviewed_at_iso": "",
-        "reviewed_at_short": "",
-    }
-
-
-def _reviewed_at_fields(reviewed_at: datetime | None) -> dict[str, str]:
-    """Precompute ``reviewed_at_short`` / ``reviewed_at_iso`` for the clips-list template.
-
-    Empty strings keep the template ``{% if %}`` at the display level (not inside attribute strings,
-    which djlint reflows).
-    """
-    if reviewed_at is not None:
-        return {"reviewed_at_short": reviewed_at.strftime("%Y-%m-%d"), "reviewed_at_iso": reviewed_at.isoformat()}
-    return {"reviewed_at_short": "", "reviewed_at_iso": ""}
+        return {"reviewed_url": url, "review_label": "Re-open for review", "review_hx_method": "delete"}
+    return {"reviewed_url": url, "review_label": "Mark reviewed", "review_hx_method": "post"}

@@ -14,7 +14,7 @@
     {% else %}
       <span class="clip-nav-disabled" aria-disabled="true">← Newer</span>
     {% endif %}
-    <a href="{{ url_for('list_clips') }}">All clips</a>
+    <a href="{{ all_clips_url }}">All clips</a>
     {% if next_url %}
       <a href="{{ next_url }}" rel="next">Older →</a>
     {% elif next_clip_id %}
@@ -23,10 +23,13 @@
       <span class="clip-nav-disabled" aria-disabled="true">Older →</span>
     {% endif %}
   </nav>
+  {% if filter_notice %}
+    <p class="banner banner-filter-notice" role="status" aria-live="polite">{{ filter_notice }}</p>
+  {% endif %}
   <header>
     <h1>
       {{ camera.display_name if camera else "(unknown camera)" }}·
-      <time datetime="{{ clip.start_ts.isoformat() }}">{{ display_start }}</time>
+      <time datetime="{{ clip.start_ts.isoformat() }}">{{ clip.start_ts | localstamp }}</time>
     </h1>
   </header>
   <video controls preload="metadata" aria-label="Clip {{ clip.id }} video">
@@ -139,7 +142,7 @@
               hx-swap="none"
               hx-disabled-elt="this"
               hx-on::after-request="handleReviewResponse(event, this)">Re-open for review</button>
-      <span class="review-badge">Reviewed {{ reviewed_at_short }}</span>
+      <span class="review-badge">Reviewed {{ clip.reviewed_at | localdate }}</span>
     {% endif %}
   </div>
   <section aria-labelledby="detection-heading">
@@ -171,8 +174,8 @@
       </dd>
       <dt>reviewed_at</dt>
       <dd id="detail-reviewed-at">
-        {% if reviewed_at_iso %}
-          <time datetime="{{ reviewed_at_iso }}">{{ reviewed_at_iso }}</time>
+        {% if clip.reviewed_at %}
+          <time datetime="{{ clip.reviewed_at.isoformat() }}">{{ clip.reviewed_at | localstamp }}</time>
         {% else %}
           —
         {% endif %}

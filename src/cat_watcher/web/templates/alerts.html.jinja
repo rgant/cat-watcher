@@ -21,7 +21,7 @@
         {% for alert in alerts %}
           <tr>
             <td data-label="Sent">
-              <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at.isoformat() }}</time>
+              <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at | localstamp }}</time>
             </td>
             <td data-label="Type">{{ alert.alert_type }}</td>
             <td data-label="Camera">{{ alert.camera_display }}</td>

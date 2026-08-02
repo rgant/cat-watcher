@@ -59,6 +59,7 @@ from cat_watcher.detector import Detector, DetectorError
 from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 from cat_watcher.subjects_sync import sync_subjects_at_startup
+from cat_watcher.timefmt import local_stamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
@@ -626,7 +627,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
             for rec in _limited(client.iter_recordings(since=since, until=until), args.limit):
                 find_file_row_count += 1
                 if args.list_only:
-                    _emit(f"  {rec.start_ts.isoformat()}  {rec.source_filename}")
+                    _emit(f"  {local_stamp(rec.start_ts, tz=camera_tz)}  {rec.source_filename}")
                     listed += 1
                     continue
                 clip = _ingest_recording(rec, client=client, ctx=ctx)

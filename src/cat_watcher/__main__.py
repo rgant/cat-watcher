@@ -70,9 +70,11 @@ from cat_watcher.logs_viewer import run as run_logs
 from cat_watcher.notifier import send_email, send_macos_notification
 from cat_watcher.poller import DetectionFields, PollerLockedError, detection_for, write_per_frame_thumbs
 from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
+from cat_watcher.timefmt import local_stamp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import tzinfo
     from typing import IO
 
     from sqlalchemy.engine import Engine
@@ -209,7 +211,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if args.command == "logs":
-        return run_logs(LogsRunArgs.from_namespace(args), internal_root=config.internal_root)
+        return run_logs(
+            LogsRunArgs.from_namespace(args),
+            internal_root=config.internal_root,
+            tz=ZoneInfo(config.web.display_timezone),
+        )
 
     handlers = {
         "import-local": _run_import_local,
@@ -286,22 +292,23 @@ def _run_status(args: _ParsedArgs) -> int:
     config = load_config(args.config)
     engine = engine_for(config.internal_root)
     now = datetime.now(UTC)
+    tz = ZoneInfo(config.web.display_timezone)
     print("cat-watcher status")
     print(f"  config: {config.internal_root}")
-    print(f"  now (UTC): {now.isoformat()}")
+    print(f"  now: {local_stamp(now, tz=tz)}")
     try:
         with get_session(engine) as session:
-            _print_camera_status(session)
-            _print_heartbeat_status(session, now=now)
+            _print_camera_status(session, tz=tz)
+            _print_heartbeat_status(session, now=now, tz=tz)
             _print_agent_starts(session, now=now)
-            _print_recent_alerts(session, now=now)
-        _print_backup_status(config.storage_root / _BACKUPS_SUBDIR, now=now)
+            _print_recent_alerts(session, now=now, tz=tz)
+        _print_backup_status(config.storage_root / _BACKUPS_SUBDIR, now=now, tz=tz)
     finally:
         engine.dispose()
     return _EXIT_OK
 
 
-def _print_camera_status(session: Session) -> None:
+def _print_camera_status(session: Session, *, tz: tzinfo) -> None:
     cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
     print("cameras:")
     if not cameras:
@@ -310,16 +317,16 @@ def _print_camera_status(session: Session) -> None:
     for cam in cameras:
         print(f"  - {cam.name} ({cam.display_name}): poll_status={cam.poll_status.value}")
         print(
-            f"      last_polled_at={_fmt(cam.last_polled_at)}  last_clip_at={_fmt(cam.last_clip_at)}"
-            f"  last_cat_seen_at={_fmt(cam.last_cat_seen_at)}",
+            f"      last_polled_at={_fmt(cam.last_polled_at, tz=tz)}  last_clip_at={_fmt(cam.last_clip_at, tz=tz)}"
+            f"  last_cat_seen_at={_fmt(cam.last_cat_seen_at, tz=tz)}",
         )
         if cam.poll_status_since is not None:
-            print(f"      poll_status_since={_fmt(cam.poll_status_since)}")
+            print(f"      poll_status_since={_fmt(cam.poll_status_since, tz=tz)}")
         if cam.poll_error:
             print(f"      poll_error={cam.poll_error[:200]}")
 
 
-def _print_heartbeat_status(session: Session, *, now: datetime) -> None:
+def _print_heartbeat_status(session: Session, *, now: datetime, tz: tzinfo) -> None:
     print("heartbeats:")
     for agent in _AGENT_NAMES_WITH_HEARTBEAT:
         hb = session.get(Heartbeat, agent)
@@ -327,7 +334,7 @@ def _print_heartbeat_status(session: Session, *, now: datetime) -> None:
             print(f"  - {agent}: (none)")
             continue
         staleness = now - hb.last_seen_at
-        print(f"  - {agent}: last_seen_at={hb.last_seen_at.isoformat()} (stale by {_fmt_delta(staleness)})")
+        print(f"  - {agent}: last_seen_at={_fmt(hb.last_seen_at, tz=tz)} (stale by {_fmt_delta(staleness)})")
 
 
 def _print_agent_starts(session: Session, *, now: datetime) -> None:
@@ -346,7 +353,7 @@ def _print_agent_starts(session: Session, *, now: datetime) -> None:
         print(f"  - {agent}: {counts.get(agent, 0)}")
 
 
-def _print_recent_alerts(session: Session, *, now: datetime) -> None:
+def _print_recent_alerts(session: Session, *, now: datetime, tz: tzinfo) -> None:
     print(f"recent alerts (last {_RECENT_ALERTS_PER_TYPE} per type):")
     cutoff = now - timedelta(days=_RECENT_ALERTS_WINDOW_DAYS)
     alerts_by_type: dict[str, list[AlertSent]] = {}
@@ -366,10 +373,10 @@ def _print_recent_alerts(session: Session, *, now: datetime) -> None:
     for alert_type in sorted(alerts_by_type):
         for alert in alerts_by_type[alert_type]:
             cam_label = f"camera_id={alert.camera_id}" if alert.camera_id is not None else "camera=—"
-            print(f"  - {alert.sent_at.isoformat()} {alert_type} {cam_label}: {alert.subject}")
+            print(f"  - {_fmt(alert.sent_at, tz=tz)} {alert_type} {cam_label}: {alert.subject}")
 
 
-def _print_backup_status(backups_dir: Path, *, now: datetime) -> None:
+def _print_backup_status(backups_dir: Path, *, now: datetime, tz: tzinfo) -> None:
     if not backups_dir.is_dir():
         print(f"backup: storage_root/{_BACKUPS_SUBDIR}/ does not exist (drive offline?)")
         return
@@ -379,12 +386,16 @@ def _print_backup_status(backups_dir: Path, *, now: datetime) -> None:
         return
     newest = backups[0]
     mtime = datetime.fromtimestamp(newest.stat().st_mtime, tz=UTC)
-    print(f"backup: newest={newest.name} mtime={mtime.isoformat()} (age {_fmt_delta(now - mtime)})")
+    print(f"backup: newest={newest.name} mtime={_fmt(mtime, tz=tz)} (age {_fmt_delta(now - mtime)})")
 
 
-def _fmt(value: datetime | None) -> str:
-    """Render a nullable UTC datetime as ISO-8601, or ``—`` for ``None``."""
-    return value.isoformat() if value is not None else "—"
+def _fmt(value: datetime | None, *, tz: tzinfo) -> str:
+    """Render a nullable datetime in ``tz``, or ``—`` for ``None``.
+
+    ``tz`` is required rather than defaulted: a default would render correctly on a machine already
+    set to the household zone and wrong everywhere else.
+    """
+    return local_stamp(value, tz=tz) if value is not None else "—"
 
 
 def _fmt_delta(delta: timedelta) -> str:
@@ -403,6 +414,7 @@ def _fmt_delta(delta: timedelta) -> str:
 def _run_inspect(args: _ParsedArgs) -> int:
     """Return 0 on success, 3 when the clip id is not found."""
     config = load_config(args.config)
+    tz = ZoneInfo(config.web.display_timezone)
     engine = engine_for(config.internal_root)
     try:
         with get_session(engine) as session:
@@ -432,13 +444,19 @@ def _run_inspect(args: _ParsedArgs) -> int:
         tagged_slugs = set(raw.split(",")) if raw else set()
     tag_summary = build_tag_summary(cat_frame_counts, tagged_slugs, active_event_subjects)
 
-    full_clip_path = config.storage_root / clip.file_path
-    full_thumb_path = config.storage_root / clip.thumb_path
+    _print_clip_detail(clip, storage_root=config.storage_root, tag_summary=tag_summary, has_manual_cat=has_manual_cat, tz=tz)
+    return _EXIT_OK
+
+
+def _print_clip_detail(clip: Clip, *, storage_root: Path, tag_summary: str, has_manual_cat: bool, tz: tzinfo) -> None:
+    """Print one clip's stored fields plus its on-disk file sizes."""
+    full_clip_path = storage_root / clip.file_path
+    full_thumb_path = storage_root / clip.thumb_path
     print(f"clip {clip.id}")
     print(f"  camera_id        = {clip.camera_id}")
     print(f"  source_filename  = {clip.source_filename}")
-    print(f"  start_ts         = {clip.start_ts.isoformat()}")
-    print(f"  end_ts           = {clip.end_ts.isoformat()}")
+    print(f"  start_ts         = {_fmt(clip.start_ts, tz=tz)}")
+    print(f"  end_ts           = {_fmt(clip.end_ts, tz=tz)}")
     print(f"  duration_seconds = {clip.duration_seconds}")
     print(f"  file_path        = {clip.file_path}")
     print(f"  on-disk          = {full_clip_path} {_size_or_missing(full_clip_path)}")
@@ -449,13 +467,12 @@ def _run_inspect(args: _ParsedArgs) -> int:
     print(f"  frames_sampled   = {clip.frames_sampled}")
     print(f"  frames_with_cat  = {clip.frames_with_cat}")
     print(f"  detector_version = {clip.detector_version}")
-    print(f"  ingested_at      = {clip.ingested_at.isoformat()}")
-    print(f"  reviewed_at      = {_fmt(clip.reviewed_at)}")
+    print(f"  ingested_at      = {_fmt(clip.ingested_at, tz=tz)}")
+    print(f"  reviewed_at      = {_fmt(clip.reviewed_at, tz=tz)}")
     print(f"  has_manual_cat   = {has_manual_cat}")
     print(f"  tag_summary      = {tag_summary}")
     if clip.analysis_error:
         print(f"  analysis_error   = {clip.analysis_error}")
-    return _EXIT_OK
 
 
 def _size_or_missing(path: Path) -> str:
@@ -479,6 +496,7 @@ _SUBJECTS_COL_DESC = 36
 def _run_subjects(args: _ParsedArgs) -> int:
     """Print all subjects (active + archived) ordered: active first, then by kind, display_order, slug."""
     config = load_config(args.config)
+    tz = ZoneInfo(config.web.display_timezone)
     engine = engine_for(config.internal_root)
     try:
         with get_session(engine) as session:
@@ -506,7 +524,7 @@ def _run_subjects(args: _ParsedArgs) -> int:
     print(header)
     print("-" * len(header))
     for subj in subjects:
-        archived = subj.archived_at.isoformat() if subj.archived_at is not None else ""
+        archived = local_stamp(subj.archived_at, tz=tz) if subj.archived_at is not None else ""
         description = (subj.description or "")[:_SUBJECTS_COL_DESC].rstrip()
         print(
             f"{subj.slug:<{_SUBJECTS_COL_SLUG}}"
@@ -531,7 +549,7 @@ def _run_test_cameras(args: _ParsedArgs) -> int:
     """
     config = load_config(args.config)
     now = datetime.now(UTC)
-    print(f"test-cameras: {len(config.cameras)} configured (now={now.isoformat()})")
+    print(f"test-cameras: {len(config.cameras)} configured (now={local_stamp(now, tz=ZoneInfo(config.web.display_timezone))})")
     reachable = [_probe_camera(cam_cfg, config=config, host_now=now) for cam_cfg in config.cameras]
     return _EXIT_UNREACHABLE if not all(reachable) else _EXIT_OK
 

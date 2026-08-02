@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, create_autospec, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from cli_test_helpers import (
@@ -57,6 +58,9 @@ from cat_watcher.import_local import ImportReport
 from cat_watcher.notifier import EmailResult, NotifResult
 from cat_watcher.poller import PollerLockedError
 from cat_watcher.storage import StorageUnavailableError
+
+# The household zone the CLI renders in. Matches conftest's make_config default.
+_DISPLAY_TZ = ZoneInfo("America/New_York")
 
 
 def _init_schema_with_view(config: Config) -> None:
@@ -240,7 +244,9 @@ def test_status_reports_camera_and_heartbeat_rows(
     assert "pantry" in out
     assert "Pantry" in out
     assert "poller" in out
-    assert last_cat_seen_at.isoformat() in out
+    assert "2026-05-10 08:00:00 EDT" in out
+    assert last_cat_seen_at.isoformat() not in out
+    assert "(UTC)" not in out
     assert "{_fmt" not in out
     assert "{self." not in out
     assert "{cam." not in out
@@ -394,7 +400,7 @@ def test_inspect_with_cat_memberships_shows_has_manual_cat_and_tag_summary(
     assert "tag_summary      = marcel: 2" in out
 
 
-def test_inspect_reviewed_clip_shows_iso_timestamp(
+def test_inspect_reviewed_clip_shows_local_timestamp(
     tmp_path: Path,
     make_config: Callable[[Path, Path], Config],
     capsys: pytest.CaptureFixture[str],
@@ -412,7 +418,8 @@ def test_inspect_reviewed_clip_shows_iso_timestamp(
         exit_code = _run_inspect(make_handler_args(clip_id=clip_id))
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert reviewed_ts.isoformat() in out
+    assert "2026-06-01 06:00:00 EDT" in out
+    assert reviewed_ts.isoformat() not in out
 
 
 # --- test-cameras sub-command --------------------------------------------------------------------
@@ -902,12 +909,17 @@ def test_config_path_precedence_arg_beats_env(monkeypatch: pytest.MonkeyPatch, t
 
 def test_fmt_returns_em_dash_for_none() -> None:
     """``_fmt(None)`` returns the em-dash sentinel used by status output."""
-    assert _fmt(None) == "—"
+    assert _fmt(None, tz=_DISPLAY_TZ) == "—"
 
 
-def test_fmt_returns_isoformat_for_datetime() -> None:
-    """``_fmt`` delegates to ``.isoformat()`` for a timezone-aware datetime."""
-    assert _fmt(datetime(2026, 5, 10, 12, 0, tzinfo=UTC)) == "2026-05-10T12:00:00+00:00"
+def test_fmt_renders_the_configured_zone_not_utc() -> None:
+    """``_fmt`` renders the local wall clock with its zone marker, not the stored UTC instant."""
+    assert _fmt(datetime(2026, 5, 10, 12, 0, tzinfo=UTC), tz=_DISPLAY_TZ) == "2026-05-10 08:00:00 EDT"
+
+
+def test_fmt_crosses_midnight_into_the_previous_local_day() -> None:
+    """A UTC instant just after midnight renders as the previous calendar day locally."""
+    assert _fmt(datetime(2026, 7, 2, 2, 0, tzinfo=UTC), tz=_DISPLAY_TZ) == "2026-07-01 22:00:00 EDT"
 
 
 def test_fmt_delta_zero() -> None:
@@ -1002,7 +1014,7 @@ def test_subjects_lists_all_rows_with_header(
     assert len(lines) >= 7
 
 
-def test_subjects_shows_archived_at_iso_for_archived_row(
+def test_subjects_shows_archived_at_local_for_archived_row(
     tmp_path: Path,
     make_config: Callable[[Path, Path], Config],
     capsys: pytest.CaptureFixture[str],
@@ -1035,6 +1047,7 @@ def test_subjects_shows_archived_at_iso_for_archived_row(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert "old-visitor" in out
-    assert archived_ts.isoformat() in out
+    assert "2026-03-15 05:30:00 EDT" in out
+    assert archived_ts.isoformat() not in out
     # Active row must not show the archived timestamp
     assert "felix" in out

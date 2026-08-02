@@ -187,6 +187,23 @@ def test_camera_timezone_invalid_raises_config_error(tmp_path: Path, monkeypatch
         _ = load_config()
 
 
+def test_display_timezone_invalid_raises_config_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A typo must fail at config load, not at web-agent bind time.
+
+    ``build_app`` resolves this zone once, so without the validator a typo takes the whole agent
+    down: ``/health`` never answers and the alerts agent fires ``WEB_DOWN``.
+    """
+    toml = _VALID_TOML.replace('display_timezone = "America/New_York"', 'display_timezone = "Amercia/New_York"')
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(toml)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    with pytest.raises(ConfigError, match="Amercia/New_York"):
+        _ = load_config()
+
+
 def _toml_with_field(section: str, field: str, value: float) -> str:
     """Return ``_VALID_TOML`` with ``[section].field = value`` spliced in.
 

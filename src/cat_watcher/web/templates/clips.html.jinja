@@ -4,6 +4,9 @@
 {% endblock title %}
 {% block content %}
   <h1>Clips</h1>
+  {% if filter_notice %}
+    <p class="banner banner-filter-notice" role="status" aria-live="polite">{{ filter_notice }}</p>
+  {% endif %}
   <form class="filter-form"
         method="get"
         action="{{ url_for('list_clips') }}"
@@ -29,8 +32,8 @@
       </select>
     </label>
     <label>
-      Date (UTC)
-      <input type="date" name="date_str" value="{{ filters.date or '' }}">
+      Date
+      <input type="date" name="date_str" value="{{ filters.day or '' }}">
     </label>
     <label>
       Reviewed
@@ -45,7 +48,7 @@
   <p class="progress-indicator">{{ progress.reviewed }} / {{ progress.total }} reviewed</p>
   {% if clip_rows %}
     <table class="clip-list">
-      <caption class="sr-only">Clips, ordered newest first, capped at 200 rows.</caption>
+      <caption class="sr-only">Clips, capped at 200 rows.</caption>
       <thead>
         <tr>
           <th scope="col">Thumbnail</th>
@@ -71,12 +74,12 @@
             <td data-label="Camera">{{ row.camera_display_name }}</td>
             <td data-label="Start">
               <a href="{{ url_for('clip_detail', clip_id=row.id) }}?{{ filter_qs }}">
-                <time datetime="{{ row.start_ts.isoformat() }}">{{ row.display_start }}</time>
+                <time datetime="{{ row.start_ts.isoformat() }}">{{ row.start_ts | localstamp }}</time>
               </a>
             </td>
             <td data-label="Reviewed">
-              {% if row.reviewed_at_short %}
-                <time datetime="{{ row.reviewed_at_iso }}">{{ row.reviewed_at_short }}</time>
+              {% if row.reviewed_at %}
+                <time datetime="{{ row.reviewed_at.isoformat() }}">{{ row.reviewed_at | localdate }}</time>
               {% else %}
                 —
               {% endif %}

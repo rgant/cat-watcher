@@ -8,6 +8,7 @@ import io
 import json
 import threading
 import time
+from datetime import UTC
 from typing import TYPE_CHECKING, cast
 
 from cat_watcher import logs_viewer
@@ -57,7 +58,7 @@ def _run_follow_in_thread(
             grep=None,
             json_mode=True,
         )
-        _ = logs_viewer.run(args, internal_root=internal_root, out=sink)
+        _ = logs_viewer.run(args, internal_root=internal_root, tz=UTC, out=sink)
 
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()

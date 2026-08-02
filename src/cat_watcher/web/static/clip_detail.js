@@ -95,22 +95,32 @@ function handleTagResponse(evt, btn) {
 }
 
 // Mirrors the just-toggled reviewed state into the Detection <dl>'s reviewed_at row so it matches
-// without a reload. The server returns 204 (no timestamp), so the client clock stands in until the
-// next full page load replaces it with the persisted value.
-function updateReviewedAtRow(reviewed) {
+// without a reload. Every string comes from the response body: the browser knows neither the
+// persisted timestamp nor the configured display timezone, and a client clock near local midnight
+// would render tomorrow's date.
+function updateReviewedAtRow(payload) {
   'use strict';
   var dd = document.getElementById('detail-reviewed-at');
   if (!dd) {
     return;
   }
-  if (reviewed) {
-    var iso = new Date().toISOString();
+  if (payload && payload.reviewed_at_iso) {
     var time = document.createElement('time');
-    time.setAttribute('datetime', iso);
-    time.textContent = iso;
+    time.setAttribute('datetime', payload.reviewed_at_iso);
+    time.textContent = payload.reviewed_at_stamp;
     dd.replaceChildren(time);
   } else {
     dd.textContent = '—';
+  }
+}
+
+// Parses the review endpoint's JSON body, or null if the response wasn't JSON.
+function parseReviewPayload(xhr) {
+  'use strict';
+  try {
+    return JSON.parse(xhr.responseText);
+  } catch {
+    return null;
   }
 }
 
@@ -125,14 +135,14 @@ function handleReviewResponse(evt, btn) {
     var url = btn.getAttribute('hx-post') || btn.getAttribute('hx-delete') || '';
     var wasPost = btn.hasAttribute('hx-post');
     var container = btn.parentElement;
+    var payload = parseReviewPayload(evt.detail.xhr);
     if (wasPost) {
       btn.removeAttribute('hx-post');
       btn.setAttribute('hx-delete', url);
       btn.textContent = 'Re-open for review';
-      var today = new Date().toISOString().slice(0, 10);
       var badge = document.createElement('span');
       badge.className = 'review-badge';
-      badge.textContent = 'Reviewed ' + today;
+      badge.textContent = 'Reviewed ' + (payload ? payload.reviewed_at_date : '');
       btn.insertAdjacentElement('afterend', badge);
     } else {
       btn.removeAttribute('hx-delete');
@@ -145,7 +155,7 @@ function handleReviewResponse(evt, btn) {
         }
       }
     }
-    updateReviewedAtRow(wasPost);
+    updateReviewedAtRow(wasPost ? payload : null);
     htmx.process(btn);
   } else {
     showInlineError(btn, status);

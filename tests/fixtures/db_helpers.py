@@ -181,6 +181,19 @@ def make_clip_frame(clip_id: int, ordinal: int, *, score: float = 0.9, thumb_pat
     )
 
 
+def stamp_reviewed_at(engine: Engine, clip_id: int, reviewed_at: datetime | None) -> None:
+    """Set ``reviewed_at`` on a clip row; ``None`` re-opens it.
+
+    ``build_test_clip`` takes no ``reviewed_at`` and ``tag_clip_frame`` only stamps one alongside a
+    membership, so this is the only way to build a reviewed clip with no cat tags — the shape the
+    ``effective_has_cat`` divergence cases need.
+    """
+    with get_session(engine) as session:
+        clip = session.get(Clip, clip_id)
+        assert clip is not None
+        clip.reviewed_at = reviewed_at
+
+
 def tag_clip_frame(engine: Engine, *, clip_id: int, subject_id: int, reviewed_at: datetime | None = None) -> None:
     """Add a ``ClipFrame``, tag it with ``subject_id``, and optionally stamp ``reviewed_at`` on the clip.
 

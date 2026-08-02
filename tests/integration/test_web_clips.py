@@ -20,6 +20,7 @@ from db_helpers import (
     DEFAULT_START_TS,
     build_detector_clip,
     seed_cat_subject,
+    stamp_reviewed_at,
     tag_clip_frame,
 )  # pytest pythonpath makes this importable
 from sqlalchemy import desc, select
@@ -206,8 +207,9 @@ def test_clips_list_renders_start_ts_in_display_timezone(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    # 18:47:04 UTC on 2026-05-01 → 14:47:04 EDT (default display_timezone is America/New_York).
-    start_ts = datetime(2026, 5, 1, 18, 47, 4, tzinfo=UTC)
+    # 02:00:00 UTC on 2026-07-02 → 22:00:00 EDT on 2026-07-01: a different calendar day, so the
+    # assertion fails on a UTC rendering rather than merely on a shifted hour.
+    start_ts = datetime(2026, 7, 2, 2, 0, 0, tzinfo=UTC)
     _ = _seed_camera_and_clip(
         db_session_factory,
         internal_root=internal_root,
@@ -219,8 +221,10 @@ def test_clips_list_renders_start_ts_in_display_timezone(
         response = client.get("/clips", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert "2026-05-01 14:47:04 EDT" in response.text
-    assert 'datetime="2026-05-01T18:47:04+00:00"' in response.text
+    assert ">2026-07-01 22:00:00 EDT</time>" in response.text
+    # The machine-readable attribute stays UTC ISO, so only the element text can carry the negative.
+    assert ">2026-07-02T02:00:00+00:00</time>" not in response.text
+    assert 'datetime="2026-07-02T02:00:00+00:00"' in response.text
 
 
 def test_clips_list_filter_by_camera_name(
@@ -387,9 +391,9 @@ def test_clip_detail_heading_renders_in_display_timezone(
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    # 18:47:04 UTC on 2026-05-01 → 14:47:04 EDT (default display_timezone is America/New_York,
-    # which is UTC-4 in May).
-    start_ts = datetime(2026, 5, 1, 18, 47, 4, tzinfo=UTC)
+    # 02:00:00 UTC on 2026-07-02 → 22:00:00 EDT on 2026-07-01: a different calendar day, so a UTC
+    # rendering cannot satisfy the assertion by coincidence.
+    start_ts = datetime(2026, 7, 2, 2, 0, 0, tzinfo=UTC)
     _, clip_id = _seed_camera_and_clip(
         db_session_factory,
         internal_root=internal_root,
@@ -401,8 +405,10 @@ def test_clip_detail_heading_renders_in_display_timezone(
         response = client.get(f"/clips/{clip_id}", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert "2026-05-01 14:47:04 EDT" in response.text
-    assert 'datetime="2026-05-01T18:47:04+00:00"' in response.text
+    assert ">2026-07-01 22:00:00 EDT</time>" in response.text
+    # The machine-readable attribute stays UTC ISO, so only the element text can carry the negative.
+    assert ">2026-07-02T02:00:00+00:00</time>" not in response.text
+    assert 'datetime="2026-07-02T02:00:00+00:00"' in response.text
 
 
 def test_clip_detail_returns_404_for_unknown_clip(
@@ -1295,14 +1301,6 @@ def test_clips_list_reviewed_no_excludes_reviewed_clips(
     assert f"/clips/{reviewed_id}" not in response.text
 
 
-def _stamp_reviewed_at(engine: Engine, clip_id: int, reviewed_at: datetime) -> None:
-    """Stamp ``reviewed_at`` on a clip row for test setup."""
-    with get_session(engine) as session:
-        clip = session.get(Clip, clip_id)
-        assert clip is not None
-        clip.reviewed_at = reviewed_at
-
-
 def test_clips_list_reviewed_yes_only_reviewed_clips(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
@@ -1336,8 +1334,8 @@ def test_clips_list_reviewed_yes_only_reviewed_clips(
     )
     engine = _clips_engine_for(internal_root)
     try:
-        _stamp_reviewed_at(engine, reviewed_earlier_id, datetime(2026, 5, 2, 10, 0, 0, tzinfo=UTC))
-        _stamp_reviewed_at(engine, reviewed_later_id, datetime(2026, 5, 2, 14, 0, 0, tzinfo=UTC))
+        stamp_reviewed_at(engine, reviewed_earlier_id, datetime(2026, 5, 2, 10, 0, 0, tzinfo=UTC))
+        stamp_reviewed_at(engine, reviewed_later_id, datetime(2026, 5, 2, 14, 0, 0, tzinfo=UTC))
     finally:
         engine.dispose()
 
@@ -1378,17 +1376,16 @@ def test_clips_list_reviewed_column_shows_date_for_reviewed(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """Reviewed column cell shows short date and ``<time datetime>`` attribute for reviewed clips."""
+    """Reviewed column shows the local calendar day, which differs from the UTC one for this seed."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
-    reviewed_ts = datetime(2026, 5, 12, 14, 30, 0, tzinfo=UTC)
+    # 02:00 UTC on 2026-07-02 is 2026-07-01 locally. The old 14:30 UTC seed had the same date in
+    # both zones, so the assertion passed either way and proved nothing.
+    reviewed_ts = datetime(2026, 7, 2, 2, 0, 0, tzinfo=UTC)
     engine = _clips_engine_for(internal_root)
     try:
-        with get_session(engine) as session:
-            clip = session.get(Clip, clip_id)
-            assert clip is not None
-            clip.reviewed_at = reviewed_ts
+        stamp_reviewed_at(engine, clip_id, reviewed_ts)
     finally:
         engine.dispose()
 
@@ -1396,8 +1393,9 @@ def test_clips_list_reviewed_column_shows_date_for_reviewed(
         response = client.get("/clips?reviewed=yes", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert "2026-05-12" in response.text
-    assert 'datetime="2026-05-12T14:30:00+00:00"' in response.text
+    assert ">2026-07-01</time>" in response.text
+    assert ">2026-07-02</time>" not in response.text
+    assert 'datetime="2026-07-02T02:00:00+00:00"' in response.text
 
 
 def test_clips_list_progress_indicator_format(
@@ -1542,7 +1540,7 @@ def test_clips_list_marking_reviewed_removes_from_no_queue(
 
     with alembic_web_test_client(config) as client:
         mark_response = client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
-        assert mark_response.status_code == 204
+        assert mark_response.status_code == 200
 
         list_response = client.get("/clips?reviewed=no", headers=AUTH_HEADER)
 

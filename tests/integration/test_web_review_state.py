@@ -1,23 +1,25 @@
 """Integration tests for POST/DELETE /clips/{id}/reviewed.
 
 Covers:
-* POST sets ``reviewed_at``, returns 204.
-* Re-POST is idempotent — timestamp unchanged, still 204.
-* DELETE clears ``reviewed_at``, returns 204.
-* Re-DELETE is a no-op, still 204.
+* POST sets ``reviewed_at``, returns the rendered timestamp.
+* Re-POST is idempotent — timestamp unchanged, response repeats the original.
+* DELETE clears ``reviewed_at``, returns null timestamp fields.
+* Re-DELETE is a no-op, still null.
 * POST then DELETE preserves ``clip_frame_subjects`` rows.
 * 404 on unknown clip ID for both verbs.
 * Successful POST/DELETE emit the expected JSONLines log event.
 """
 
 import logging
-from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
-from typing import TYPE_CHECKING
+from pathlib import Path  # pytest evaluates fixture annotations at collection time
+from typing import TYPE_CHECKING, cast
+from zoneinfo import ZoneInfo
 
 import pytest  # noqa: TC002  # pytest evaluates fixture annotations (LogCaptureFixture) at collection time
 from sqlalchemy import select
 
 from cat_watcher.db import Clip, ClipFrame, ClipFrameSubject, get_session
+from cat_watcher.timefmt import local_date, local_stamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -38,6 +40,8 @@ from db_helpers import (
     tag_clip_frame,
 )  # pytest pythonpath makes this importable
 
+_DISPLAY_TZ = ZoneInfo("America/New_York")
+
 
 def _get_reviewed_at(engine: Engine, clip_id: int) -> datetime | None:
     """Read ``clips.reviewed_at`` for ``clip_id`` via the given engine."""
@@ -47,24 +51,29 @@ def _get_reviewed_at(engine: Engine, clip_id: int) -> datetime | None:
         return clip.reviewed_at
 
 
-def test_post_reviewed_sets_reviewed_at_and_returns_204(
+def test_post_reviewed_sets_reviewed_at_and_returns_rendered_stamp(
     seeded_clip_env: tuple[Config, Engine, int],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """POST /clips/{id}/reviewed sets ``reviewed_at`` and returns 204 No Content."""
+    """POST /clips/{id}/reviewed sets ``reviewed_at`` and returns it rendered in display_timezone."""
     config, engine, clip_id = seeded_clip_env
     with web_test_client(config) as client:
         response = client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
 
-    assert response.status_code == 204
-    assert _get_reviewed_at(engine, clip_id) is not None
+    assert response.status_code == 200
+    stored = _get_reviewed_at(engine, clip_id)
+    assert stored is not None
+    body = cast("dict[str, str | None]", response.json())
+    assert body["reviewed_at_iso"] == stored.isoformat()
+    assert body["reviewed_at_stamp"] == local_stamp(stored, tz=_DISPLAY_TZ)
+    assert body["reviewed_at_date"] == local_date(stored, tz=_DISPLAY_TZ)
 
 
 def test_post_reviewed_idempotent_does_not_overwrite_timestamp(
     seeded_clip_env: tuple[Config, Engine, int],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Re-POST on an already-reviewed clip leaves ``reviewed_at`` unchanged and returns 204."""
+    """Re-POST on an already-reviewed clip leaves ``reviewed_at`` unchanged and repeats it."""
     config, engine, clip_id = seeded_clip_env
     with web_test_client(config) as client:
         first = client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
@@ -72,39 +81,41 @@ def test_post_reviewed_idempotent_does_not_overwrite_timestamp(
         second = client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
         second_ts = _get_reviewed_at(engine, clip_id)
 
-    assert first.status_code == 204
-    assert second.status_code == 204
+    assert first.status_code == 200
+    assert second.status_code == 200
     assert first_ts is not None
     # The idempotent no-op must not overwrite the original timestamp.
     assert first_ts == second_ts
+    assert first.json() == second.json()
 
 
-def test_delete_reviewed_clears_reviewed_at_and_returns_204(
+def test_delete_reviewed_clears_reviewed_at_and_returns_nulls(
     seeded_clip_env: tuple[Config, Engine, int],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """DELETE /clips/{id}/reviewed clears ``reviewed_at`` and returns 204 No Content."""
+    """DELETE /clips/{id}/reviewed clears ``reviewed_at`` and reports null timestamp fields."""
     config, engine, clip_id = seeded_clip_env
     with web_test_client(config) as client:
         _ = client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
         response = client.delete(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
 
-    assert response.status_code == 204
+    assert response.status_code == 200
+    assert response.json() == {"reviewed_at_iso": None, "reviewed_at_stamp": None, "reviewed_at_date": None}
     assert _get_reviewed_at(engine, clip_id) is None
 
 
-def test_delete_reviewed_idempotent_returns_204_when_already_cleared(
+def test_delete_reviewed_idempotent_when_already_cleared(
     seeded_clip_env: tuple[Config, Engine, int],
     web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
 ) -> None:
-    """Re-DELETE on an already-unreviewed clip is a no-op and returns 204."""
+    """Re-DELETE on an already-unreviewed clip is a no-op."""
     config, engine, clip_id = seeded_clip_env
     with web_test_client(config) as client:
         first = client.delete(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
         second = client.delete(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
 
-    assert first.status_code == 204
-    assert second.status_code == 204
+    assert first.status_code == 200
+    assert second.status_code == 200
     assert _get_reviewed_at(engine, clip_id) is None
 
 
@@ -230,3 +241,14 @@ def test_delete_reviewed_emits_clip_review_reopened_log_event(
     matching = [r for r in caplog.records if r.getMessage() == "clip_review_reopened"]
     assert len(matching) == 1, "expected exactly one clip_review_reopened record"
     assert getattr(matching[0], "clip_id", None) == clip_id
+
+
+def test_clip_detail_js_never_invents_a_timestamp() -> None:
+    """The server is the only formatter; the browser inserts what it was sent.
+
+    There is no JS test harness, so this source assertion is what pins the contract. A client-side
+    ``new Date()`` renders the browser's zone, and near local midnight puts the review badge on
+    tomorrow's date.
+    """
+    js = Path("src/cat_watcher/web/static/clip_detail.js").read_text(encoding="utf-8")
+    assert "new Date(" not in js

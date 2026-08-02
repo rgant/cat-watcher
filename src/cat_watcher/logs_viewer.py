@@ -17,8 +17,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import IO, TYPE_CHECKING, Final, cast, final
 
+from cat_watcher.timefmt import local_stamp
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
+    from datetime import tzinfo
     from pathlib import Path
 
 # Default subset surfaced when the operator omits the positional <agent> argument. ``cli`` is
@@ -148,11 +151,17 @@ def _record_msg_contains(record: LogRecordDict, needle: str) -> bool:
     return isinstance(msg, str) and needle.lower() in msg.lower()
 
 
-def _format_ts(raw_ts: object) -> str:
+def _format_ts(raw_ts: object, *, tz: tzinfo) -> str:
+    """Render a JSONL ``ts`` in ``tz``, or hand back the raw value when it isn't a usable timestamp.
+
+    A naive ``ts`` lands in the ``ValueError`` branch too: :func:`local_stamp` rejects it rather than
+    silently reading it as OS-local, and for a log line of unknown provenance the raw string is the
+    honest answer.
+    """
     if not isinstance(raw_ts, str):
         return "?"
     try:
-        return datetime.fromisoformat(raw_ts).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        return local_stamp(datetime.fromisoformat(raw_ts), tz=tz)
     except ValueError:
         return raw_ts
 
@@ -164,8 +173,8 @@ def _format_extras(extras_obj: object) -> str:
     return " ".join(f"{key}={extras_typed[key]}" for key in sorted(extras_typed))
 
 
-def _format_pretty(record: LogRecordDict, *, use_color: bool) -> str:
-    ts_str = _format_ts(record.get("ts"))
+def _format_pretty(record: LogRecordDict, *, use_color: bool, tz: tzinfo) -> str:
+    ts_str = _format_ts(record.get("ts"), tz=tz)
     level_raw = record.get("level")
     level_str = level_raw if isinstance(level_raw, str) else "?"
     level_display = _LEVEL_DISPLAY.get(level_str, level_str.ljust(5))
@@ -188,8 +197,8 @@ def _format_pretty(record: LogRecordDict, *, use_color: bool) -> str:
     return line
 
 
-def _emit_one(record: LogRecordDict, *, out: IO[str], json_mode: bool, use_color: bool) -> None:
-    rendered = json.dumps(record, ensure_ascii=False) if json_mode else _format_pretty(record, use_color=use_color)
+def _emit_one(record: LogRecordDict, *, out: IO[str], json_mode: bool, use_color: bool, tz: tzinfo) -> None:
+    rendered = json.dumps(record, ensure_ascii=False) if json_mode else _format_pretty(record, use_color=use_color, tz=tz)
     _ = out.write(f"{rendered}\n")
 
 
@@ -199,9 +208,10 @@ def _emit_records(
     out: IO[str],
     json_mode: bool,
     use_color: bool,
+    tz: tzinfo,
 ) -> None:
     for record in records:
-        _emit_one(record, out=out, json_mode=json_mode, use_color=use_color)
+        _emit_one(record, out=out, json_mode=json_mode, use_color=use_color, tz=tz)
 
 
 @final
@@ -378,7 +388,7 @@ class RunArgs:
         )
 
 
-def run(args: RunArgs, *, internal_root: Path, out: IO[str] | None = None) -> int:
+def run(args: RunArgs, *, internal_root: Path, tz: tzinfo, out: IO[str] | None = None) -> int:
     """Execute the ``logs`` sub-command. Returns a process exit code."""
     sink: IO[str] = out if out is not None else sys.stdout
     selected_agents: tuple[str, ...] = (args.agent,) if args.agent else _LAUNCHAGENT_AGENTS
@@ -388,13 +398,13 @@ def run(args: RunArgs, *, internal_root: Path, out: IO[str] | None = None) -> in
     filters = _Filters(since=args.since, level=args.level, camera=args.camera_filter, grep=args.grep)
 
     def _emit(record: LogRecordDict) -> None:
-        _emit_one(record, out=sink, json_mode=args.json_mode, use_color=use_color)
+        _emit_one(record, out=sink, json_mode=args.json_mode, use_color=use_color, tz=tz)
 
     if args.follow:
         return _follow_loop(files, filters=filters, emit=_emit)
 
     records = _collect_filtered(files, filters=filters)
-    _emit_records(records, out=sink, json_mode=args.json_mode, use_color=use_color)
+    _emit_records(records, out=sink, json_mode=args.json_mode, use_color=use_color, tz=tz)
     return 0
 
 

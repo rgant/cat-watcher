@@ -10,6 +10,7 @@ header.
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from db_helpers import AUTH_HEADER, tag_clip_frame
 
@@ -226,14 +227,34 @@ def test_stats_aggregates_clip_counts_per_camera_per_day(
         response = client.get("/stats", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    pantry_row = _row_for(response.text, "Pantry", today_anchor.date().isoformat())
-    bath_row = _row_for(response.text, "Bath", yesterday_anchor.date().isoformat())
+    # The Date column is a display_timezone day, so a UTC-date lookup fails on any run after
+    # 20:00 Eastern — a failure on a date unrelated to the change.
+    pantry_row = _row_for(response.text, "Pantry", _local_day(today_anchor))
+    bath_row = _row_for(response.text, "Bath", _local_day(yesterday_anchor))
     assert pantry_row is not None, "Expected a Pantry row for today in /stats"
     assert bath_row is not None, "Expected a Bath row for yesterday in /stats"
     assert "3" in pantry_row, f"Pantry total clips=3 missing in row: {pantry_row}"
     assert "2" in pantry_row, f"Pantry cat-positive=2 missing in row: {pantry_row}"
     # 1 / 1 — total and cat both equal 1 thanks to the operator review-queue override.
     assert "1" in bath_row
+
+
+_DISPLAY_TZ = ZoneInfo("America/New_York")
+
+
+def _local_day(value: datetime) -> str:
+    """Return ``value``'s calendar day in the configured display zone, which is what /stats buckets by."""
+    return value.astimezone(_DISPLAY_TZ).date().isoformat()
+
+
+def _row_positions(body: str, rows: list[tuple[str, str]]) -> list[int]:
+    """Return each ``(camera_display_name, date_iso)`` row's offset in ``body``, in the order given."""
+    offsets: list[int] = []
+    for name, day_iso in rows:
+        row = _row_for(body, name, day_iso)
+        assert row is not None, f"missing row for {name} on {day_iso}"
+        offsets.append(body.index(row))
+    return offsets
 
 
 def _row_for(body: str, camera_display_name: str, date_iso: str) -> str | None:
@@ -466,8 +487,8 @@ def test_stats_omits_clips_older_than_30_days(
     # The stale clip's ISO date should be absent — its row was filtered out by the cutoff. The fresh
     # clip's date must be present so the test fails if the route accidentally drops *all* clips
     # (e.g. inverted condition).
-    assert stale_ts.date().isoformat() not in response.text
-    assert fresh_ts.date().isoformat() in response.text
+    assert _local_day(stale_ts) not in response.text
+    assert _local_day(fresh_ts) in response.text
 
 
 def test_cameras_page_caps_recent_alerts_at_five(
@@ -621,3 +642,165 @@ def test_stats_effective_has_cat_four_combinations(
     # Total = 4 clips; cat_total = 2 (A=detector True + D=reviewed manual True).
     assert "4" in row, f"Expected total=4 in Pantry row: {row}"
     assert "2" in row, f"Expected cat_total=2 in Pantry row: {row}"
+
+
+# --- local-time rendering ------------------------------------------------------------------------
+
+
+def test_cameras_page_renders_every_timestamp_in_local_time(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """Each of the four camera timestamps renders in ``display_timezone``, with a distinct seed.
+
+    All four cells render through the identical template construct, so one shared seed would let a
+    template that missed a field still satisfy every assertion.
+    """
+    internal_root, storage_root = storage_dirs
+    # All four are just after UTC midnight, so the local day differs from the UTC one.
+    since = datetime(2026, 7, 2, 2, 0, 0, tzinfo=UTC)
+    polled = datetime(2026, 7, 2, 2, 1, 0, tzinfo=UTC)
+    last_clip = datetime(2026, 7, 2, 2, 2, 0, tzinfo=UTC)
+    last_cat = datetime(2026, 7, 2, 2, 3, 0, tzinfo=UTC)
+    _ = _persist_cameras(
+        db_session_factory,
+        internal_root,
+        [
+            Camera(
+                name="pantry",
+                display_name="Pantry",
+                host="cam1.example.com",
+                poll_status=PollStatus.OK,
+                poll_status_since=since,
+                last_polled_at=polled,
+                last_clip_at=last_clip,
+                last_cat_seen_at=last_cat,
+            ),
+        ],
+    )
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/cameras", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    for value in (since, polled, last_clip, last_cat):
+        expected = value.astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+        assert f">{expected}</time>" in response.text
+        # The machine-readable attribute keeps UTC ISO, so the negative must be element-anchored.
+        assert f">{value.isoformat()}</time>" not in response.text
+        assert f'datetime="{value.isoformat()}"' in response.text
+
+
+def test_alerts_page_renders_sent_in_local_time(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """The Sent column renders in ``display_timezone``.
+
+    Seeded relative to now because ``alerts_page`` cuts at a 30-day window, and the expected string
+    is derived from the zone rather than hardcoded because a now-relative seed crosses EDT/EST.
+    """
+    internal_root, storage_root = storage_dirs
+    [cam_id] = _persist_cameras(
+        db_session_factory,
+        internal_root,
+        [Camera(name="pantry", display_name="Pantry", host="cam1.example.com", poll_status=PollStatus.OK)],
+    )
+    # Just after a UTC midnight inside the window, so the local calendar day differs.
+    sent_at = (datetime.now(UTC) - timedelta(days=1)).replace(hour=2, minute=0, second=0, microsecond=0)
+    _persist(
+        db_session_factory,
+        internal_root,
+        [
+            AlertSent(
+                camera_id=cam_id,
+                alert_type=AlertType.INACTIVITY,
+                subject="alert-local",
+                body="alert body",
+                sent_at=sent_at,
+                email_ok=True,
+                macos_ok=True,
+            ),
+        ],
+    )
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/alerts", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    expected = sent_at.astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    assert f">{expected}</time>" in response.text
+    assert f">{sent_at.isoformat()}</time>" not in response.text
+
+
+def test_stats_buckets_a_cross_midnight_clip_into_its_local_day(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A clip just after UTC midnight belongs to the previous local day, as the Start column shows."""
+    internal_root, storage_root = storage_dirs
+    [cam_id] = _persist_cameras(
+        db_session_factory,
+        internal_root,
+        [Camera(name="pantry", display_name="Pantry", host="cam1.example.com", poll_status=PollStatus.OK)],
+    )
+    start_ts = (datetime.now(UTC) - timedelta(days=1)).replace(hour=2, minute=0, second=0, microsecond=0)
+    # The premise the assertion depends on, checked rather than assumed.
+    assert _local_day(start_ts) != start_ts.date().isoformat()
+    _persist(db_session_factory, internal_root, [_make_clip(camera_id=cam_id, start_ts=start_ts, has_cat=True)])
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/stats", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert _row_for(response.text, "Pantry", _local_day(start_ts)) is not None
+    assert _row_for(response.text, "Pantry", start_ts.date().isoformat()) is None
+
+
+def test_stats_rows_are_ordered_newest_day_then_camera(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """Rows read newest day first, then camera_id ascending.
+
+    The ordering lives in Python rather than an ``ORDER BY`` clause, because bucketing by a
+    display_timezone day cannot be expressed in SQLite. Nothing else pins it.
+    """
+    internal_root, storage_root = storage_dirs
+    pantry_id, bath_id = _persist_cameras(
+        db_session_factory,
+        internal_root,
+        [
+            Camera(name="pantry", display_name="Pantry", host="cam1.example.com", poll_status=PollStatus.OK),
+            Camera(name="bath", display_name="Bath", host="cam2.example.com", poll_status=PollStatus.OK),
+        ],
+    )
+    assert pantry_id < bath_id
+    newer = datetime.now(UTC).replace(hour=12, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    older = newer - timedelta(days=1)
+    _persist(
+        db_session_factory,
+        internal_root,
+        [_make_clip(camera_id=cam, start_ts=day, has_cat=False) for day in (newer, older) for cam in (pantry_id, bath_id)],
+    )
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/stats", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    expected = [
+        ("Pantry", _local_day(newer)),
+        ("Bath", _local_day(newer)),
+        ("Pantry", _local_day(older)),
+        ("Bath", _local_day(older)),
+    ]
+    positions = _row_positions(response.text, expected)
+    assert positions == sorted(positions), f"rows out of order: {expected} landed at {positions}"

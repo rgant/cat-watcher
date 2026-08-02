@@ -19,7 +19,7 @@
           <dt>Poll status since</dt>
           <dd>
             {% if cam.poll_status_since is not none %}
-              <time datetime="{{ cam.poll_status_since.isoformat() }}">{{ cam.poll_status_since.isoformat() }}</time>
+              <time datetime="{{ cam.poll_status_since.isoformat() }}">{{ cam.poll_status_since | localstamp }}</time>
             {% else %}
               —
             {% endif %}
@@ -27,7 +27,7 @@
           <dt>Last polled</dt>
           <dd>
             {% if cam.last_polled_at is not none %}
-              <time datetime="{{ cam.last_polled_at.isoformat() }}">{{ cam.last_polled_at.isoformat() }}</time>
+              <time datetime="{{ cam.last_polled_at.isoformat() }}">{{ cam.last_polled_at | localstamp }}</time>
             {% else %}
               —
             {% endif %}
@@ -35,7 +35,7 @@
           <dt>Last clip</dt>
           <dd>
             {% if cam.last_clip_at is not none %}
-              <time datetime="{{ cam.last_clip_at.isoformat() }}">{{ cam.last_clip_at.isoformat() }}</time>
+              <time datetime="{{ cam.last_clip_at.isoformat() }}">{{ cam.last_clip_at | localstamp }}</time>
             {% else %}
               —
             {% endif %}
@@ -43,7 +43,7 @@
           <dt>Last cat seen</dt>
           <dd>
             {% if cam.last_cat_seen_at is not none %}
-              <time datetime="{{ cam.last_cat_seen_at.isoformat() }}">{{ cam.last_cat_seen_at.isoformat() }}</time>
+              <time datetime="{{ cam.last_cat_seen_at.isoformat() }}">{{ cam.last_cat_seen_at | localstamp }}</time>
             {% else %}
               —
             {% endif %}
@@ -70,7 +70,7 @@
               {% for alert in cam.recent_alerts %}
                 <tr>
                   <td data-label="Sent">
-                    <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at.isoformat() }}</time>
+                    <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at | localstamp }}</time>
                   </td>
                   <td data-label="Type">{{ alert.alert_type }}</td>
                   <td data-label="Subject">{{ alert.subject }}</td>

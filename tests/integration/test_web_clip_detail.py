@@ -10,7 +10,7 @@ from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations 
 from typing import TYPE_CHECKING, cast
 
 import db_helpers
-from db_helpers import AUTH_HEADER, DEFAULT_START_TS, make_clip_frame, seed_camera_and_clip_with_files
+from db_helpers import AUTH_HEADER, DEFAULT_START_TS, make_clip_frame, seed_camera_and_clip_with_files, stamp_reviewed_at
 from sqlalchemy import event as sa_event
 
 from cat_watcher.db import Camera, Clip, ClipFrame, ClipFrameSubject, Subject, create_engine, get_session
@@ -530,7 +530,8 @@ def test_reopen_button_present_when_already_reviewed(
     """When ``reviewed_at IS NOT NULL``, the page renders a 'Re-open for review' button with hx-delete."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    reviewed_ts = datetime(2026, 5, 12, 14, 30, 0, tzinfo=UTC)
+    # 02:00 UTC on 2026-07-02 is 2026-07-01 locally; the old 14:30 UTC seed read the same in both.
+    reviewed_ts = datetime(2026, 7, 2, 2, 0, 0, tzinfo=UTC)
     _, clip_id = _seed_reviewed_clip(
         db_session_factory,
         internal_root=internal_root,
@@ -544,7 +545,8 @@ def test_reopen_button_present_when_already_reviewed(
     assert response.status_code == 200
     assert "Re-open for review" in response.text
     assert f'hx-delete="/clips/{clip_id}/reviewed"' in response.text
-    assert "Reviewed 2026-05-12" in response.text
+    assert '<span class="review-badge">Reviewed 2026-07-01</span>' in response.text
+    assert "Reviewed 2026-07-02" not in response.text
 
 
 def test_dl_rows_reviewed_at_null(
@@ -573,10 +575,10 @@ def test_dl_rows_reviewed_at_non_null(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """The reviewed_at <dl> row shows an ISO timestamp wrapped in <time> when reviewed."""
+    """The reviewed_at <dl> row shows the local stamp as text, keeping UTC ISO in the attribute."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    reviewed_ts = datetime(2026, 5, 12, 14, 30, 0, tzinfo=UTC)
+    reviewed_ts = datetime(2026, 7, 2, 2, 0, 0, tzinfo=UTC)
     _, clip_id = _seed_reviewed_clip(
         db_session_factory,
         internal_root=internal_root,
@@ -588,8 +590,10 @@ def test_dl_rows_reviewed_at_non_null(
         response = client.get(f"/clips/{clip_id}", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert "<time datetime=" in response.text
-    assert "2026-05-12" in response.text
+    assert 'datetime="2026-07-02T02:00:00+00:00"' in response.text
+    assert ">2026-07-01 22:00:00 EDT</time>" in response.text
+    # The old assertion was satisfied by the attribute alone regardless of the visible text.
+    assert ">2026-07-02T02:00:00+00:00</time>" not in response.text
 
 
 def test_tag_summary_cats_with_frame_counts_no_events(
@@ -1122,10 +1126,7 @@ def _mark_clip_reviewed_at(internal_root: Path, clip_id: int, reviewed_at: datet
     """Stamp ``reviewed_at`` on a clip row using a short-lived engine."""
     engine = _detail_engine_for(internal_root)
     try:
-        with get_session(engine) as session:
-            clip = session.get(Clip, clip_id)
-            assert clip is not None
-            clip.reviewed_at = reviewed_at
+        stamp_reviewed_at(engine, clip_id, reviewed_at)
     finally:
         engine.dispose()
 
@@ -1197,3 +1198,28 @@ def test_filter_scoped_reviewed_yes_nav_orders_by_reviewed_at(
     expected_next_href = f'href="/clips/{clip3_id}?reviewed=yes&amp;camera=pantry"'
     assert expected_prev_href in response.text, f"Expected prev (more-recently-reviewed) {expected_prev_href!r}"
     assert expected_next_href in response.text, f"Expected next (earlier-reviewed) {expected_next_href!r}"
+
+
+def test_review_endpoint_stamp_matches_the_rendered_page(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The string the JSON hands the browser is the string a full page load would render.
+
+    This case lives here rather than in ``test_web_review_state.py`` because ``GET /clips/{id}``
+    reads ``clip_label_summary``, and that module's fixtures create no view.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = seed_camera_and_clip_with_files(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+
+    with alembic_web_test_client(config) as client:
+        posted = client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER)
+        rendered = client.get(f"/clips/{clip_id}", headers=AUTH_HEADER)
+
+    assert posted.status_code == 200
+    body = cast("dict[str, str]", posted.json())
+    assert f">{body['reviewed_at_stamp']}</time>" in rendered.text
+    assert f'<span class="review-badge">Reviewed {body["reviewed_at_date"]}</span>' in rendered.text

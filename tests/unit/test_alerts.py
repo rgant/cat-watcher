@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from db_helpers import tag_clip_frame
+from db_helpers import seed_cat_subject, stamp_reviewed_at, tag_clip_frame
 from sqlalchemy.engine import Engine
 
 from cat_watcher.alert_templates import AlertContent
@@ -38,10 +38,8 @@ from cat_watcher.db import (
     AlertSent,
     AlertType,
     Camera,
-    Clip,
     Heartbeat,
     PollStatus,
-    Subject,
     get_session,
 )
 from cat_watcher.notifier import EmailResult, NotifResult
@@ -329,7 +327,7 @@ def test_frequency_excludes_reviewed_clips_with_no_cat_membership(
             start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
             has_cat=True,
         )
-        _set_reviewed_at(db_engine, clip_id, reviewed_at)
+        stamp_reviewed_at(db_engine, clip_id, reviewed_at)
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
@@ -344,7 +342,7 @@ def test_frequency_includes_reviewed_clips_with_cat_membership(
 ) -> None:
     """Reviewed clips with ``has_cat=False`` but cat membership DOES count (FN correction)."""
     cam_id = seed_camera(db_engine)
-    subj_id = _seed_cat_subject(db_engine)
+    subj_id = seed_cat_subject(db_engine)
     for i in range(8):
         clip_id = seed_clip(
             db_engine,
@@ -359,23 +357,6 @@ def test_frequency_includes_reviewed_clips_with_cat_membership(
         cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
     assert cand is not None
     assert "(8 in 6h)" in cand.content.subject
-
-
-def _set_reviewed_at(engine: Engine, clip_id: int, reviewed_at: datetime | None) -> None:
-    """Stamp ``reviewed_at`` on an existing Clip row."""
-    with get_session(engine) as session:
-        clip = session.get(Clip, clip_id)
-        assert clip is not None
-        clip.reviewed_at = reviewed_at
-
-
-def _seed_cat_subject(engine: Engine, *, slug: str = "test-cat") -> int:
-    """Insert one cat Subject and return its id."""
-    with get_session(engine) as session:
-        subj = Subject(slug=slug, display_name=slug.capitalize(), kind="cat", display_order=1)
-        session.add(subj)
-        session.flush()
-        return subj.id
 
 
 # --- FREQUENCY parity tests: effective_has_cat cross-product ------------------------------------
@@ -424,7 +405,7 @@ def test_frequency_false_positive_correction_reviewed_no_memberships(
             start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
             has_cat=True,
         )
-        _set_reviewed_at(db_engine, clip_id, _NOW - timedelta(minutes=30))
+        stamp_reviewed_at(db_engine, clip_id, _NOW - timedelta(minutes=30))
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -445,7 +426,7 @@ def test_frequency_false_negative_correction_reviewed_with_cat_membership(
     The alert engine must now count these clips even though ``has_cat=False``.
     """
     cam_id = seed_camera(db_engine)
-    subj_id = _seed_cat_subject(db_engine)
+    subj_id = seed_cat_subject(db_engine)
     clip_ids = [
         seed_clip(
             db_engine,
@@ -478,7 +459,7 @@ def test_frequency_unreviewed_with_cat_membership_uses_detector(
     effect once ``reviewed_at`` is set.
     """
     cam_id = seed_camera(db_engine)
-    subj_id = _seed_cat_subject(db_engine)
+    subj_id = seed_cat_subject(db_engine)
     clip_ids = [
         seed_clip(
             db_engine,
@@ -509,7 +490,7 @@ def test_frequency_reviewed_with_cat_membership_fires(
     Both detector and manual label agree; the alert engine must fire as expected.
     """
     cam_id = seed_camera(db_engine)
-    subj_id = _seed_cat_subject(db_engine)
+    subj_id = seed_cat_subject(db_engine)
     clip_ids = [
         seed_clip(
             db_engine,

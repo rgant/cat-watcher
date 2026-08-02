@@ -164,6 +164,18 @@ class WebConfig(BaseModel, extra="forbid"):
     public_url: str
     display_timezone: str = "America/New_York"
 
+    @field_validator("display_timezone")
+    @classmethod
+    def _validate_display_timezone(cls, value: str) -> str:
+        # Resolved once at app startup and used by the CLI and log viewer too, so a typo would take
+        # the web agent down at bind time rather than 500 one page.
+        try:
+            _ = ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            msg = f"invalid IANA timezone: {value!r}"
+            raise ValueError(msg) from exc
+        return value
+
 
 class StorageConfig(BaseModel, extra="forbid"):
     """External-drive wait knobs used by the poller / backup agents."""
