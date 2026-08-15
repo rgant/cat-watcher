@@ -35,7 +35,10 @@ repos:
       - id: check-toml
 
       # --- 2a. auto-fixers (general whitespace) --------------------------------------------------
+      # A vendored asset must stay byte-identical to its upstream release, so one sha384 proves
+      # provenance. A trailing newline would break that check.
       - id: end-of-file-fixer
+        exclude: ^src/cat_watcher/web/static/vendor/
       - id: trailing-whitespace
 
   - repo: local
@@ -158,6 +161,15 @@ repos:
         entry: npx --no-install eslint
         language: system
         files: ^src/cat_watcher/web/static/.*\.js$
+
+      - id: vendor-static-assets
+        # Catch a package-lock.json bump that nobody copied into web/static/vendor/, and a hand
+        # edit of a vendored file. Both make the served bytes disagree with the pinned version.
+        name: vendored static assets match node_modules
+        entry: bash scripts/vendor_static_assets.sh --check
+        language: system
+        pass_filenames: false
+        files: ^(package-lock\.json|src/cat_watcher/web/static/vendor/)
 
       - id: forbid-binary-outside-fixtures
         # Block accidental commits of media/model blobs anywhere except tests/fixtures/. The repo

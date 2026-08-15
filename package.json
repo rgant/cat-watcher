@@ -33,6 +33,7 @@
     }
   },
   "dependencies": {
+    "htmx.org": "2.0.4",
     "stylelint-declaration-strict-value": "^1.11.1"
   }
 }

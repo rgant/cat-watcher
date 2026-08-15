@@ -12,6 +12,7 @@ export default defineConfig([
     ignores: [
       '.pixi',
       'tmp',
+      'src/cat_watcher/web/static/vendor',
     ],
   },
   { files: ["**/*.{js,mjs,cjs}"], plugins: { js }, extends: ["js/recommended"], languageOptions: { globals: globals.browser } },

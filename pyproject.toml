@@ -101,11 +101,15 @@ description = "Apply pending alembic migrations to head"
 # Agents are stopped across the migration so no tick runs new code against the old schema, and no
 # tick holds a SQLite write lock while alembic works. A failed migration therefore leaves every
 # agent down on purpose; recover with `pixi run start-agents` once the schema is sorted out.
+#
+# `npm ci` runs because the JS lint sidecar is pinned in package-lock.json, and a pull can move that
+# lockfile. It needs a login shell on the deploy host, where nvm puts node on PATH.
 cmd = """\
-  git pull && pixi install && pixi run stop-agents && pixi run alembic upgrade head && pixi run start-agents && pixi \
-  run agents-status && curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health -w '\\n'\
+  git pull && pixi install && npm ci && pixi run stop-agents && pixi run alembic upgrade head && pixi run start-agents \
+  && pixi run agents-status && curl --retry 30 --retry-connrefused --retry-delay 1 -fsS http://localhost:8000/health \
+  -w '\\n'\
   """
-description = "Pull, install, stop agents, migrate, restart agents, and verify web /health."
+description = "Pull, install deps, stop agents, migrate, restart agents, and verify web /health."
 [tool.pixi.tasks.dev]
 cmd = "cat-watcher-web --reload"
 description = "Run web app with reload"
@@ -192,6 +196,9 @@ description = "Run pytest against the code currently deployed on media-center"
 [tool.pixi.tasks.uninstall-agents]
 cmd = "bash scripts/uninstall_launchagents.sh"
 description = "Remove cat-watcher launchd agents (this Mac)"
+[tool.pixi.tasks.vendor-static-assets]
+cmd = "bash scripts/vendor_static_assets.sh"
+description = "Copy browser-side npm packages into web/static/vendor/; pass --check to compare"
 [tool.pixi.workspace]
 channels = [ "conda-forge" ]
 platforms = [ "linux-64", "osx-64", "osx-arm64" ]

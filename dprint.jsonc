@@ -10,6 +10,7 @@
     "**/.venv",
     "**/__pycache__",
     "**/node_modules",
+    "src/cat_watcher/web/static/vendor/**",
   ],
   "plugins": [
     "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm",
