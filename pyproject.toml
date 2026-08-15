@@ -11,17 +11,17 @@ license = { text = "AGPL-3.0-or-later" }
 authors = [ { name = "J Rob Gant", email = "rgant@alum.wpi.edu" } ]
 requires-python = ">=3.14"
 dependencies = [
-  "alembic>=1.18.5,<2",
+  "alembic>=1.19.1,<2",
   "fastapi>=0.141.1,<0.142",
-  "httpx2>=2.9.1,<3",
+  "httpx2>=2.10.0,<3",
   "jinja2>=3.1.6,<4",
   "pillow>=12.3.0,<13",
   "pydantic>=2.13.4,<3",
-  "pydantic-settings>=2.14.2,<3",
+  "pydantic-settings>=2.15.0,<3",
   "python-multipart>=0.0.32,<0.1",
-  "sqlalchemy>=2.0.51,<3",
-  "starlette>=1.3.1,<2",
-  "uvicorn[standard]>=0.52.1,<0.53",
+  "sqlalchemy>=2.0.52,<3",
+  "starlette>=1.6.0,<2",
+  "uvicorn[standard]>=0.52.3,<0.53",
 ]
 [project.scripts]
 cat-watcher = "cat_watcher.__main__:main"
@@ -35,36 +35,36 @@ dev = [
   # Starlette 1.x support is merged upstream but unreleased; PyPI's 0.4.0 still pins starlette==0.*.
   # Release tracked in florimondmanca/arel#44; revert to a plain "arel>=0.5.0,<0.6" once it lands.
   "arel @ git+https://github.com/florimondmanca/arel@8a466bfb1d24702481e6893ab305ce05e851dd02?rev_type=rev",
-  "basedpyright>=1.39.9,<2",
+  "basedpyright>=1.39.10,<2",
   "deptry>=0.25.1,<0.26",
   "detect-secrets>=1.5.0,<2",
-  "djlint>=1.43.2,<2",
-  "mypy>=2.3.0,<3",
-  "pre-commit>=4.6.1,<5",
-  "pylint>=4.0.6,<5",
+  "djlint>=1.44.2,<2",
+  "mypy>=2.3.1,<3",
+  "pre-commit>=4.6.2,<5",
+  "pylint>=4.0.7,<5",
   "pylint-per-file-ignores>=3.2.1,<4",
   "pylint-pytest>=2.0.0a1",
   "pylint-venv>=3.0.4,<4",
-  "pyproject-fmt>=2.26,<3",
+  "pyproject-fmt>=2.27.1,<3",
   "pytest>=9.1.1,<10",
   "pytest-cov>=7.1.0,<8",
   "pytest-randomly>=4.1.0,<5",
   "respx>=0.23.1,<0.24",
-  "ruff>=0.16.1,<0.17",
+  "ruff>=0.16.3,<0.17",
 ]
 
 [tool.pixi.dependencies]
 python = "3.14.*"
 actionlint = ">=1.7.12,<2"
 dprint = ">=0.50.0,<0.51"
-ffmpeg = ">=8.1.1,<9"
+ffmpeg = ">=8.1.2,<9"
 markdownlint-cli = ">=0.49.1,<0.50"
-numpy = ">=2.5.1,<3"
-opencv = ">=5,<6"
-pytorch = ">=2.12,<3"
+numpy = ">=2.5.2,<3"
+opencv = ">=5.0.0,<6"
+pytorch = ">=2.13.0,<3"
 shellcheck = ">=0.11.0,<0.12"
-torchvision = "==0.27.1"  # version required for pytorch 2.12; 0.28 is py312-only on conda-forge.
-ultralytics = ">=8.4.115,<9"
+torchvision = ">=0.28.0,<0.29"  # each build pins one pytorch minor, so bump both together.
+ultralytics = ">=8.4.119,<9"
 zizmor = ">=1.29.0,<2"
 [tool.pixi.environments]
 default = { features = [ "dev" ], solve-group = "default" }
