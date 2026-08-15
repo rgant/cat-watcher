@@ -426,6 +426,10 @@ class ClipLabelSummary(_ViewBase):
 # in lockstep. Historical migrations keep their own frozen copies so an old ``upgrade`` reproduces
 # the schema as it was authored. ``slug`` uses the aggregate ``ORDER BY`` form (SQLite >= 3.44) so
 # the comma-joined ordering is well-defined rather than relying on undefined aggregate input order.
+# Read ``effective_has_cat`` to get the operator verdict with the detector verdict as the fallback.
+# ``COALESCE(has_manual_cat, has_cat)`` looks equivalent and is not: ``has_manual_cat`` is a CAST of
+# EXISTS, so it is never NULL. The COALESCE always takes it, and every unreviewed clip silently
+# loses its detector verdict.
 CLIP_LABEL_SUMMARY_VIEW_SQL = """
 CREATE VIEW clip_label_summary AS
 SELECT

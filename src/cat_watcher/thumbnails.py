@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 THUMB_QUALITY: int = 80
 THUMB_MAX_WIDTH: int = 320
+# Width 2 covers ``frames_to_sample`` up to 99. Above that the format spec widens the field, so no
+# filename truncates, but lexicographic order stops matching numeric order.
 _ORDINAL_WIDTH: int = 2
 
 

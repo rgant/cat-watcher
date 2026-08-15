@@ -315,6 +315,9 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
 
     Thin shim around :func:`detection_for` for callers (reanalyze CLI, unit tests) that don't need
     the per-frame buffer.
+
+    ``scored_frames`` stays out of :class:`DetectionFields` on purpose. That TypedDict is spread
+    into ``Clip(**fields)``, so a frame buffer inside it needs a manual pop at the call site.
     """
     fields, _ = detection_for(detector, clip_full)
     return fields

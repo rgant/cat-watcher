@@ -22,5 +22,5 @@ version. `scripts/vendor_static_assets.sh` copies `dist/htmx.min.js` verbatim to
 
 ### Amcrest HTTP API documentation
 
-`docs/resources/Amcrest-HTTP_API_V3.26.pdf` — vendor reference document, used
-only for development. Not redistributed.
+`docs/resources/Amcrest-HTTP_API_V3.26.pdf` is a vendor reference document. It
+is used only for development. It is not redistributed.

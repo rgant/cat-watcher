@@ -180,7 +180,11 @@ def _cleanup_empty_date_dirs(storage_root: Path) -> int:
 
 
 def _rmdir_empty_per_clip_subdirs(date_dir: Path) -> None:
-    """Inside a ``thumbs/<slug>/<YYYY-MM-DD>/`` dir, rmdir any empty per-clip ``<HHMMSS>/`` subdir."""
+    """Inside a ``thumbs/<slug>/<YYYY-MM-DD>/`` dir, rmdir any empty per-clip ``<HHMMSS>/`` subdir.
+
+    A date dir holds legacy ``<HHMMSS>.jpg`` files and per-clip ``<HHMMSS>/`` dirs at the same time.
+    The two names never collide, because a filesystem treats them as different entries.
+    """
     for child in date_dir.iterdir():
         if not child.is_dir():
             continue

@@ -6,6 +6,9 @@ ffmpeg only runs the first time a given ``(duration, fps, size)`` combination is
 Loaded by direct path because the test tree uses PEP 420 namespace packages under pytest's
 ``--import-mode=importlib``, and ``ultralytics`` ships its own ``tests`` package in
 ``site-packages`` that would shadow a ``from tests.fixtures.make_clip import ...`` import.
+
+The frames carry no cat, on purpose. Every test either fakes YOLO or asserts only that the pipeline
+ran, so the image content is unused. A detector-accuracy test must supply real frames.
 """
 
 import hashlib
