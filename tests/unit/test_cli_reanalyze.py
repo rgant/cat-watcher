@@ -385,48 +385,118 @@ def test_reanalyze_all_backfills_clip_frames(tmp_path: Path, make_config: Callab
     assert [frame.score for frame in frames] == [0.1, 0.85, 0.3, 0.6]
 
 
-def test_reanalyze_preserves_clip_frame_subjects(tmp_path: Path, make_config: Callable[..., Config]) -> None:
-    """All ``clip_frame_subjects`` rows survive reanalyze; only detector-output columns are touched."""
-    config = config_with_dirs(tmp_path, make_config)
-    init_schema(config.internal_root)
-    _set_weights_present(config)
-    cam_id = seed_camera(config)
-    _ = _ensure_clip_file(config)
-    clip_id = seed_clip(config, camera_id=cam_id, analysis_error="skipped: --no-detect")
+def _scored_frames(*ordinals: int, score: float = 0.7) -> tuple[ScoredFrame, ...]:
+    """Build real ``ScoredFrame``s so re-detection reaches the frame-backfill path.
 
+    ``_reanalyze_one_clip`` skips the backfill on an empty tuple, so a test that passes ``()``
+    never exercises it.
+    """
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    return tuple(ScoredFrame(ordinal=o, t_offset_seconds=float(o) / 2, score=score, frame=frame, box=None) for o in ordinals)
+
+
+def _seed_tagged_frames(config: Config, clip_id: int, *ordinals: int, tagged: int) -> tuple[int, int]:
+    """Attach a frame per ordinal and tag the one at ``tagged``. Return its ``(frame_id, subject_id)``."""
     engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
     try:
         with get_session(engine) as session:
             subj = Subject(slug="rufus", display_name="Rufus", kind="cat", display_order=1)
             session.add(subj)
             session.flush()
-            frame = ClipFrame(clip_id=clip_id, ordinal=0, t_offset_seconds=1.0, score=0.5, thumb_path="t.jpg")
-            session.add(frame)
-            session.flush()
-            session.add(ClipFrameSubject(clip_frame_id=frame.id, subject_id=subj.id))
+            frame_ids: dict[int, int] = {}
+            for ordinal in ordinals:
+                frame = ClipFrame(
+                    clip_id=clip_id,
+                    ordinal=ordinal,
+                    t_offset_seconds=float(ordinal),
+                    score=0.1,
+                    thumb_path=f"thumbs/legacy/{ordinal}.jpg",
+                )
+                session.add(frame)
+                session.flush()
+                frame_ids[ordinal] = frame.id
+            session.add(ClipFrameSubject(clip_frame_id=frame_ids[tagged], subject_id=subj.id))
+            return frame_ids[tagged], subj.id
     finally:
         engine.dispose()
 
-    subjects_before = 1
+
+def _read_frames(config: Config, clip_id: int) -> list[tuple[int, int, float, str]]:
+    """Return ``(ordinal, id, score, thumb_path)`` per surviving frame, ordered by ordinal."""
+    engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            rows = session.execute(
+                select(ClipFrame.ordinal, ClipFrame.id, ClipFrame.score, ClipFrame.thumb_path)
+                .where(ClipFrame.clip_id == clip_id)
+                .order_by(ClipFrame.ordinal),
+            ).all()
+            return [(r[0], r[1], r[2], r[3]) for r in rows]
+    finally:
+        engine.dispose()
+
+
+def _read_tagged_frame_ids(config: Config, subject_id: int) -> list[int]:
+    """Return every ``clip_frame_id`` still tagged with ``subject_id``."""
+    engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            rows = session.execute(
+                select(ClipFrameSubject.clip_frame_id).where(ClipFrameSubject.subject_id == subject_id),
+            ).all()
+            return [r[0] for r in rows]
+    finally:
+        engine.dispose()
+
+
+def test_reanalyze_preserves_clip_frame_subjects(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """An operator tag survives re-detection that rewrites its frame's detector columns."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+    _set_weights_present(config)
+    cam_id = seed_camera(config)
+    _ = _ensure_clip_file(config)
+    clip_id = seed_clip(config, camera_id=cam_id, analysis_error="skipped: --no-detect")
+    tagged_frame_id, subject_id = _seed_tagged_frames(config, clip_id, 0, 1, tagged=0)
+
     with (
         patch("cat_watcher.__main__.load_config", return_value=config),
         patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
-        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), ())),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), _scored_frames(0, 1))),
     ):
         exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
     assert exit_code == 0
 
-    engine2 = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
-    try:
-        with get_session(engine2) as session:
-            frame_ids = [r[0] for r in session.execute(select(ClipFrame.id).where(ClipFrame.clip_id == clip_id)).all()]
-            subjects_after = len(
-                session.execute(select(ClipFrameSubject.clip_frame_id).where(ClipFrameSubject.clip_frame_id.in_(frame_ids))).all(),
-            )
-    finally:
-        engine2.dispose()
+    # The tag must still point at the same row: (clip_id, ordinal) is the frame's identity, so a
+    # re-score updates that row rather than replacing it.
+    assert _read_tagged_frame_ids(config, subject_id) == [tagged_frame_id]
+    frames = _read_frames(config, clip_id)
+    assert [f[0] for f in frames] == [0, 1]
+    assert frames[0][1] == tagged_frame_id
+    assert frames[0][2] == 0.7  # detector columns refreshed in place
+    assert frames[0][3].endswith("/00.jpg")
 
-    assert subjects_after == subjects_before
+
+def test_reanalyze_drops_frames_the_new_detection_does_not_produce(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """A shorter frame batch removes the surplus ordinals, and their tags go with them."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+    _set_weights_present(config)
+    cam_id = seed_camera(config)
+    _ = _ensure_clip_file(config)
+    clip_id = seed_clip(config, camera_id=cam_id, analysis_error="skipped: --no-detect")
+    _, subject_id = _seed_tagged_frames(config, clip_id, 0, 1, 2, tagged=2)
+
+    with (
+        patch("cat_watcher.__main__.load_config", return_value=config),
+        patch("cat_watcher.__main__.Detector.from_weights", return_value=_detector_mock()),
+        patch("cat_watcher.__main__.detection_for", return_value=(_detection_fields(has_cat=True), _scored_frames(0, 1))),
+    ):
+        exit_code = _run_reanalyze(make_handler_args(camera="", limit=None, all=False))
+    assert exit_code == 0
+
+    assert [f[0] for f in _read_frames(config, clip_id)] == [0, 1]
+    assert _read_tagged_frame_ids(config, subject_id) == []
 
 
 def test_reanalyze_preserves_reviewed_at(tmp_path: Path, make_config: Callable[..., Config]) -> None:

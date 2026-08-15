@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import desc, func, select
 
 from cat_watcher.amcrest_client import AmcrestClient, CameraError
 from cat_watcher.backup import run_backup
@@ -53,7 +53,6 @@ from cat_watcher.db import (
     AlertSent,
     Camera,
     Clip,
-    ClipFrame,
     ClipLabelSummary,
     Heartbeat,
     Subject,
@@ -811,7 +810,6 @@ def _reanalyze_loop(
                 continue
             _reanalyze_one_clip(
                 clip=clip,
-                session=session,
                 detector=detector,
                 ctx=ctx,
                 counts=report.for_camera(clip.camera_id),
@@ -822,12 +820,11 @@ def _reanalyze_loop(
 def _reanalyze_one_clip(
     *,
     clip: Clip,
-    session: Session,
     detector: Detector,
     ctx: _ReanalyzeContext,
     counts: _ReanalyzeCameraCounts,
 ) -> None:
-    """Re-detect one clip in place; on success replace ``clip_frames`` and repoint ``thumb_path``."""
+    """Re-detect one clip in place. On success, refresh ``clip_frames`` and repoint ``thumb_path``."""
     full_path = ctx.config.storage_root / clip.file_path
     if not full_path.is_file():
         logger.warning("reanalyze: clip %d file missing at %s; skipping", clip.id, full_path)
@@ -836,7 +833,7 @@ def _reanalyze_one_clip(
     fields, scored_frames = detection_for(detector, full_path)
     _apply_detection_fields(clip, fields)
     if fields["analysis_error"] is None and scored_frames:
-        _backfill_clip_frames(clip=clip, scored_frames=scored_frames, session=session, ctx=ctx)
+        _backfill_clip_frames(clip=clip, scored_frames=scored_frames, ctx=ctx)
     if fields["analysis_error"] is not None:
         counts.errored += 1
     else:
@@ -863,16 +860,20 @@ def _backfill_clip_frames(
     *,
     clip: Clip,
     scored_frames: tuple[ScoredFrame, ...],
-    session: Session,
     ctx: _ReanalyzeContext,
 ) -> None:
-    """Encode per-frame thumbs, replace ``clip_frames`` rows, repoint ``Clip.thumb_path``, unlink legacy thumb.
+    """Encode per-frame thumbs, refresh ``clip_frames`` in place, repoint ``Clip.thumb_path``, unlink legacy thumb.
 
-    Idempotent re-run: existing ``ClipFrame`` rows for ``clip`` are deleted before the new batch is
-    attached. Delete + insert + thumb_path repoint commit atomically with the caller's per-clip
-    session. The legacy single-frame thumb at the old ``thumb_path`` is unlinked best-effort once
-    ``thumb_path`` actually changes; a permission failure is logged so a single bad file doesn't
-    abort the whole reanalyze run.
+    ``(clip_id, ordinal)`` identifies a frame, so a re-score updates the row that ordinal already
+    has. Operator work hangs off ``clip_frames.id`` through ``clip_frame_subjects``, which cascades
+    on delete, so a delete-then-insert discards every hand-applied tag on the clip. An ordinal
+    the new detection does not produce is dropped, and its tags go with it.
+
+    A per-frame thumb filename comes from the ordinal, so a refreshed frame overwrites its own JPEG.
+    The legacy single-frame thumb at the old ``thumb_path`` is unlinked best-effort once
+    ``thumb_path`` actually changes. A permission failure is logged, so a single bad file does
+    not abort the whole reanalyze run. Row updates and the thumb_path repoint commit atomically with
+    the caller's per-clip session.
     """
     camera_name = ctx.camera_name_by_id[clip.camera_id]
     camera_tz = ctx.camera_tz_by_name.get(camera_name) or ZoneInfo(ctx.config.web.display_timezone)
@@ -883,8 +884,18 @@ def _backfill_clip_frames(
         camera_name=camera_name,
         local_dt=local_dt,
     )
-    _ = session.execute(delete(ClipFrame).where(ClipFrame.clip_id == clip.id))
-    clip.frames = clip_frames
+    stale_by_ordinal = {frame.ordinal: frame for frame in clip.frames}
+    for fresh in clip_frames:
+        existing = stale_by_ordinal.pop(fresh.ordinal, None)
+        if existing is None:
+            clip.frames.append(fresh)
+            continue
+        existing.t_offset_seconds = fresh.t_offset_seconds
+        existing.score = fresh.score
+        existing.thumb_path = fresh.thumb_path
+        existing.bbox_xyxy = fresh.bbox_xyxy
+    for surplus in stale_by_ordinal.values():
+        clip.frames.remove(surplus)
     old_thumb_relpath = clip.thumb_path
     clip.thumb_path = new_thumb_relpath
     if old_thumb_relpath != clip.thumb_path:
