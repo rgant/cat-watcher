@@ -1,17 +1,17 @@
 """Structured logging setup for cat-watcher agents.
 
 Provides :class:`JsonFormatter` and :func:`setup_logging`. Each agent's ``main()`` calls
-``setup_logging(agent_name=..., internal_root=..., level=...)`` once to wire two handlers onto the
-root logger:
+``setup_logging(agent_name=..., internal_root=..., level=...)`` once to wire one handler onto the
+root logger: a :class:`logging.handlers.RotatingFileHandler` writing JSONL records to
+``<internal_root>/logs/<agent>.jsonl`` (10 MB rotation, 7 backups). Every record is one line of
+JSON, and ``cat-watcher logs`` reads that file.
 
-* A :class:`logging.handlers.RotatingFileHandler` writing JSONL records to
-  ``<internal_root>/logs/<agent>.jsonl`` (10 MB rotation, 7 backups). Every record is one line of
-  JSON conforming to the schema in
-  ``docs/specs/2026-05-05-structured-logging-design.md``.
-* A :class:`logging.StreamHandler` on stderr at the same ``level`` as the root logger, so genuine
-  problems hit the LaunchAgent's ``<agent>.stderr.log`` fallback even if no one is reading the
-  JSONL file. Under ``--verbose``/``level=INFO``, diagnostic detail (httpx2 requests, the
-  empty-window note from amcrest_client, retries) also surfaces on stderr.
+Nothing writes records to stderr. launchd captures an agent's stderr to ``<agent>.stderr.log`` and
+never rotates it, so a second copy of every record grows without limit. stderr stays free for the
+output this module cannot reach: a traceback from a crash before or outside ``setup_logging``.
+
+The ``httpx2`` logger sits at WARNING unless the caller asks for ``verbose_http``. See
+:data:`_HTTP_LOGGER` for the reason.
 
 The formatter stamps each record with the agent slug and current PID, so existing
 ``logging.getLogger(__name__)`` call sites pick those fields up without any per-call change.
@@ -23,7 +23,6 @@ import json
 import logging
 import logging.handlers
 import os
-import sys
 import traceback
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, cast, final, override
@@ -68,6 +67,12 @@ _STANDARD_LOGRECORD_ATTRS: Final[frozenset[str]] = frozenset(
 # Module-level so tests can monkey-patch them down to small values for fast rotation assertions.
 _MAX_BYTES: int = 10 * 1024 * 1024
 _BACKUP_COUNT: int = 7
+
+# httpx2 logs one INFO record per request. Digest auth spends two requests on every camera call,
+# because the 401 challenge precedes the authenticated retry. On the deployed poller that made
+# httpx2 81% of the log lines, and half of those were the expected 401. WARNING keeps a transport
+# failure visible, and amcrest_client logs the errors that matter to an operator.
+_HTTP_LOGGER: Final[str] = "httpx2"
 
 
 def _exc_type_qualname(exc: BaseException) -> str:
@@ -120,11 +125,11 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
+def setup_logging(*, agent_name: str, internal_root: Path, level: int, verbose_http: bool = False) -> None:
     """Wire structured logging for an agent's ``main()`` entry point.
 
     Idempotent: each call replaces existing root-logger handlers rather than augmenting them, so
-    repeat invocations leave the root logger with the same two-handler shape.
+    repeat invocations leave the root logger with one file handler.
 
     Parameters
     ----------
@@ -136,6 +141,8 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
     level:
         Root logger level (typically ``logging.WARNING`` by default, ``logging.INFO`` under
         ``--verbose``).
+    verbose_http:
+        Keep the per-request records from ``httpx2``. See :data:`_HTTP_LOGGER`.
 
     """
     log_dir = internal_root / "logs"
@@ -151,10 +158,6 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
     )
     file_handler.setFormatter(formatter)
 
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(level)
-    stderr_handler.setFormatter(formatter)
-
     root = logging.getLogger()
     # Clear-then-attach makes the file handler the canonical sink. ``handler.close()`` releases the
     # open file descriptor before the handler is dropped.
@@ -162,16 +165,17 @@ def setup_logging(*, agent_name: str, internal_root: Path, level: int) -> None:
         root.removeHandler(handler)
         handler.close()
     root.addHandler(file_handler)
-    root.addHandler(stderr_handler)
     root.setLevel(level)
+    # NOTSET restores inheritance from the root level, so this stays idempotent across calls.
+    logging.getLogger(_HTTP_LOGGER).setLevel(logging.NOTSET if verbose_http else logging.WARNING)
 
 
 def setup_agent_logging(*, agent_name: str, config: Config, verbose: bool = False) -> None:
     """Wire structured logging for an agent's ``main()`` from its ``Config``.
 
-    The root logger level is ``config.log_level``, upgraded to at least ``INFO`` when ``verbose``
-    is true so a ``--verbose`` CLI flag can raise visibility without dropping the configured
-    baseline (e.g. a ``DEBUG`` config stays at ``DEBUG``).
+    The root logger level is ``config.log_level``. If ``verbose`` is true, the level rises to at
+    least ``INFO``. A ``DEBUG`` config stays at ``DEBUG``, so the flag never lifts the configured
+    baseline. ``verbose`` also restores the per-request ``httpx2`` records.
     """
     config_level = logging.getLevelNamesMapping()[config.log_level]
     level = min(config_level, logging.INFO) if verbose else config_level
@@ -179,4 +183,5 @@ def setup_agent_logging(*, agent_name: str, config: Config, verbose: bool = Fals
         agent_name=agent_name,
         internal_root=config.internal_root,
         level=level,
+        verbose_http=verbose,
     )

@@ -207,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         agent_name="cli",
         internal_root=config.internal_root,
         level=logging.INFO if args.verbose else logging.WARNING,
+        verbose_http=args.verbose,
     )
 
     if args.command == "logs":

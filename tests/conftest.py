@@ -58,10 +58,18 @@ def restore_root_logger() -> Iterator[logging.Logger]:
 
     Yields the root logger so tests that exercise ``setup_agent_logging`` (or any other
     handler-attaching code) can assert on it without leaking handler state to other tests.
+
+    The ``httpx2`` logger is isolated too. ``setup_logging`` sets its level, and other modules
+    toggle ``disabled`` on their own loggers. Under pytest-randomly that state can reach an
+    unrelated test, so ``level``, ``disabled``, and ``propagate`` are reset here and restored after.
     """
     root = logging.getLogger()
+    http_logger = logging.getLogger("httpx2")
     saved_handlers = list(root.handlers)
     saved_level = root.level
+    saved_http = (http_logger.level, http_logger.disabled, http_logger.propagate)
+    http_logger.disabled = False
+    http_logger.propagate = True
     try:
         yield root
     finally:
@@ -71,6 +79,9 @@ def restore_root_logger() -> Iterator[logging.Logger]:
         for handler in saved_handlers:
             root.addHandler(handler)
         root.setLevel(saved_level)
+        http_logger.setLevel(saved_http[0])
+        http_logger.disabled = saved_http[1]
+        http_logger.propagate = saved_http[2]
 
 
 @pytest.fixture

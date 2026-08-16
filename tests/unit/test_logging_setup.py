@@ -140,15 +140,10 @@ def test_setup_logging_creates_logs_dir_and_writes_jsonl(tmp_path: Path) -> None
 
 
 def test_setup_logging_is_idempotent(tmp_path: Path) -> None:
-    """Repeated calls leave the root logger with exactly one file + one stream handler."""
+    """Repeated calls leave the root logger with exactly one file handler."""
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
-    handlers = logging.getLogger().handlers
-    rotating_count = sum(1 for h in handlers if isinstance(h, logging.handlers.RotatingFileHandler))
-    # ``RotatingFileHandler`` subclasses ``StreamHandler``; exact-type comparison avoids double-counting.
-    stream_count = sum(1 for h in handlers if type(h) is logging.StreamHandler)
-    assert rotating_count == 1
-    assert stream_count == 1
+    assert [type(h) for h in logging.getLogger().handlers] == [logging.handlers.RotatingFileHandler]
 
 
 def test_setup_logging_does_not_call_basicconfig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,21 +173,56 @@ def test_rotation_creates_backup_file(tmp_path: Path, monkeypatch: pytest.Monkey
     assert rolled, f"expected at least one rotated backup, found: {backups}"
 
 
-def test_stderr_handler_respects_level_parameter(tmp_path: Path) -> None:
-    """The stderr handler must match the root logger level.
+def test_setup_logging_attaches_no_stderr_handler(tmp_path: Path) -> None:
+    """The root logger writes records to the JSONL file only, at every level.
 
-    Without this, ``--verbose`` (INFO) wouldn't surface INFO records on stderr — they'd only reach
-    the JSONL file — and the default (WARNING) wouldn't keep stderr quiet.
+    A stderr handler copies every record into the LaunchAgent's ``<agent>.stderr.log``, which
+    launchd never rotates. On the deployed poller that file reached 183 MB against a 4.9 MB JSONL.
+    stderr stays free for a traceback that escapes before this function runs.
+    """
+    for level in (logging.DEBUG, logging.INFO, logging.WARNING):
+        setup_logging(agent_name="poller", internal_root=tmp_path, level=level)
+        assert [type(h) for h in logging.getLogger().handlers] == [logging.handlers.RotatingFileHandler]
+
+
+def test_http_request_records_stay_out_of_the_log_by_default(tmp_path: Path) -> None:
+    """An httpx2 INFO record misses the JSONL. A cat_watcher record at the same level reaches it.
+
+    httpx2 logs one INFO line per request, and Digest auth spends two requests on every call. On
+    the deployed poller those lines were 81% of the file, and half of them were the 401 challenge.
     """
     setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
-    handlers = logging.getLogger().handlers
-    info_streams = sum(1 for h in handlers if type(h) is logging.StreamHandler and h.level == logging.INFO)
-    assert info_streams == 1, f"expected one StreamHandler at INFO, got handlers={handlers!r}"
+    logging.getLogger("httpx2").info('HTTP Request: GET http://cam/cgi-bin/x "HTTP/1.1 401 Unauthorized"')
+    logging.getLogger("cat_watcher.quiet_http_test").info("poll_tick")
 
-    setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.WARNING)
-    handlers = logging.getLogger().handlers
-    warning_streams = sum(1 for h in handlers if type(h) is logging.StreamHandler and h.level == logging.WARNING)
-    assert warning_streams == 1, f"expected one StreamHandler at WARNING, got handlers={handlers!r}"
+    text = (tmp_path / "logs" / "poller.jsonl").read_text(encoding="utf-8")
+    assert "poll_tick" in text
+    assert "401 Unauthorized" not in text
+
+
+def test_http_client_warning_still_reaches_the_log(tmp_path: Path) -> None:
+    """A transport failure stays visible, because the quieting stops at WARNING."""
+    setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
+    logging.getLogger("httpx2").warning("connect timeout")
+
+    assert "connect timeout" in (tmp_path / "logs" / "poller.jsonl").read_text(encoding="utf-8")
+
+
+def test_verbose_http_restores_request_records(tmp_path: Path) -> None:
+    """``verbose_http=True`` puts the per-request lines back for a debugging run."""
+    setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO, verbose_http=True)
+    logging.getLogger("httpx2").info('HTTP Request: GET http://cam/cgi-bin/x "HTTP/1.1 401 Unauthorized"')
+
+    assert "401 Unauthorized" in (tmp_path / "logs" / "poller.jsonl").read_text(encoding="utf-8")
+
+
+def test_records_do_not_reach_stderr(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A logged record lands in the JSONL file and writes nothing to stderr."""
+    setup_logging(agent_name="poller", internal_root=tmp_path, level=logging.INFO)
+    logging.getLogger("cat_watcher.stderr_test").warning("must not reach stderr")
+
+    assert "must not reach stderr" in (tmp_path / "logs" / "poller.jsonl").read_text(encoding="utf-8")
+    assert capsys.readouterr().err == ""
 
 
 def test_single_line_invariant_with_embedded_newlines() -> None:
@@ -231,6 +261,18 @@ def test_config_debug_without_verbose_sets_debug_level(make_config: Callable[...
     config = _config_with_level(make_config, storage_dirs, "DEBUG")
     setup_agent_logging(agent_name="poller", config=config, verbose=False)
     assert logging.getLogger().level == logging.DEBUG
+
+
+def test_agent_verbose_restores_http_request_records(
+    make_config: Callable[..., Config],
+    storage_dirs: tuple[Path, Path],
+) -> None:
+    """``--verbose`` reaches the httpx2 logger, so a debugging run sees every camera request."""
+    config = _config_with_level(make_config, storage_dirs, "INFO")
+    setup_agent_logging(agent_name="poller", config=config, verbose=True)
+    logging.getLogger("httpx2").info('HTTP Request: GET http://cam "HTTP/1.1 401 Unauthorized"')
+
+    assert "401 Unauthorized" in (config.internal_root / "logs" / "poller.jsonl").read_text(encoding="utf-8")
 
 
 def test_config_info_without_verbose_sets_info_level(make_config: Callable[..., Config], storage_dirs: tuple[Path, Path]) -> None:
