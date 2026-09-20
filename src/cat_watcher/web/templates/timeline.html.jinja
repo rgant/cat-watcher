@@ -11,7 +11,9 @@
   {% set svg_height = (cameras|length * lane_height) + axis_height %}
   <section id="timeline-region" aria-label="Activity timeline">
     {% if not storage_online %}
-      <p class="banner banner-offline" role="status" aria-live="polite">External storage offline — clip playback and thumbnails unavailable.</p>
+      <p class="banner banner-offline"
+         role="status"
+         aria-live="polite">External storage offline — clip playback and thumbnails unavailable.</p>
     {% endif %}
     <header class="timeline-header">
       <h1>Timeline</h1>
