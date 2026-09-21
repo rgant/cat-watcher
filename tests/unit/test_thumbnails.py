@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import pytest
+from image_helpers import gradient_rgb
 from PIL import Image
 
 from cat_watcher.detector import ScoredFrame
@@ -23,18 +23,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _gradient_rgb(height: int, width: int) -> np.ndarray:
-    """Deterministic RGB24 ndarray with a horizontal gradient — gives JPEG something to compress."""
-    arr = np.zeros((height, width, 3), dtype=np.uint8)
-    arr[..., 0] = np.linspace(0, 255, width, dtype=np.uint8)[np.newaxis, :]
-    arr[..., 1] = np.linspace(0, 255, height, dtype=np.uint8)[:, np.newaxis]
-    arr[..., 2] = 128
-    return arr
-
-
 def test_encode_frame_writes_valid_jpeg(tmp_path: Path) -> None:
     """An over-width frame produces a JPEG and gets resized down to ``THUMB_MAX_WIDTH``."""
-    arr = _gradient_rgb(270, 480)
+    arr = gradient_rgb(270, 480)
     dest = tmp_path / "out.jpg"
 
     encode_frame(arr, dest)
@@ -47,7 +38,7 @@ def test_encode_frame_writes_valid_jpeg(tmp_path: Path) -> None:
 
 def test_encode_frame_preserves_aspect_ratio(tmp_path: Path) -> None:
     """A frame under ``THUMB_MAX_WIDTH`` must not be upscaled — original dimensions preserved."""
-    arr = _gradient_rgb(100, 200)
+    arr = gradient_rgb(100, 200)
     dest = tmp_path / "small.jpg"
 
     encode_frame(arr, dest)
@@ -96,9 +87,9 @@ def test_best_frame_relpath_raises_on_empty() -> None:
 def test_write_clip_frames_emits_records_in_ordinal_order(tmp_path: Path) -> None:
     """Out-of-order input is sorted; one JPEG per frame lands at ``<per_clip_dir>/<NN>.jpg``."""
     per_clip_dir = "thumbs/pantry/2026-05-08/103045"
-    frame_a = _gradient_rgb(120, 200)
-    frame_b = _gradient_rgb(120, 200)
-    frame_c = _gradient_rgb(120, 200)
+    frame_a = gradient_rgb(120, 200)
+    frame_b = gradient_rgb(120, 200)
+    frame_c = gradient_rgb(120, 200)
     # Non-sorted insertion order exercises the sort.
     scored = [
         ScoredFrame(ordinal=2, t_offset_seconds=2.0, score=0.40, frame=frame_c),

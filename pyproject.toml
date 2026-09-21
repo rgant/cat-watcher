@@ -51,6 +51,7 @@ dev = [
   "pytest-randomly>=5.0.0,<6",
   "respx>=0.23.1,<0.24",
   "ruff>=0.16.8,<0.17",
+  "scikit-learn>=1.9.1,<2",
 ]
 
 [tool.pixi.workspace]
@@ -81,6 +82,18 @@ description = "Evaluate alert rules and dispatch one tick"
 cmd = "pytest"
 depends-on = [ "format", "lint" ]
 description = "CI gate: format + lint + test"
+[tool.pixi.tasks.classifier-benchmark]
+cmd = "cat-watcher classifier benchmark"
+description = "Score a trained cat classifier on the held-out test split"
+[tool.pixi.tasks.classifier-export]
+cmd = "cat-watcher classifier export"
+description = "Build the cat-crop dataset and manifest from operator frame labels"
+[tool.pixi.tasks.classifier-predict]
+cmd = "cat-watcher classifier predict"
+description = "Spot-check a trained cat classifier on untagged clips"
+[tool.pixi.tasks.classifier-train]
+cmd = "cat-watcher classifier train"
+description = "Train a cat classifier on the exported crop dataset"
 [tool.pixi.tasks.clean]
 cmd = """\
   find . -type d \\( -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \\) -exec rm -rf {} + 2>/dev/null
@@ -561,7 +574,7 @@ known_first_party = [ "cat_watcher" ]
 [tool.deptry.per_rule_ignores]
 DEP002 = [ "jinja2", "python-multipart" ]
 DEP003 = [ "numpy", "ultralytics" ]
-DEP004 = [ "arel" ]
+DEP004 = [ "arel", "sklearn" ]
 
 [tool.pyproject-fmt]
 keep_full_version = true

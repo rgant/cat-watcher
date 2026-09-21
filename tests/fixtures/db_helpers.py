@@ -212,6 +212,37 @@ def tag_clip_frame(engine: Engine, *, clip_id: int, subject_id: int, reviewed_at
             clip.reviewed_at = reviewed_at
 
 
+def add_clip(engine: Engine, cam_id: int, *, start_ts: datetime, name: str, has_cat: bool = True) -> int:
+    """Insert a ``Clip`` row through a short-lived session, and return its id."""
+    clip = build_test_clip(cam_id, start_ts=start_ts, source_filename=name, has_cat=has_cat)
+    with get_session(engine) as session:
+        session.add(clip)
+    return clip.id
+
+
+def add_clip_frame(engine: Engine, clip_id: int, ordinal: int, *, score: float = 0.7, thumb_path: str | None = None) -> int:
+    """Insert a ``ClipFrame`` row at ``ordinal`` through a short-lived session, and return its id."""
+    frame = make_clip_frame(clip_id, ordinal, score=score, thumb_path=thumb_path)
+    with get_session(engine) as session:
+        session.add(frame)
+    return frame.id
+
+
+def tag_frame(engine: Engine, frame_id: int, subject_id: int) -> None:
+    """Link a ``ClipFrame`` to a ``Subject`` through ``ClipFrameSubject``, through a short-lived session."""
+    with get_session(engine) as session:
+        session.add(ClipFrameSubject(clip_frame_id=frame_id, subject_id=subject_id))
+
+
+def add_event_subject(engine: Engine, *, slug: str, display_order: int) -> int:
+    """Insert a ``kind='event'`` ``Subject`` row, and return its id. No other seeder builds one."""
+    with get_session(engine) as session:
+        subj = Subject(slug=slug, display_name=slug, kind="event", display_order=display_order)
+        session.add(subj)
+        session.flush()
+        return subj.id
+
+
 def scored_frames_with_boxes(frame: np.ndarray) -> tuple[ScoredFrame, ...]:
     """Return three ``ScoredFrame`` instances covering box-present and box-absent cases."""
     return (

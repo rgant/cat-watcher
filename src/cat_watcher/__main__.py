@@ -11,9 +11,9 @@ Sub-commands:
   beyond 5 minutes prints a loud failure marker but the loop completes for the rest.
 * ``test-notification`` — trigger ``send_email`` + ``send_macos_notification`` so the macOS
   permission prompt fires at install time, not on the first real alert.
-* ``fetch-models`` — pull configured detector weights into ``<internal_root>/models/``. Idempotent
-  on filename: a no-op if the target file already exists. To refresh, point ``detector.model`` at a
-  new filename or delete the existing file — there's no in-place update or checksum verification.
+* ``fetch-models [--model NAME]``: pull weights into ``<internal_root>/models/``. Default is
+  ``detector.model``. A no-op when the target file exists with non-zero size. To refresh, name a
+  new file or delete the existing one. This performs no in-place update and no checksum check.
 * ``reanalyze [--camera N] [--limit N] [--all]`` — re-score clips whose detection failed (default
   filter: ``analysis_error IS NOT NULL``) or every clip (``--all``, e.g. after a model upgrade).
   Preserves all ``clip_frame_subjects`` rows plus ``reviewed_at`` on ``clips``. Only detector-output
@@ -22,8 +22,11 @@ Sub-commands:
 * ``backup`` — proxy to :func:`cat_watcher.backup.run_backup` (same code path the LaunchAgent uses).
 * ``restore-backup <date>`` — copy a dated backup file onto ``<internal_root>/cat_watcher.sqlite``.
   Refuses while any cat-watcher LaunchAgent is loaded; operator must ``launchctl bootout`` first.
+* ``classifier export|train|benchmark|predict``: build a crop dataset, train, benchmark a
+  checkpoint, or spot-check untagged clips. See :mod:`cat_watcher.classifier.cli`.
 """
 # ruff: noqa: T201  # Command line tools print to stdout
+# pylint: disable=too-many-lines  # a flat registry of independent CLI commands: length tracks command count, not complexity to split
 
 import argparse
 import hashlib
@@ -46,6 +49,8 @@ from sqlalchemy import desc, func, select
 
 from cat_watcher.amcrest_client import AmcrestClient, CameraError
 from cat_watcher.backup import run_backup
+from cat_watcher.classifier.cli import ClassifierNamespace, configure_classifier_parser
+from cat_watcher.classifier.cli import run as run_classifier
 from cat_watcher.config import CameraConfig, load_config
 from cat_watcher.db import (
     DB_FILENAME,
@@ -119,7 +124,7 @@ _EXIT_UNREACHABLE = 4
 _EXIT_MISSING_DEPENDENCY = 5
 
 
-class _ParsedArgs(LogsNamespace):
+class _ParsedArgs(LogsNamespace, ClassifierNamespace):
     """Typed view over the umbrella's argparse output.
 
     Defaults are documented as class attributes so a handler that reads a flag the user didn't pass
@@ -140,6 +145,7 @@ class _ParsedArgs(LogsNamespace):
     clip_id: int = 0
     all: bool = False
     backup_date: str = ""
+    fetch_model: str | None = None  # distinct from the inherited ``ClassifierNamespace.model`` (a checkpoint ``Path``)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -170,10 +176,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _ = subparsers.add_parser("test-cameras", parents=[common], help="Probe each configured camera; report drift")
     _ = subparsers.add_parser("test-notification", parents=[common], help="Send a test alert via configured channels")
-    _ = subparsers.add_parser(
+    fetch_models = subparsers.add_parser(
         "fetch-models",
         parents=[common],
-        help="Download detector weights into <internal_root>/models; delete file or change detector.model to refresh",
+        help="Download weights into <internal_root>/models. Delete the file or pass --model to refresh.",
+    )
+    _ = fetch_models.add_argument(
+        "--model",
+        dest="fetch_model",
+        default=None,
+        metavar="NAME",
+        help="Weights filename (default: detector.model)",
     )
 
     reanalyze = subparsers.add_parser("reanalyze", parents=[common], help="Re-score clips whose analysis failed (or all)")
@@ -194,6 +207,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     logs = subparsers.add_parser("logs", parents=[common], help="Tail/filter structured JSONL logs from cat-watcher agents")
     configure_logs_parser(logs)
+
+    classifier = subparsers.add_parser("classifier", parents=[common], help="Crop classifier: export a dataset, train, or benchmark")
+    configure_classifier_parser(classifier)
 
     return parser
 
@@ -216,6 +232,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             internal_root=config.internal_root,
             tz=ZoneInfo(config.web.display_timezone),
         )
+
+    if args.command == "classifier":
+        return run_classifier(args, config=config)
 
     handlers = {
         "import-local": _run_import_local,
@@ -645,23 +664,24 @@ def _run_test_notification(args: _ParsedArgs) -> int:
 
 
 def _run_fetch_models(args: _ParsedArgs) -> int:
-    """Download configured detector weights to ``<internal_root>/models/<detector.model>``.
+    """Download weights to ``<internal_root>/models/<name>``. ``--model`` defaults to ``detector.model``.
 
-    Idempotent on filename: a no-op when the target file already exists with non-zero size. There's
-    no in-place update or checksum verification — to refresh, point ``detector.model`` at a new
-    filename or delete the existing file. The URL targets the Ultralytics assets release CDN — same
-    source YOLO's auto-downloader uses.
+    When the target file exists with non-zero size, this call is a no-op. To refresh, name a new
+    file or delete the existing one. This performs no in-place update and no checksum check. The
+    URL targets the Ultralytics assets release CDN, the same source the YOLO auto-downloader
+    itself uses.
     """
     config = load_config(args.config)
     models_dir = config.internal_root / _MODELS_SUBDIR
     models_dir.mkdir(parents=True, exist_ok=True)
-    target = models_dir / config.detector.model
+    model_name = args.fetch_model or config.detector.model
+    target = models_dir / model_name
 
     if target.is_file() and target.stat().st_size > 0:
         print(f"fetch-models: {target} already present ({target.stat().st_size} bytes); no-op")
         return _EXIT_OK
 
-    url = f"{_DETECTOR_WEIGHTS_BASE_URL}/{config.detector.model}"
+    url = f"{_DETECTOR_WEIGHTS_BASE_URL}/{model_name}"
     print(f"fetch-models: downloading {url} -> {target}")
     # ``.part`` + atomic rename so a SIGKILL or Ctrl-C mid-download doesn't leave a truncated file
     # at ``target`` that a future invocation's existence check would treat as a complete download.

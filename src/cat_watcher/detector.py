@@ -29,6 +29,7 @@ failure on the ``clips.analysis_error`` column rather than crash the poll tick.
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -57,7 +58,7 @@ class DetectorError(RuntimeError):
     """Raised when ffmpeg / ffprobe fail or return unparseable output."""
 
 
-class _CatHit(NamedTuple):
+class CatHit(NamedTuple):
     """The highest-scoring cat-class detection within a single frame (raw confidence + box).
 
     Threshold gating is applied by :meth:`Detector._aggregate`, not at construction.
@@ -96,11 +97,36 @@ def _yolo_factory(model_path: Path) -> YOLO:  # pragma: no cover  # boundary; te
     ``ultralytics`` is imported lazily because the package pulls torch + torchvision (~250 MB),
     which isn't needed by callers that only consume :class:`DetectionResult` (e.g. the web UI).
     """
+    # ``ultralytics`` reads ``YOLO_AUTOINSTALL`` once, when ``ultralytics.utils`` first imports.
+    # Its default is on, so a missing optional package makes it run ``pip install`` at runtime.
+    # A pixi environment holds no pip, so that attempt only costs two network timeouts and
+    # reports ``ModuleNotFoundError`` in place of the real fault. ``setdefault`` leaves an
+    # operator free to turn it back on.
+    _ = os.environ.setdefault("YOLO_AUTOINSTALL", "false")
     # ``ultralytics`` exposes YOLO via a module-level ``__getattr__`` lazy-loader; neither
     # basedpyright nor mypy can follow that indirection, so both flag this canonical import.
     from ultralytics import YOLO  # type: ignore[attr-defined]  # noqa: PLC0415
 
     return YOLO(str(model_path))
+
+
+def load_yolo(model_path: Path) -> YOLO:
+    """Load a YOLO model at ``model_path``. A public seam over :func:`_yolo_factory`.
+
+    Calls ``_yolo_factory`` by name so a test that patches
+    ``cat_watcher.detector._yolo_factory`` still takes effect here.
+    """
+    return _yolo_factory(model_path)
+
+
+def extract_frame_at(clip_path: Path, timestamp: float) -> np.ndarray:
+    """Decode the frame at ``timestamp`` (seconds) from ``clip_path`` into an RGB24 ``ndarray``.
+
+    Probes the clip for its width and height, then decodes one frame. Raises
+    :class:`DetectorError` the same way :func:`_probe_video` and :func:`_extract_frame` do.
+    """
+    _duration, width, height = _probe_video(clip_path)
+    return _extract_frame(clip_path, timestamp, width=width, height=height)
 
 
 def _hash_weights(model_path: Path) -> str:
@@ -269,7 +295,7 @@ class Detector:
             # ``YOLO.__call__`` returns bare ``list`` (no element type); cast at the boundary so
             # downstream code can access Results attributes directly.
             results = cast("list[Results]", self._model(frame, verbose=False))
-            hit = self._best_cat_in_frame(results)
+            hit = best_cat_box(results)
             score = hit.score if hit is not None else 0.0
             scored.append(
                 ScoredFrame(
@@ -301,32 +327,33 @@ class Detector:
             scored_frames=tuple(scored),
         )
 
-    def _best_cat_in_frame(self, results: list[Results]) -> _CatHit | None:
-        """Return the highest-scoring cat-class detection in this frame, regardless of threshold.
 
-        ``None`` only when there are zero cat-class boxes at all. The threshold filter lives in
-        :meth:`_aggregate` so sub-threshold cat scores still flow into ``ScoredFrame.score`` for
-        contact-sheet diagnostics.
-        """
-        for result in results:
-            boxes = result.boxes
-            if boxes is None:
-                continue
+def best_cat_box(results: list[Results]) -> CatHit | None:
+    """Return the highest-scoring cat-class detection in this frame, regardless of threshold.
 
-            cls = np.asarray(boxes.cls, dtype=np.float64)
-            conf = np.asarray(boxes.conf, dtype=np.float64)
-            xyxy = np.asarray(boxes.xyxy, dtype=np.float64)
-            mask = np.equal(cls, _COCO_CAT_CLASS_ID)
-            if not mask.any():
-                continue
+    ``None`` only when there are zero cat-class boxes at all. The threshold filter lives in
+    :meth:`Detector._aggregate` so sub-threshold cat scores still flow into ``ScoredFrame.score``
+    for contact-sheet diagnostics.
+    """
+    for result in results:
+        boxes = result.boxes
+        if boxes is None:
+            continue
 
-            # Mask non-cat detections so argmax picks among only the cat-class boxes.
-            top_idx = int(np.argmax(np.where(mask, conf, -1.0)))
+        cls = np.asarray(boxes.cls, dtype=np.float64)
+        conf = np.asarray(boxes.conf, dtype=np.float64)
+        xyxy = np.asarray(boxes.xyxy, dtype=np.float64)
+        mask = np.equal(cls, _COCO_CAT_CLASS_ID)
+        if not mask.any():
+            continue
 
-            top_score = cast("list[float]", conf.tolist())[top_idx]
-            top_box = cast("list[list[float]]", xyxy.tolist())[top_idx]
-            return _CatHit(
-                score=top_score,
-                box=(top_box[0], top_box[1], top_box[2], top_box[3]),
-            )
-        return None
+        # Mask non-cat detections so argmax picks among only the cat-class boxes.
+        top_idx = int(np.argmax(np.where(mask, conf, -1.0)))
+
+        top_score = cast("list[float]", conf.tolist())[top_idx]
+        top_box = cast("list[list[float]]", xyxy.tolist())[top_idx]
+        return CatHit(
+            score=top_score,
+            box=(top_box[0], top_box[1], top_box[2], top_box[3]),
+        )
+    return None

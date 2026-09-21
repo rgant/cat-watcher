@@ -29,7 +29,7 @@ The production mini is x86_64 and never runs any stage of this pipeline. Its
 
 ## Global Constraints
 
-- **Spec:** `docs/specs/2026-06-21-cat-classifier-design.md`. Every task's
+- **Spec:** `docs/specs/2026-09-20-cat-classifier-design.md`. Every task's
   requirements implicitly include it.
 - **Dependencies:** use the appropriate, well-established tool for each job. Add
   any new dependency with the pixi CLI only. **Never** edit `pyproject.toml`
@@ -149,7 +149,9 @@ square with padding, clamp to frame bounds.
       pad_frac: float = PAD_FRAC,
   ) -> tuple[int, int, int, int]:
       """Return integer (x1, y1, x2, y2) for a square crop centered on ``box``,
-      side = max(box_w, box_h) * (1 + pad_frac), clamped to [0, frame_w]×[0, frame_h].
+      side = max(box_w, box_h) * (1 + pad_frac). Clamp BOTH bounds of each axis to
+      [0, frame_w] and [0, frame_h], so a box centered outside the frame cannot invert.
+      Then widen any axis whose extent is 0 to 1 pixel, inside the frame.
       Clamping at an edge may yield a non-square rect; that is acceptable."""
   ```
 
@@ -162,20 +164,24 @@ square with padding, clamp to frame bounds.
 - A box near the top-left corner clamps `x1`/`y1` to 0 (no negative coords).
 - A box near the bottom-right clamps `x2`/`y2` to `frame_w`/`frame_h` exactly.
 - A box larger than the frame returns exactly `(0, 0, frame_w, frame_h)`.
+- A sub-pixel box, for example 0.4px wide, still returns `x1 < x2` and
+  `y1 < y2`. An axis must never round to zero extent.
+- A box centered outside the frame returns a rect inside the frame, with
+  `x1 < x2`. Both bounds of each axis clamp, so the result cannot invert.
 - Every returned value is an `int`, with `x1 < x2` and `y1 < y2`.
 
-- [ ] **Step 1: Write failing tests** in
+- [x] **Step 1: Write failing tests** in
       `tests/unit/test_classifier_geometry.py`. Cover every bullet above. Assert
       exact integer tuples for fixed inputs.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_geometry.py -q`. Expect
       collection/import error or assertion failure (function undefined).
-- [ ] **Step 3: Implement** `geometry.py` to satisfy the contract. No I/O, no
+- [x] **Step 3: Implement** `geometry.py` to satisfy the contract. No I/O, no
       third-party imports beyond stdlib.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_geometry.py -q`. Expect all
       pass.
-- [ ] **Step 5: Lint**:
+- [x] **Step 5: Lint**:
       `pixi run lint src/cat_watcher/classifier/geometry.py tests/unit/test_classifier_geometry.py`.
       Expect clean.
 
@@ -207,8 +213,12 @@ clip's cat so both classes appear in every split.
       seed: int = SEED,
   ) -> dict[int, str]:
       """Return clip_id -> split ('train'|'val'|'test'). Stratified per cat slug:
-      within each class the clips are sorted, deterministically shuffled with ``seed``,
-      and partitioned by ``ratios``. Floor-based partitioning; remainder clips go to train."""
+      within each class the clips are sorted by a seeded hash key and partitioned by
+      ``ratios``. Give every split one clip first, then distribute the remaining
+      ``count - 3`` clips by ``ratios``: floor for val and test, the rest to train. That
+      guarantees each class reaches each split, and it cannot produce a negative count
+      for any ``ratios`` tuple. A class with fewer than 3 clips raises ValueError,
+      because three splits need three clips."""
   ```
 
 **Behavioral requirements (one test each):**
@@ -224,20 +234,34 @@ clip's cat so both classes appear in every split.
   match the ratio within ±1.
 - No leakage by construction: each clip maps to exactly one split. Assert that
   the split sets are disjoint and that they cover the input.
-- The ratios must sum to 1.0. A tuple that does not sum to 1.0 raises
-  `ValueError`.
+- The ratios must sum to 1.0, and no ratio is negative. A tuple that fails
+  either rule raises `ValueError`. A negative ratio passes a sum check alone,
+  and then drives a split count negative. The guarantee is that any tuple which
+  passes validation produces exactly `count` labels.
+- A class of 3 to 6 clips still puts at least one clip in val and one in test. A
+  plain floor of 0.15 gives zero below 7 members, which silently empties both
+  splits. Assert the counts for a class of 3, of 4, and of 6.
+- A class with 1 or 2 clips raises `ValueError`. The message names the class and
+  the count.
+- A large class is unchanged by the minimum rule. Assert 294 clips split
+  206/44/44, and 194 clips split 136/29/29. This is a regression guard. It
+  passes against the older partition too, by design.
+- An extreme `ratios` tuple never crashes and never yields a negative count.
+  Assert `ratios=(0.0, 0.0, 1.0)` at 3 clips and at 10 clips.
 
-- [ ] **Step 1: Write failing tests** that cover the bullets. Build inputs with
+- [x] **Step 1: Write failing tests** that cover the bullets. Build inputs with
       `dict` comprehensions. Assert on counts and sets, not on exact ids, except
       for one small fixed seeded case.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_splitting.py -q`.
-- [ ] **Step 3: Implement** `splitting.py` with `random.Random(seed)`. Never use
-      the global RNG. Sort the class members before the shuffle, for
-      reproducibility.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 3: Implement** `splitting.py` with a hash-derived sort key. Use
+      `sha256("<seed>:<clip_id>")` and sort each class by that key. Do not use
+      the `random` module. The `random.shuffle` algorithm is a CPython
+      implementation detail, so a Python upgrade can move a clip between splits.
+      A hash key holds forever.
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_splitting.py -q`.
-- [ ] **Step 5: Lint** the two files. Expect clean.
+- [x] **Step 5: Lint** the two files. Expect clean.
 
 ---
 
@@ -291,21 +315,21 @@ scikit-learn, the dependency the benchmark needs.
 - Empty covered set at a high threshold yields coverage 0.0 and
   accuracy_on_covered 0.0 (no division-by-zero crash).
 
-- [ ] **Step 1: Add scikit-learn**:
+- [x] **Step 1: Add scikit-learn**:
       `pixi add --pypi --feature dev scikit-learn`. The CLI updates
       `pyproject.toml` and the lockfile. Confirm with
       `pixi run python -c "import sklearn; print(sklearn.__version__)"`
       succeeds.
-- [ ] **Step 2: Write failing tests** for the abstain sweep with small
+- [x] **Step 2: Write failing tests** for the abstain sweep with small
       hand-computed fixtures and exact expected numbers (`pytest.approx` for
       floats).
-- [ ] **Step 3: Run to verify failure**:
+- [x] **Step 3: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_metrics.py -q`.
-- [ ] **Step 4: Implement** `metrics.py` as plain Python over `Prediction.conf`.
+- [x] **Step 4: Implement** `metrics.py` as plain Python over `Prediction.conf`.
       Use no third-party imports.
-- [ ] **Step 5: Run to verify pass**:
+- [x] **Step 5: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_metrics.py -q`.
-- [ ] **Step 6: Lint**. Expect clean.
+- [x] **Step 6: Lint**. Expect clean.
 
 ---
 
@@ -360,6 +384,19 @@ seeds):**
 - A frame tagged with one cat **and** one event subject is included, with the
   cat slug. An event tag does not change the cat-tag count.
 - A frame with no cat tags (only an event, or untagged) is excluded.
+- A frame tagged with an ARCHIVED cat is excluded. `resolve_cat_classes` already
+  drops an archived cat from the class order, so a row naming one carries a slug
+  that the canonical tuple does not hold. The export then writes a class
+  directory that the manifest never names, and the model trains on more folders
+  than the sidecar records.
+- The archived filter must NOT enter the cat-tag counting subquery. The count
+  decides whether a frame is ambiguous, and a frame that shows two cats stays
+  ambiguous after someone archives one of them. Count every `kind='cat'` tag
+  first, then exclude a surviving row whose cat is archived.
+- Test the whole matrix, because these rules interact. One active cat is
+  included. One archived cat is excluded. An active cat with an archived cat is
+  excluded. An active cat with an event is included. An archived cat with an
+  event is excluded. Two active cats are excluded.
 - The result is stable and ordered, for example by clip_id then ordinal, so the
   downstream split and manifest stay deterministic.
 
@@ -371,18 +408,18 @@ seeds):**
   `seed_cat_subject` makes only `kind='cat'` rows, so seed the event `Subject`
   directly.
 
-- [ ] **Step 1: Write failing tests** exercising each inclusion/exclusion rule
+- [x] **Step 1: Write failing tests** exercising each inclusion/exclusion rule
       against a seeded `alembic_engine`.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_labels_query.py -q`.
-- [ ] **Step 3: Implement** `labels_query.py`. For the "exactly one cat" rule,
+- [x] **Step 3: Implement** `labels_query.py`. For the "exactly one cat" rule,
       group by `clip_frame_id` over a join filtered to `Subject.kind == 'cat'`,
       with `HAVING count(*) == 1`. Then join `Clip` for `file_path`. Use
       `func.count` with the existing pylint `not-callable` inline note pattern
       seen on the `frame_count` label in `labels.py`.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_labels_query.py -q`.
-- [ ] **Step 5: Lint**. Expect clean.
+- [x] **Step 5: Lint**. Expect clean.
 
 ---
 
@@ -446,7 +483,8 @@ unit-testable without ffmpeg/YOLO.
       candidates: int
       crops_per_class: dict[str, int]
       crops_by_source: dict[str, int]   # {"clip": N, "thumb": M} — mixed-resolution transparency
-      localization_misses: int          # conf-0.10 misses; NOT production recall
+      localization_misses: int          # conf-0.10 YOLO misses only; NOT production recall
+      frame_load_failures: int          # frame unreadable from clip AND thumb; kept separate
       mixed_class_clips: int            # clips dropped because their frames carry both cats
       seed: int
       ratios: tuple[float, float, float]
@@ -459,17 +497,28 @@ unit-testable without ffmpeg/YOLO.
       summary: ExportSummary
       records: list[CropRecord]
 
+  @dataclass(frozen=True)
+  class ExportParams:
+      """The tunable knobs of one export. These are exactly what ``dataset_hash`` covers."""
+      ratios: tuple[float, float, float] = RATIOS
+      seed: int = SEED
+      pad_frac: float = PAD_FRAC
+      localize_conf: float = LOCALIZE_CONF
+      min_crops_per_class: int = MIN_CROPS_PER_CLASS
+
+  @dataclass(frozen=True)
+  class ExportSources:
+      """The injected boundaries. ``sources.py`` builds both, and Task 11 reuses the pair."""
+      frame_source: FrameSource
+      localizer: Localizer
+
   def export_dataset(
       rows: list[CatFrameRow],
       *,
       classes: tuple[str, ...],
       dataset_root: Path,                 # storage_root / DATASET_SUBDIR
-      frame_source: FrameSource,
-      localizer: Localizer,
-      ratios: tuple[float, float, float] = RATIOS,
-      seed: int = SEED,
-      pad_frac: float = PAD_FRAC,
-      localize_conf: float = LOCALIZE_CONF,   # recorded in the summary; hashed
+      sources: ExportSources,
+      params: ExportParams = ExportParams(),
   ) -> ExportManifest:
       """For each row: load frame -> localize -> crop -> write
       dataset_root/<split>/<cat_slug>/<clip_id>_<ordinal>.jpg. Rows whose frame_source
@@ -493,7 +542,10 @@ return synthetic numpy arrays and fixed boxes. Write to `tmp_path`:**
   `dataset_root/<split>/<slug>/<clip_id>_<ordinal>.jpg`. The manifest `records`
   holds N entries with correct fields.
 - A row whose `frame_source` returns `None` is excluded and increments
-  `localization_misses`. No file is written for it.
+  `frame_load_failures`, NOT `localization_misses`. No file is written for it.
+  The spec defines the localization miss as a frame where YOLO at 0.10 found no
+  box. An unreadable frame never reached YOLO, so merging the two corrupts the
+  diagnostic the benchmark reports.
 - A row whose `localizer` returns `None` is excluded and increments
   `localization_misses`.
 - A clip whose rows name two different cats contributes no crop at all, and
@@ -509,6 +561,11 @@ return synthetic numpy arrays and fixed boxes. Write to `tmp_path`:**
 - Floor guard: with fewer than `MIN_CROPS_PER_CLASS` surviving crops for a class
   (or a split missing a class), `export_dataset` raises `ExportError` with a
   message naming the offending class/split.
+- `ExportError` is the ONLY exception `export_dataset` raises for bad data.
+  `split_by_clip` raises `ValueError` when a class holds fewer than 3 clips, and
+  that call happens before the floor guard. Catch it and re-raise as
+  `ExportError`. Keep the original message. One caller-facing exception type
+  then covers every degenerate dataset. Assert this with a 2-clip class.
 - Determinism: two exports with the same rows/seed produce identical split
   assignments and identical `dataset_hash`.
 - `box_xyxy` in each record equals `square_pad_box` applied to the localizer box
@@ -518,10 +575,35 @@ return synthetic numpy arrays and fixed boxes. Write to `tmp_path`:**
   `ExportManifest`.
 - `dataset_hash` changes when a crop's class or split changes. Assert that two
   different inputs yield different hashes.
-- `dataset_hash` changes when an export parameter changes. Export the same rows
-  twice with a different `pad_frac`, and assert that the hashes differ. The
-  model filename carries this hash, so two parameter sets must not collide on
-  one filename.
+- `dataset_hash` changes when an export parameter changes. Parametrize over
+  `pad_frac`, `localize_conf`, `ratios`, and `seed`, and assert a different hash
+  for each. `localize_conf` matters most, because the export records it and
+  never acts on it, so nothing else catches its loss.
+- `dataset_hash` changes when the `classes` ORDER changes. A `display_order`
+  edit reorders the canonical class list. Without `classes` in the hash the
+  model filename repeats, and a train run silently overwrites a model built on
+  the other order.
+- A row whose `cat_slug` is absent from `classes` raises `ExportError` naming
+  the slug. Check the slug BEFORE the frame loads and before localization. A
+  later check counts an unknown slug behind a load failure as a load failure,
+  which hides the real fault. Such a row writes a fourth ImageFolder directory.
+  ultralytics indexes classes by sorted directory name, so one extra directory
+  shifts every index away from `summary.classes`.
+- A re-export leaves no stale crop. Export, delete one row, export again to the
+  same `dataset_root`, then assert that the removed crop is gone from disk.
+  ultralytics reads the directory tree, not the manifest, so a corrected label
+  must not leave its old crop behind. Remove `<dataset_root>/train`, `/val`, and
+  `/test` after the floor guard passes and before the first write.
+- The same removal deletes `manifest.json`. A crash between the removal and the
+  manifest write otherwise leaves a partial crop tree beside the PREVIOUS run's
+  manifest. Train reads the tree for images and the manifest for the class
+  order. It then trains on a truncated dataset and stamps the old hash. No
+  manifest makes the next stage fail loudly instead. Test that a write failure
+  leaves no manifest behind.
+- A split that lacks a class raises `ExportError`. That branch is reachable with
+  `export_dataset([], classes=("marcel",), params=ExportParams(min_crops_per_class=0))`.
+- The crop JPEG uses `CROP_QUALITY`, not the thumbnail default. Assert the
+  quality as well as the width.
 
   `dataset_hash` is a sha256 over the sorted `(crop_relpath, cat_slug, split)`
   tuples **plus** the export parameters `pad_frac`, `localize_conf`, `ratios`,
@@ -531,11 +613,11 @@ return synthetic numpy arrays and fixed boxes. Write to `tmp_path`:**
   `quality=CROP_QUALITY` explicitly. The thumbnail defaults cap the long edge at
   320px and the quality at 80, which are the wrong values for a training crop.
 
-- [ ] **Step 1: Write failing tests** with fake boundaries and `tmp_path`
+- [x] **Step 1: Write failing tests** with fake boundaries and `tmp_path`
       dataset roots.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_dataset.py -q`.
-- [ ] **Step 3: Implement** `dataset.py` in two passes. Before the first pass,
+- [x] **Step 3: Implement** `dataset.py` in two passes. Before the first pass,
       group the rows by `clip_id` and drop every clip that names more than one
       cat. Count those clips in `mixed_class_clips`. The first pass collects the
       surviving rows and their localized boxes, and counts `localization_misses`
@@ -546,9 +628,9 @@ return synthetic numpy arrays and fixed boxes. Write to `tmp_path`:**
       assigned split dirs and builds the records. Crop with
       `image[y1:y2, x1:x2]`, then call `encode_frame` with
       `max_width=CROP_MAX_WIDTH` and `quality=CROP_QUALITY`.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_dataset.py -q`.
-- [ ] **Step 5: Lint**. Expect clean.
+- [x] **Step 5: Lint**. Expect clean.
 
 ---
 
@@ -633,21 +715,21 @@ modules that touch the real boundaries. Keep them thin and separately testable.
   name. `pyproject.toml` exempts `tests` from `SLF001` and from
   `reportPrivateUsage`.
 
-- [ ] **Step 0: Add the public detector seams** to `detector.py`, per the
+- [x] **Step 0: Add the public detector seams** to `detector.py`, per the
       prerequisite refactor above. Rename `_CatHit` to `CatHit`, promote
       `_best_cat_in_frame` to `best_cat_box`, and add `extract_frame_at` and
       `load_yolo`. Run `pixi run pytest tests/unit/test_detector.py` and expect
       no test change. Run `pixi run lint src/cat_watcher/detector.py`.
-- [ ] **Step 1: Write failing tests** with monkeypatched detector helpers and a
+- [x] **Step 1: Write failing tests** with monkeypatched detector helpers and a
       fake YOLO specced against the real class. For the thumb-fallback case,
       write a small real JPEG to `tmp_path` with `PIL`.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_sources.py -q`.
-- [ ] **Step 3: Implement** `sources.py` as thin closures over the detector
+- [x] **Step 3: Implement** `sources.py` as thin closures over the detector
       helpers.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_sources.py -q`.
-- [ ] **Step 5: Lint**. Expect clean.
+- [x] **Step 5: Lint**. Expect clean.
 
 ---
 
@@ -732,20 +814,20 @@ without real training.
 - The model filename embeds the dataset hash prefix, for traceability. Assert
   that the stem contains the first 8 chars of `dataset_hash`.
 
-- [ ] **Step 1: Write failing wiring test** with a fake YOLO specced against the
+- [x] **Step 1: Write failing wiring test** with a fake YOLO specced against the
       real class. Its `.train()` side-effect creates a stub weights file.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_train.py -q`.
-- [ ] **Step 3: Implement** `train.py`. Read `classes`/`dataset_hash` via
+- [x] **Step 3: Implement** `train.py`. Read `classes`/`dataset_hash` via
       `dataset.read_manifest`. Load from `base_weights`, never from a bare
       filename, because ultralytics auto-download writes to the working
       directory. Set ultralytics `project=run_dir` (keeps `runs/` under
       gitignored storage). Resolve `best.pt` from the trainer's `save_dir`.
       Compare the model's `names` set with the manifest classes before the
       sidecar write.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_train.py -q`.
-- [ ] **Step 5: Lint**. Expect clean.
+- [x] **Step 5: Lint**. Expect clean.
 
 ---
 
@@ -839,26 +921,30 @@ Markdown + JSON reports. Prediction is injected for testability.
 - `render_json` round-trips. A parse of the output yields the same numbers. The
   confusion keys serialize as `"true>pred"`, so assert that form.
 - `render_markdown` contains a confusion table and per-class precision, recall,
-  and F1 rows. It also contains the overall accuracy, the abstain sweep, the
-  localization-miss line, and the mixed-class clip count. Assert key substrings.
-  Per the precompute-CSS memory, build any multi-line string in code, not in a
+  and F1 rows. It also contains the overall accuracy, the abstain sweep, and the
+  recommended threshold. It closes with the localization-miss line, the
+  frame-load-failure count, the mixed-class clip count, and the dataset hash.
+  Assert a section heading and a distinctive row for each table, never a bare
+  number. A substring such as `0.50` matches an unrelated `0.5000` elsewhere, so
+  a test built on one passes even after the table is deleted. Per the
+  precompute-CSS memory, build any multi-line string in code, not in a
   templating layer.
 
-- [ ] **Step 1: Ask the user** for explicit approval to add `"scikit-learn"` to
+- [x] **Step 1: Ask the user** for explicit approval to add `"scikit-learn"` to
       `[tool.deptry.per_rule_ignores] DEP004` in `pyproject.toml`. deptry rule
       DEP004 fires once `benchmark.py` imports a dev-group dependency from
       `src/`. `arel` is the precedent in that same list. Do not proceed without
       "yes". Then add the entry.
-- [ ] **Step 2: Write failing tests** with a fake `predict`, a small on-disk
+- [x] **Step 2: Write failing tests** with a fake `predict`, a small on-disk
       test split, and a hand-written sidecar.
-- [ ] **Step 3: Run to verify failure**:
+- [x] **Step 3: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_benchmark.py -q`.
-- [ ] **Step 4: Implement** `benchmark.py`. Lazy-import `sklearn.metrics` inside
+- [x] **Step 4: Implement** `benchmark.py`. Lazy-import `sklearn.metrics` inside
       `benchmark_model`. `make_predict_fn` adapts YOLO `Results.probs.top1` /
       `top1conf` via `model.names`.
-- [ ] **Step 5: Run to verify pass**:
+- [x] **Step 5: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_benchmark.py -q`.
-- [ ] **Step 6: Lint**, including `deptry .`. Expect clean.
+- [x] **Step 6: Lint**, including `deptry .`. Expect clean.
 
 ---
 
@@ -953,25 +1039,29 @@ real ffmpeg or YOLO runs:**
     `cat-watcher fetch-models --model yolo11n-cls.pt`
 
   `train` passes only `manifest_path`, because the class order lives in the
-  manifest. `benchmark --model` defaults to the newest `cat-classifier-*.pt` in
+  manifest. Task 7 groups its arguments, so the call site is
+  `train_classifier(paths=TrainPaths(...), params=TrainParams(...))`, not flat
+  keywords. `TrainPaths` carries `dataset_root`, `manifest_path`, `models_dir`,
+  `run_dir`, and `base_weights`. `TrainParams` carries `epochs`, `imgsz`, and
+  `seed`. `benchmark --model` defaults to the newest `cat-classifier-*.pt` in
   the models dir, and reads its sidecar for the class order.
   `ClassifierNamespace` carries `action`, `epochs`, `imgsz`, `seed`, and
   `model`. `model` is a `Path` to a checkpoint. `fetch-models --model` takes a
   filename, so give it `dest="fetch_model"` and a `str` field on `_ParsedArgs`.
   The `logs --camera` flag uses the same `dest` trick for the same reason.
 
-- [ ] **Step 1: Write failing tests** driving `main([...])` with patched
+- [x] **Step 1: Write failing tests** driving `main([...])` with patched
       adapters/wrappers.
-- [ ] **Step 2: Run to verify failure**:
+- [x] **Step 2: Run to verify failure**:
       `pixi run pytest tests/unit/test_classifier_cli.py -q`.
-- [ ] **Step 3: Implement** `cli.py`, the `__main__.py` registration and
+- [x] **Step 3: Implement** `cli.py`, the `__main__.py` registration and
       dispatch, the `ClassifierNamespace` base, and the `fetch-models --model`
       flag. Keep the handlers thin. Resolve paths from config. Wire the
       `sources` adapters. Call the stage functions. Print the summaries. Map
       each result to an exit code.
-- [ ] **Step 4: Run to verify pass**:
+- [x] **Step 4: Run to verify pass**:
       `pixi run pytest tests/unit/test_classifier_cli.py -q`.
-- [ ] **Step 5: Full suite + lint**: `pixi run pytest` then `pixi run lint .`.
+- [x] **Step 5: Full suite + lint**: `pixi run pytest` then `pixi run lint .`.
       Expect clean.
 
 ---
@@ -997,15 +1087,142 @@ it, add one line per new command under `## Commands`.
     `description`.
   - `classifier-benchmark` → `cmd = "cat-watcher classifier benchmark"`, with a
     `description`.
-- [ ] **Step 1: Ask the user** for explicit approval to edit `pyproject.toml`
+  - `classifier-predict` → `cmd = "cat-watcher classifier predict"`, with a
+    `description`.
+- [x] **Step 1: Ask the user** for explicit approval to edit `pyproject.toml`
       `[tool.pixi.tasks]` (config-change rule). Do not proceed without "yes".
-- [ ] **Step 2: Add the task aliases** in the existing table style. See the
+- [x] **Step 2: Add the task aliases** in the existing table style. See the
       `[tool.pixi.tasks.alerts-once]` block in `pyproject.toml`.
-- [ ] **Step 3: Verify**: `pixi task list` shows the new tasks. Confirm that
+- [x] **Step 3: Verify**: `pixi task list` shows the new tasks. Confirm that
       `pixi run classifier-export --help`, or an equivalent, reaches the CLI.
-- [ ] **Step 4: Skip the `CLAUDE.md` edit** in this repo, which does not track
+- [x] **Step 4: Skip the `CLAUDE.md` edit** in this repo, which does not track
       the file. Where a repo tracks it, run `pixi run format CLAUDE.md`, then
       `pixi run lint CLAUDE.md`. dprint runs before markdownlint.
+
+---
+
+### Task 11: Batch spot-check (`predict.py` + CLI action)
+
+Run a trained model over untagged clips and print one row per clip. The command
+reads the DB and writes nothing to it, so a wrong prediction costs nothing. It
+is the surface for checking the model against new video in small batches.
+
+**Files:**
+
+- Create: `src/cat_watcher/classifier/predict.py`
+- Modify: `src/cat_watcher/classifier/cli.py` (a fourth action)
+- Modify: `src/cat_watcher/classifier/labels_query.py` (the clip query)
+- Test: `tests/unit/test_classifier_predict.py`
+
+**Interfaces:**
+
+- Produces in `labels_query.py`:
+
+  ```python
+  @dataclass(frozen=True)
+  class ClipCandidate:
+      clip_id: int
+      camera_name: str
+      start_ts: datetime
+      clip_file_path: str
+      frame_id: int  # the clip's highest-score ClipFrame
+      ordinal: int
+      t_offset_seconds: float
+      frame_thumb_path: str
+
+
+  def query_untagged_cat_clips(
+      engine: Engine,
+      *,
+      camera: str | None = None,
+      since: datetime | None = None,
+      until: datetime | None = None,
+      limit: int = 25,
+  ) -> list[ClipCandidate]:
+      """Clips with has_cat=True and no kind='cat' tag on any of their frames, newest
+      first. Each row carries the clip's highest-score frame, with ordinal breaking a
+      score tie. These are the clips the operator has not judged yet."""
+  ```
+
+- Produces in `predict.py`:
+
+  ```python
+  @dataclass(frozen=True)
+  class ClipPrediction:
+      clip_id: int
+      camera_name: str
+      start_ts: datetime
+      cat_slug: str | None  # None when the localizer finds no cat box
+      confidence: float  # 0.0 when cat_slug is None
+      unsure: bool  # confidence < threshold, or cat_slug is None
+      thumb_relpath: str  # the frame the prediction came from, for the operator to open
+
+
+  def predict_clips(
+      candidates: list[ClipCandidate],
+      *,
+      frame_source: FrameSource,
+      localizer: Localizer,
+      predict: PredictFn,
+      crops_dir: Path,  # storage_root / "classifier" / "spotcheck"
+      threshold: float,
+      pad_frac: float = PAD_FRAC,
+  ) -> list[ClipPrediction]:
+      """For each candidate: load the frame, localize, crop, and predict. Use the same
+      frame_source, localizer, square_pad_box, and encode_frame path the export uses, so
+      the inference crop matches the training crop. Write each crop under crops_dir and
+      name it in the result. A candidate whose frame or box is missing yields cat_slug
+      None and unsure True. Never raise on one bad candidate."""
+
+
+  def render_rows(predictions: list[ClipPrediction], *, tz: ZoneInfo) -> str:
+      """One aligned text row per clip: clip id, local start time, camera, predicted
+      slug, confidence, and an 'unsure' marker. Built in code, not in a template."""
+  ```
+
+- CLI:
+  `cat-watcher classifier predict [--camera NAME] [--since D] [--until D]
+  [--limit N] [--model PATH] [--threshold F]`.
+  `--limit` defaults to 25, which keeps a batch small enough to check by eye.
+  `--threshold` defaults to the abstain threshold the benchmark recommends, read
+  from the model sidecar when it is present. `--model` defaults to the newest
+  `cat-classifier-*.pt`.
+
+**Behavioral requirements (one test each):**
+
+- `query_untagged_cat_clips` returns a `has_cat` clip with no cat tag, and
+  excludes a clip whose frame already carries a cat tag. An event-only tag does
+  not exclude a clip.
+- It picks the clip's highest-score frame. A tie breaks on the lower `ordinal`.
+- `camera`, `since`, `until`, and `limit` each narrow the result.
+- `predict_clips` with fakes returns one `ClipPrediction` per candidate, in the
+  input order, with the slug and confidence the fake `predict` gives.
+- A candidate whose `frame_source` returns `None` yields `cat_slug` `None`,
+  `confidence` 0.0, and `unsure` `True`. The run continues to the next
+  candidate.
+- A confidence below `threshold` sets `unsure` `True`. A confidence at or above
+  it sets `unsure` `False`.
+- Each prediction names a crop file that exists under `crops_dir`.
+- `render_rows` holds the clip id, the local time, the slug, the confidence, and
+  the `unsure` marker. Assert key substrings.
+- CLI: `cat-watcher classifier predict` with a missing model exits 5. With a
+  patched `predict_clips` it exits 0 and prints the rows.
+- The command writes no DB row. Assert that the tag count is unchanged after the
+  run.
+
+- [x] **Step 1: Write failing tests** for the query, the orchestration, and the
+      renderer. Seed clips through `build_test_clip` and frames through
+      `make_clip_frame`.
+- [x] **Step 2: Run to verify failure**:
+      `pixi run pytest tests/unit/test_classifier_predict.py -q`.
+- [x] **Step 3: Implement** `query_untagged_cat_clips`, `predict.py`, and the
+      CLI action. Reuse `sources.make_frame_source`, `sources.make_localizer`,
+      `geometry.square_pad_box`, and `benchmark.make_predict_fn`. Crop through
+      the same helper the export uses, so one code path makes every crop.
+- [x] **Step 4: Run to verify pass**:
+      `pixi run pytest tests/unit/test_classifier_predict.py -q`.
+- [x] **Step 5: Full suite + lint**: `pixi run pytest` then `pixi run lint .`.
+      Expect clean.
 
 ---
 
@@ -1047,6 +1264,7 @@ live-integration project (per-clip auto-tags and per-cat alerts).
 - Class-order lineage `resolve_cat_classes`→manifest→sidecar→benchmark, plus the
   model's own `names` map (Tasks 4, 5, 7, 8) ✓
 - CLI, base-weights fetch, and pixi tasks (Tasks 9–10) ✓
+- Batch spot-check on untagged clips, read-only (Task 11) ✓
 - scikit-learn through the pixi dev feature, imported lazily, with the deptry
   DEP004 ignore (Tasks 3, 8) ✓
 - Artifacts and base weights under gitignored paths (Tasks 5, 7, 8) ✓

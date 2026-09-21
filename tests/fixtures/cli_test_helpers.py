@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from cat_watcher.__main__ import _ParsedArgs
+from cat_watcher.classifier.cli import ClassifierNamespace
 from cat_watcher.db import Base, Camera, Clip, PollStatus, create_engine, get_session
 
 if TYPE_CHECKING:
@@ -53,6 +54,23 @@ def make_handler_args(config_path: Path | None = None, **overrides: object) -> _
     for key, value in overrides.items():
         setattr(args, key, value)
     return args
+
+
+def make_classifier_args(action: str, **overrides: object) -> ClassifierNamespace:
+    """Build a ``ClassifierNamespace`` for handler tests. ``overrides`` mirror argparse field names."""
+    args = ClassifierNamespace()
+    args.action = action
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def assert_missing_dependency(exit_code: int, err: str, *, names: str) -> None:
+    """Assert the standard missing-dependency shape: exit 5, ``names`` on stderr, no placeholder leak."""
+    assert exit_code == 5
+    assert names in err
+    for token in ("{_fmt", "{self.", "{cam.", "{cfg.", "NoneType"):
+        assert token not in err
 
 
 @contextmanager
