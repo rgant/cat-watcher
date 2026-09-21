@@ -24,8 +24,8 @@ from sqlalchemy import func, select
 from cat_watcher.classifier.cli import run
 from cat_watcher.classifier.dataset import CROP_MAX_WIDTH, CROP_QUALITY, ExportSources, LoadedFrame, LocalizedBox
 from cat_watcher.classifier.geometry import PAD_FRAC, square_pad_box
-from cat_watcher.classifier.labels_query import CatFrameRow, ClipCandidate, query_untagged_cat_clips
-from cat_watcher.classifier.predict import ClipPrediction, PredictOptions, predict_clips, render_rows
+from cat_watcher.classifier.labels_query import CatFrameRow, ClipFrameCandidate, query_untagged_cat_clip_frames
+from cat_watcher.classifier.predict import ClipVerdict, FramePrediction, PredictOptions, predict_clips, render_rows
 from cat_watcher.db import ClipFrameSubject, create_engine, get_session
 from cat_watcher.thumbnails import encode_frame
 
@@ -85,7 +85,7 @@ def _fake_predict_by_filename(mapping: dict[str, tuple[str, float]]) -> PredictF
     return predict
 
 
-def _candidate(  # noqa: PLR0913  # test builder: one kwarg per ClipCandidate field, no natural grouping
+def _candidate(  # noqa: PLR0913  # test builder: one kwarg per ClipFrameCandidate field, no natural grouping
     clip_id: int,
     *,
     frame_id: int,
@@ -94,9 +94,9 @@ def _candidate(  # noqa: PLR0913  # test builder: one kwarg per ClipCandidate fi
     start_ts: datetime = _START,
     clip_file_path: str = "clips/pantry/a.mp4",
     frame_thumb_path: str = "thumbs/pantry/a.jpg",
-) -> ClipCandidate:
-    """Build one ``ClipCandidate``. ``t_offset_seconds`` derives from ``ordinal``."""
-    return ClipCandidate(
+) -> ClipFrameCandidate:
+    """Build one ``ClipFrameCandidate``. ``t_offset_seconds`` derives from ``ordinal``."""
+    return ClipFrameCandidate(
         clip_id=clip_id,
         camera_name=camera_name,
         start_ts=start_ts,
@@ -114,15 +114,15 @@ def _assert_no_placeholder_leak(text: str) -> None:
         assert token not in text
 
 
-# --- query_untagged_cat_clips ------------------------------------------------------------------------
+# --- query_untagged_cat_clip_frames ------------------------------------------------------------------------
 
 
-def test_query_untagged_cat_clips_on_an_empty_database_returns_an_empty_list(alembic_engine: Engine) -> None:
+def test_query_untagged_cat_clip_frames_on_an_empty_database_returns_an_empty_list(alembic_engine: Engine) -> None:
     """No clip rows at all still returns a valid, empty result."""
-    assert query_untagged_cat_clips(alembic_engine) == []
+    assert query_untagged_cat_clip_frames(alembic_engine) == []
 
 
-def test_query_untagged_cat_clips_returns_a_has_cat_clip_with_no_cat_tag(
+def test_query_untagged_cat_clip_frames_returns_a_has_cat_clip_with_no_cat_tag(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
@@ -131,14 +131,14 @@ def test_query_untagged_cat_clips_returns_a_has_cat_clip_with_no_cat_tag(
     clip_id = add_clip(alembic_engine, cam_id, start_ts=_START, name="a.mp4")
     frame_id = add_clip_frame(alembic_engine, clip_id, 0)
 
-    candidates = query_untagged_cat_clips(alembic_engine)
+    candidates = query_untagged_cat_clip_frames(alembic_engine)
 
     assert [c.clip_id for c in candidates] == [clip_id]
     assert candidates[0].frame_id == frame_id
     assert candidates[0].camera_name == "pantry"
 
 
-def test_query_untagged_cat_clips_excludes_a_clip_with_has_cat_false(
+def test_query_untagged_cat_clip_frames_excludes_a_clip_with_has_cat_false(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
@@ -147,10 +147,10 @@ def test_query_untagged_cat_clips_excludes_a_clip_with_has_cat_false(
     clip_id = add_clip(alembic_engine, cam_id, start_ts=_START, name="a.mp4", has_cat=False)
     _ = add_clip_frame(alembic_engine, clip_id, 0)
 
-    assert query_untagged_cat_clips(alembic_engine) == []
+    assert query_untagged_cat_clip_frames(alembic_engine) == []
 
 
-def test_query_untagged_cat_clips_excludes_a_clip_whose_frame_has_a_cat_tag(
+def test_query_untagged_cat_clip_frames_excludes_a_clip_whose_frame_has_a_cat_tag(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
@@ -161,10 +161,10 @@ def test_query_untagged_cat_clips_excludes_a_clip_whose_frame_has_a_cat_tag(
     frame_id = add_clip_frame(alembic_engine, clip_id, 0)
     tag_frame(alembic_engine, frame_id, marcel_id)
 
-    assert query_untagged_cat_clips(alembic_engine) == []
+    assert query_untagged_cat_clip_frames(alembic_engine) == []
 
 
-def test_query_untagged_cat_clips_keeps_a_clip_with_only_an_event_tag(
+def test_query_untagged_cat_clip_frames_keeps_a_clip_with_only_an_event_tag(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
@@ -175,27 +175,27 @@ def test_query_untagged_cat_clips_keeps_a_clip_with_only_an_event_tag(
     frame_id = add_clip_frame(alembic_engine, clip_id, 0)
     tag_frame(alembic_engine, frame_id, cleaning_id)
 
-    assert [c.clip_id for c in query_untagged_cat_clips(alembic_engine)] == [clip_id]
+    assert [c.clip_id for c in query_untagged_cat_clip_frames(alembic_engine)] == [clip_id]
 
 
-def test_query_untagged_cat_clips_picks_the_highest_score_frame_tie_broken_by_ordinal(
+def test_query_untagged_cat_clip_frames_returns_every_frame_of_a_clip_in_ordinal_order(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
-    """The best frame wins by score. A tied score falls back to the lower ordinal."""
+    """Every frame comes back, whatever its detector score. One clip can hold two cats."""
     cam_id = seed_camera(alembic_engine)
     clip_id = add_clip(alembic_engine, cam_id, start_ts=_START, name="a.mp4")
     _ = add_clip_frame(alembic_engine, clip_id, 0, score=0.5)
-    tie_winner = add_clip_frame(alembic_engine, clip_id, 1, score=0.9)
+    _ = add_clip_frame(alembic_engine, clip_id, 1, score=0.9)
     _ = add_clip_frame(alembic_engine, clip_id, 2, score=0.9)
 
-    candidates = query_untagged_cat_clips(alembic_engine)
+    candidates = query_untagged_cat_clip_frames(alembic_engine)
 
-    assert candidates[0].frame_id == tie_winner
-    assert candidates[0].ordinal == 1
+    assert [c.ordinal for c in candidates] == [0, 1, 2]
+    assert {c.clip_id for c in candidates} == {clip_id}
 
 
-def test_query_untagged_cat_clips_camera_filter_narrows_the_result(
+def test_query_untagged_cat_clip_frames_camera_filter_narrows_the_result(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
@@ -207,12 +207,12 @@ def test_query_untagged_cat_clips_camera_filter_narrows_the_result(
     kitchen_clip = add_clip(alembic_engine, kitchen_id, start_ts=_START, name="b.mp4")
     _ = add_clip_frame(alembic_engine, kitchen_clip, 0)
 
-    candidates = query_untagged_cat_clips(alembic_engine, camera="kitchen")
+    candidates = query_untagged_cat_clip_frames(alembic_engine, camera="kitchen")
 
     assert [c.clip_id for c in candidates] == [kitchen_clip]
 
 
-def test_query_untagged_cat_clips_since_and_until_narrow_the_result(
+def test_query_untagged_cat_clip_frames_since_and_until_narrow_the_result(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
@@ -224,35 +224,44 @@ def test_query_untagged_cat_clips_since_and_until_narrow_the_result(
     _ = add_clip_frame(alembic_engine, new_clip, 0)
     split = _START + timedelta(days=1)
 
-    since_result = query_untagged_cat_clips(alembic_engine, since=split)
-    until_result = query_untagged_cat_clips(alembic_engine, until=split)
+    since_result = query_untagged_cat_clip_frames(alembic_engine, since=split)
+    until_result = query_untagged_cat_clip_frames(alembic_engine, until=split)
 
     assert [c.clip_id for c in since_result] == [new_clip]
     assert [c.clip_id for c in until_result] == [old_clip]
 
 
-def test_query_untagged_cat_clips_limit_narrows_the_result_newest_first(
+def test_query_untagged_cat_clip_frames_limit_counts_clips_not_frames(
     alembic_engine: Engine,
     seed_camera: Callable[..., int],
 ) -> None:
-    """``limit`` caps the row count. The kept rows are the newest clips."""
+    """``limit`` caps clips. Each kept clip still returns every frame it holds, newest clip first.
+
+    A ``limit`` on the outer select caps frames instead. This test then returns one clip.
+    """
     cam_id = seed_camera(alembic_engine)
     clip_ids: list[int] = []
     for i in range(3):
         clip_id = add_clip(alembic_engine, cam_id, start_ts=_START + timedelta(minutes=i), name=f"{i}.mp4")
         _ = add_clip_frame(alembic_engine, clip_id, 0)
+        _ = add_clip_frame(alembic_engine, clip_id, 1)
         clip_ids.append(clip_id)
 
-    candidates = query_untagged_cat_clips(alembic_engine, limit=2)
+    candidates = query_untagged_cat_clip_frames(alembic_engine, limit=2)
 
-    assert [c.clip_id for c in candidates] == [clip_ids[2], clip_ids[1]]
+    assert [(c.clip_id, c.ordinal) for c in candidates] == [
+        (clip_ids[2], 0),
+        (clip_ids[2], 1),
+        (clip_ids[1], 0),
+        (clip_ids[1], 1),
+    ]
 
 
 # --- predict_clips -------------------------------------------------------------------------------
 
 
-def test_predict_clips_returns_one_prediction_per_candidate_in_order(tmp_path: Path) -> None:
-    """One ``ClipPrediction`` per candidate, in input order. Each carries the fake predictor's output."""
+def test_predict_clips_returns_one_verdict_per_clip_in_order(tmp_path: Path) -> None:
+    """One ``ClipVerdict`` per clip, in input order. Each carries the fake predictor's output."""
     candidates = [_candidate(1, frame_id=1), _candidate(2, frame_id=2, ordinal=3)]
     predict = _fake_predict_by_filename({"1_0.jpg": ("marcel", 0.91), "2_3.jpg": ("rufus", 0.62)})
     options = PredictOptions(crops_dir=tmp_path / "spotcheck", threshold=0.5)
@@ -265,10 +274,10 @@ def test_predict_clips_returns_one_prediction_per_candidate_in_order(tmp_path: P
     )
 
     assert [p.clip_id for p in predictions] == [1, 2]
-    assert predictions[0].cat_slug == "marcel"
-    assert predictions[0].confidence == pytest.approx(0.91)
-    assert predictions[1].cat_slug == "rufus"
-    assert predictions[1].confidence == pytest.approx(0.62)
+    assert predictions[0].frames[0].cat_slug == "marcel"
+    assert predictions[0].frames[0].confidence == pytest.approx(0.91)
+    assert predictions[1].frames[0].cat_slug == "rufus"
+    assert predictions[1].frames[0].confidence == pytest.approx(0.62)
 
 
 def test_predict_clips_with_a_frame_load_failure_yields_unsure_and_continues(tmp_path: Path) -> None:
@@ -285,11 +294,11 @@ def test_predict_clips_with_a_frame_load_failure_yields_unsure_and_continues(tmp
         options=options,
     )
 
-    assert predictions[0].cat_slug is None
-    assert predictions[0].confidence == 0.0
-    assert predictions[0].unsure is True
-    assert predictions[1].cat_slug == "marcel"
-    assert predictions[1].unsure is False
+    assert predictions[0].frames[0].cat_slug is None
+    assert predictions[0].frames[0].confidence == 0.0
+    assert predictions[0].frames[0].unsure is True
+    assert predictions[1].frames[0].cat_slug == "marcel"
+    assert predictions[1].frames[0].unsure is False
 
 
 def test_predict_clips_with_no_localized_box_yields_unsure_and_continues(tmp_path: Path) -> None:
@@ -307,10 +316,10 @@ def test_predict_clips_with_no_localized_box_yields_unsure_and_continues(tmp_pat
         options=options,
     )
 
-    assert predictions[0].cat_slug is None
-    assert predictions[0].unsure is True
-    assert predictions[1].cat_slug == "rufus"
-    assert predictions[1].unsure is False
+    assert predictions[0].frames[0].cat_slug is None
+    assert predictions[0].frames[0].unsure is True
+    assert predictions[1].frames[0].cat_slug == "rufus"
+    assert predictions[1].frames[0].unsure is False
 
 
 def test_predict_clips_confidence_below_threshold_is_unsure(tmp_path: Path) -> None:
@@ -326,7 +335,7 @@ def test_predict_clips_confidence_below_threshold_is_unsure(tmp_path: Path) -> N
         options=options,
     )
 
-    assert predictions[0].unsure is True
+    assert predictions[0].frames[0].unsure is True
 
 
 def test_predict_clips_confidence_exactly_at_threshold_is_not_unsure(tmp_path: Path) -> None:
@@ -342,7 +351,7 @@ def test_predict_clips_confidence_exactly_at_threshold_is_not_unsure(tmp_path: P
         options=options,
     )
 
-    assert predictions[0].unsure is False
+    assert predictions[0].frames[0].unsure is False
 
 
 def test_predict_clips_writes_a_crop_file_under_crops_dir(tmp_path: Path) -> None:
@@ -359,7 +368,7 @@ def test_predict_clips_writes_a_crop_file_under_crops_dir(tmp_path: Path) -> Non
         options=options,
     )
 
-    assert (crops_dir / predictions[0].thumb_relpath).is_file()
+    assert (crops_dir / predictions[0].frames[0].thumb_relpath).is_file()
 
 
 def _export_reference_crop_size(frame: np.ndarray, box: tuple[float, float, float, float], dest: Path) -> tuple[int, int]:
@@ -388,7 +397,7 @@ def test_predict_crop_matches_the_export_crop_dimensions(tmp_path: Path) -> None
         predict=_fake_predict_by_filename({"1_0.jpg": ("marcel", 0.9)}),
         options=PredictOptions(crops_dir=crops_dir, threshold=0.5),
     )
-    with Image.open(crops_dir / predictions[0].thumb_relpath) as predict_crop:
+    with Image.open(crops_dir / predictions[0].frames[0].thumb_relpath) as predict_crop:
         predict_size = predict_crop.size
 
     export_size = _export_reference_crop_size(frame, box, tmp_path / "export_crop.jpg")
@@ -396,42 +405,145 @@ def test_predict_crop_matches_the_export_crop_dimensions(tmp_path: Path) -> None
     assert predict_size == export_size
 
 
-# --- render_rows -----------------------------------------------------------------------------------
+# --- grouping and render_rows ------------------------------------------------------------------------
 
 
-def test_render_rows_holds_clip_id_time_slug_confidence_and_unsure_marker() -> None:
-    """The rendered text names every field an operator needs to spot-check by eye."""
+def _frame(ordinal: int, slug: str | None, confidence: float, *, threshold: float = 0.5) -> FramePrediction:
+    """Build one ``FramePrediction``. ``unsure`` derives from ``confidence`` against ``threshold``."""
+    return FramePrediction(
+        ordinal=ordinal,
+        cat_slug=slug,
+        confidence=confidence,
+        unsure=slug is None or confidence < threshold,
+        thumb_relpath=f"1_{ordinal}.jpg",
+    )
+
+
+def _verdict(*frames: FramePrediction, clip_id: int = 42) -> ClipVerdict:
+    """Build one ``ClipVerdict`` over ``frames``, at a fixed camera and start time."""
+    return ClipVerdict(
+        clip_id=clip_id,
+        camera_name="pantry",
+        start_ts=datetime(2026, 7, 2, 16, 19, 5, tzinfo=UTC),
+        frames=frames,
+    )
+
+
+def test_predict_clips_groups_every_frame_of_one_clip_into_one_verdict(tmp_path: Path) -> None:
+    """Every frame of one clip lands in a single verdict, in candidate order."""
+    candidates = [_candidate(1, frame_id=10, ordinal=0), _candidate(1, frame_id=11, ordinal=1), _candidate(1, frame_id=12, ordinal=2)]
+    predict = _fake_predict_by_filename(
+        {"1_0.jpg": ("marcel", 0.99), "1_1.jpg": ("marcel", 0.95), "1_2.jpg": ("rufus", 0.88)},
+    )
+
+    verdicts = predict_clips(
+        candidates,
+        sources=ExportSources(frame_source=_FakeFrameSource(), localizer=_FakeLocalizer()),
+        predict=predict,
+        options=PredictOptions(crops_dir=tmp_path / "spotcheck", threshold=0.5),
+    )
+
+    assert len(verdicts) == 1
+    assert [f.ordinal for f in verdicts[0].frames] == [0, 1, 2]
+    assert [f.cat_slug for f in verdicts[0].frames] == ["marcel", "marcel", "rufus"]
+
+
+def test_clip_verdict_reports_two_cats_as_mixed() -> None:
+    """A clip whose frames name two cats is mixed."""
+    verdict = _verdict(_frame(0, "marcel", 1.0), _frame(1, "rufus", 1.0))
+
+    assert verdict.is_mixed is True
+
+
+def test_clip_verdict_with_one_cat_and_a_miss_is_not_mixed() -> None:
+    """The poller samples frames the cat is absent from. Such a frame is not a second opinion."""
+    verdict = _verdict(_frame(0, "marcel", 0.99), _frame(1, None, 0.0), _frame(2, "marcel", 0.98))
+
+    assert verdict.is_mixed is False
+    assert verdict.unsure is False
+    assert verdict.min_confidence == pytest.approx(0.98)
+
+
+def test_clip_verdict_min_confidence_is_the_weakest_frame() -> None:
+    """The clip's confidence is the lowest of its frames, never the first or the best."""
+    verdict = _verdict(_frame(0, "marcel", 0.99), _frame(1, "marcel", 0.72), _frame(2, "marcel", 0.90))
+
+    assert verdict.min_confidence == pytest.approx(0.72)
+
+
+def test_render_rows_prints_one_line_for_a_clip_whose_frames_agree() -> None:
+    """Frames that agree collapse to one line. That line names the cat, the count, and the lowest confidence."""
     tz = ZoneInfo("America/New_York")
-    predictions = [
-        ClipPrediction(
-            clip_id=42,
-            camera_name="pantry",
-            start_ts=datetime(2026, 7, 2, 16, 19, 5, tzinfo=UTC),
-            cat_slug="marcel",
-            confidence=0.87,
-            unsure=False,
-            thumb_relpath="42_0.jpg",
-        ),
-        ClipPrediction(
-            clip_id=43,
-            camera_name="pantry",
-            start_ts=datetime(2026, 7, 2, 17, 0, 0, tzinfo=UTC),
-            cat_slug=None,
-            confidence=0.0,
-            unsure=True,
-            thumb_relpath="thumbs/pantry/x.jpg",
-        ),
-    ]
+    verdict = _verdict(_frame(0, "marcel", 0.99), _frame(1, "marcel", 0.87))
 
-    text = render_rows(predictions, tz=tz)
+    text = render_rows([verdict], tz=tz)
 
-    assert "42" in text
+    assert len(text.splitlines()) == 1
+    assert "clip=42" in text
     assert "marcel" in text
-    assert "0.87" in text
+    assert "2/2" in text
+    assert "conf=0.87" in text
     assert "2026-07-02" in text
-    assert "43" in text
+    _assert_no_placeholder_leak(text)
+
+
+def test_render_rows_expands_a_mixed_clip_into_one_line_per_frame() -> None:
+    """Two cats in one clip print a ``MIXED`` header with the tally, then every frame."""
+    tz = ZoneInfo("America/New_York")
+    verdict = _verdict(_frame(0, "marcel", 1.0), _frame(1, "marcel", 0.98), _frame(2, "rufus", 0.91))
+
+    lines = render_rows([verdict], tz=tz).splitlines()
+
+    assert len(lines) == 4
+    assert "MIXED" in lines[0]
+    assert "marcel 2" in lines[0]
+    assert "rufus 1" in lines[0]
+    assert "of 3" in lines[0]
+    assert [line.strip().split()[0] for line in lines[1:]] == ["ord=0", "ord=1", "ord=2"]
+    assert "rufus" in lines[3]
+    _assert_no_placeholder_leak("\n".join(lines))
+
+
+def test_render_rows_keeps_a_clip_with_one_cat_and_a_miss_on_one_line() -> None:
+    """One cat plus a frame holding no cat prints ``1/2`` on one line, and never expands.
+
+    A cat absent from a sampled frame is the normal case. An expansion on it buries the mixed
+    clips that need the operator's eyes.
+    """
+    tz = ZoneInfo("America/New_York")
+    verdict = _verdict(_frame(0, "marcel", 0.95), _frame(1, None, 0.0))
+
+    lines = render_rows([verdict], tz=tz).splitlines()
+
+    assert len(lines) == 1
+    assert "MIXED" not in lines[0]
+    assert "marcel" in lines[0]
+    assert "1/2" in lines[0]
+    assert "UNSURE" not in lines[0]
+
+
+def test_render_rows_prints_one_line_when_every_frame_missed() -> None:
+    """A clip no frame classified prints ``0/2``, because zero frames produced a cat."""
+    tz = ZoneInfo("America/New_York")
+    verdict = _verdict(_frame(0, None, 0.0), _frame(1, None, 0.0))
+
+    text = render_rows([verdict], tz=tz)
+
+    assert len(text.splitlines()) == 1
+    assert "0/2" in text
     assert "UNSURE" in text
     _assert_no_placeholder_leak(text)
+
+
+def test_render_rows_marks_an_agreeing_clip_unsure_below_the_threshold() -> None:
+    """A frame under the threshold marks the whole clip unsure, although every frame names one cat."""
+    tz = ZoneInfo("America/New_York")
+    verdict = _verdict(_frame(0, "marcel", 0.99), _frame(1, "marcel", 0.31))
+
+    text = render_rows([verdict], tz=tz)
+
+    assert len(text.splitlines()) == 1
+    assert "UNSURE" in text
 
 
 # --- CLI: classifier predict -----------------------------------------------------------------------
@@ -491,22 +603,19 @@ def test_classifier_predict_happy_path_prints_rows(
     weights = models_dir / config.detector.model
     _ = weights.write_bytes(b"stub-detector-weights")
 
-    fake_predictions = [
-        ClipPrediction(
+    fake_verdicts = [
+        ClipVerdict(
             clip_id=1,
             camera_name="pantry",
             start_ts=datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC),
-            cat_slug="marcel",
-            confidence=0.9,
-            unsure=False,
-            thumb_relpath="1_0.jpg",
+            frames=(FramePrediction(ordinal=0, cat_slug="marcel", confidence=0.9, unsure=False, thumb_relpath="1_0.jpg"),),
         ),
     ]
     with (
         patch("cat_watcher.classifier.sources.make_frame_source", return_value=_FakeFrameSource()),
         patch("cat_watcher.classifier.sources.make_localizer", return_value=_FakeLocalizer()),
         patch("cat_watcher.classifier.benchmark.make_predict_fn", return_value=_fake_predict_fn),
-        patch("cat_watcher.classifier.predict.predict_clips", return_value=fake_predictions) as predict_mock,
+        patch("cat_watcher.classifier.predict.predict_clips", return_value=fake_verdicts) as predict_mock,
     ):
         exit_code = run(make_classifier_args("predict"), config=config)
 

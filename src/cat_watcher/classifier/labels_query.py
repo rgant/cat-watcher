@@ -94,8 +94,12 @@ def query_single_cat_frames(engine: Engine) -> list[CatFrameRow]:
 
 
 @dataclass(frozen=True)
-class ClipCandidate:  # pylint: disable=too-many-instance-attributes  # flat candidate row; the rule targets behavior-rich classes, not data containers
-    """One ``has_cat`` clip with no operator tag yet. It carries its best frame."""
+class ClipFrameCandidate:  # pylint: disable=too-many-instance-attributes  # flat candidate row; the rule targets behavior-rich classes, not data containers
+    """One frame of a ``has_cat`` clip that carries no operator tag yet.
+
+    A clip contributes one of these for each frame it holds, so the clip fields repeat across
+    its frames.
+    """
 
     clip_id: int
     camera_name: str
@@ -107,19 +111,23 @@ class ClipCandidate:  # pylint: disable=too-many-instance-attributes  # flat can
     frame_thumb_path: str
 
 
-def query_untagged_cat_clips(
+def query_untagged_cat_clip_frames(
     engine: Engine,
     *,
     camera: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     limit: int = 25,
-) -> list[ClipCandidate]:
-    """Return ``has_cat`` clips with no ``kind='cat'`` tag on any frame, newest ``start_ts`` first.
+) -> list[ClipFrameCandidate]:
+    """Return every frame of the newest ``has_cat`` clips that hold no ``kind='cat'`` tag.
 
-    Each row carries the clip's highest-score ``ClipFrame``, a tie broken by the lower
-    ``ordinal``. These clips carry no operator tag yet, so a spot check can still judge them. A
-    ``has_cat`` clip with zero ``ClipFrame`` rows never appears, since it has no frame to show.
+    ``limit`` counts clips, not frames, so one batch stays the size an operator can check by eye.
+    Rows sort by clip start time descending, then by ordinal ascending. One clip's frames
+    therefore stay together and in playback order.
+
+    The query returns every frame because one clip can hold two cats at different times. A single
+    best frame cannot report that. A ``has_cat`` clip with zero ``ClipFrame`` rows never appears,
+    since it has no frame to show.
     """
     tagged_clip_ids = (
         select(ClipFrame.clip_id)
@@ -127,42 +135,40 @@ def query_untagged_cat_clips(
         .join(Subject, Subject.id == ClipFrameSubject.subject_id)
         .where(Subject.kind == "cat")
     )
-    ranked_frames = select(
-        ClipFrame.id.label("frame_id"),
-        ClipFrame.clip_id,
-        ClipFrame.ordinal,
-        ClipFrame.t_offset_seconds,
-        ClipFrame.thumb_path.label("frame_thumb_path"),
-        func.row_number().over(partition_by=ClipFrame.clip_id, order_by=[ClipFrame.score.desc(), ClipFrame.ordinal.asc()]).label("rank"),
-    ).subquery()
+    # The clip filter and the row limit apply here, before any frame joins. A limit on the outer
+    # select caps frames instead of clips. A batch size of 25 then returns 5 clips.
+    newest_clips = select(Clip.id).join(Camera, Camera.id == Clip.camera_id).where(Clip.has_cat.is_(True), Clip.id.notin_(tagged_clip_ids))
+    if camera is not None:
+        newest_clips = newest_clips.where(Camera.name == camera)
+    if since is not None:
+        newest_clips = newest_clips.where(Clip.start_ts >= since)
+    if until is not None:
+        newest_clips = newest_clips.where(Clip.start_ts <= until)
+    # ``Clip.id`` breaks a start-time tie, so two clips stamped alike keep a stable batch.
+    picked = newest_clips.order_by(Clip.start_ts.desc(), Clip.id.desc()).limit(limit).subquery()
+
     stmt = (
         select(
             Clip.id.label("clip_id"),
             Camera.name.label("camera_name"),
             Clip.start_ts,
             Clip.file_path.label("clip_file_path"),
-            ranked_frames.c.frame_id,
-            ranked_frames.c.ordinal,
-            ranked_frames.c.t_offset_seconds,
-            ranked_frames.c.frame_thumb_path,
+            ClipFrame.id.label("frame_id"),
+            ClipFrame.ordinal,
+            ClipFrame.t_offset_seconds,
+            ClipFrame.thumb_path.label("frame_thumb_path"),
         )
-        .select_from(Clip)
+        .select_from(picked)
+        .join(Clip, Clip.id == picked.c.id)
         .join(Camera, Camera.id == Clip.camera_id)
-        .join(ranked_frames, and_(ranked_frames.c.clip_id == Clip.id, ranked_frames.c.rank == 1))
-        .where(Clip.has_cat.is_(True), Clip.id.notin_(tagged_clip_ids))
+        .join(ClipFrame, ClipFrame.clip_id == Clip.id)
+        .order_by(Clip.start_ts.desc(), Clip.id.desc(), ClipFrame.ordinal.asc())
     )
-    if camera is not None:
-        stmt = stmt.where(Camera.name == camera)
-    if since is not None:
-        stmt = stmt.where(Clip.start_ts >= since)
-    if until is not None:
-        stmt = stmt.where(Clip.start_ts <= until)
-    stmt = stmt.order_by(Clip.start_ts.desc()).limit(limit)
 
     with get_session(engine) as session:
         rows = session.execute(stmt).all()
     return [
-        ClipCandidate(
+        ClipFrameCandidate(
             clip_id=cast("int", r.clip_id),
             camera_name=cast("str", r.camera_name),
             start_ts=cast("datetime", r.start_ts),

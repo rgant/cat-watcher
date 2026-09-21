@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from cat_watcher.classifier import benchmark, predict, sources, train
 from cat_watcher.classifier.dataset import DATASET_SUBDIR, ExportError, ExportSources, export_dataset, read_manifest
-from cat_watcher.classifier.labels_query import query_single_cat_frames, query_untagged_cat_clips, resolve_cat_classes
+from cat_watcher.classifier.labels_query import query_single_cat_frames, query_untagged_cat_clip_frames, resolve_cat_classes
 from cat_watcher.classifier.splitting import SEED
 from cat_watcher.db import engine_for
 from cat_watcher.logs_viewer import parse_since
@@ -133,7 +133,7 @@ def configure_classifier_parser(subparser: argparse.ArgumentParser) -> None:
         type=int,
         default=_DEFAULT_PREDICT_LIMIT,
         metavar="N",
-        help=f"Batch size, small enough to check by eye (default {_DEFAULT_PREDICT_LIMIT})",
+        help=f"Clips per batch, small enough to check by eye (default {_DEFAULT_PREDICT_LIMIT}). Every frame of each clip is scored.",
     )
     _ = predict_parser.add_argument(
         "--model",
@@ -317,7 +317,7 @@ def _run_predict(config: Config, args: ClassifierNamespace) -> int:
 
     engine = engine_for(config.internal_root)
     try:
-        candidates = query_untagged_cat_clips(
+        candidates = query_untagged_cat_clip_frames(
             engine,
             camera=args.predict_camera,
             since=args.predict_since,
@@ -333,13 +333,13 @@ def _run_predict(config: Config, args: ClassifierNamespace) -> int:
     )
     predict_fn = benchmark.make_predict_fn(model_path)
     options = predict.PredictOptions(crops_dir=config.storage_root / predict.SPOTCHECK_SUBDIR, threshold=threshold)
-    predictions = predict.predict_clips(candidates, sources=predict_sources, predict=predict_fn, options=options)
+    verdicts = predict.predict_clips(candidates, sources=predict_sources, predict=predict_fn, options=options)
 
     _ = sys.stdout.write(
-        f"classifier predict: {len(predictions)} clip(s), threshold={threshold:.2f} (source={threshold_source})\n",
+        f"classifier predict: {len(verdicts)} clip(s), {len(candidates)} frame(s), threshold={threshold:.2f} (source={threshold_source})\n",
     )
-    if predictions:
-        _ = sys.stdout.write(predict.render_rows(predictions, tz=ZoneInfo(config.web.display_timezone)) + "\n")
+    if verdicts:
+        _ = sys.stdout.write(predict.render_rows(verdicts, tz=ZoneInfo(config.web.display_timezone)) + "\n")
     return _EXIT_OK
 
 
