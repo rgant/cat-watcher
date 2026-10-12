@@ -666,5 +666,5 @@ def _count_clip_frame_subjects(engine: Engine) -> int:
     """Count every ``clip_frame_subjects`` row, to prove a run added or removed none."""
     with get_session(engine) as session:
         return session.execute(
-            select(func.count()).select_from(ClipFrameSubject),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
+            select(func.count()).select_from(ClipFrameSubject),
         ).scalar_one()

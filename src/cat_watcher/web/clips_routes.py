@@ -56,7 +56,7 @@ def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: ClipsFilter, filter_
     When no neighboring clip satisfies the filter, the URL falls back to ``/clips?{filter_qs}`` so
     the keyboard handler's click returns the operator to the queue index.
     """
-    base: Select[tuple[int]] = apply_clip_filters(select(Clip.id), f, display_tz=display_tz)
+    base: Select[int] = apply_clip_filters(select(Clip.id), f, display_tz=display_tz)
     fallback = f"/clips?{filter_qs}"
 
     if f.reviewed == "yes" and clip.reviewed_at is not None:
@@ -234,7 +234,7 @@ def _query_clips_list(
     """
     base_stmt = apply_clip_filters(select(Clip), f, display_tz=display_tz)
     count_stmt = apply_clip_filters(
-        select(func.count()).select_from(Clip),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
+        select(func.count()).select_from(Clip),
         replace(f, reviewed="any"),
         display_tz=display_tz,
     )

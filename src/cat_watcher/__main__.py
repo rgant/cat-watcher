@@ -359,14 +359,11 @@ def _print_heartbeat_status(session: Session, *, now: datetime, tz: tzinfo) -> N
 def _print_agent_starts(session: Session, *, now: datetime) -> None:
     cutoff = now - timedelta(hours=_AGENT_STARTS_WINDOW_HOURS)
     rows = session.execute(
-        select(AgentStart.agent_name, func.count().label("n"))  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
-        .where(AgentStart.started_at >= cutoff)
-        .group_by(AgentStart.agent_name),
+        select(AgentStart.agent_name, func.count().label("n")).where(AgentStart.started_at >= cutoff).group_by(AgentStart.agent_name),
     ).all()
     counts: Counter[str] = Counter()
-    for row in rows:
-        agent_count: tuple[str, int] = tuple(row)
-        counts[agent_count[0]] = agent_count[1]
+    for agent_name, n in rows:
+        counts[agent_name] = n
     print(f"agent_starts (last {_AGENT_STARTS_WINDOW_HOURS}h):")
     for agent in _AGENT_NAMES_ALL:
         print(f"  - {agent}: {counts.get(agent, 0)}")

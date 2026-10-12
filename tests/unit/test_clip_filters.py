@@ -330,7 +330,7 @@ def test_apply_clip_filters_composes_onto_a_count_statement(alembic_engine: Engi
     _ = _add(alembic_engine, cam_id, datetime(2026, 7, 3, 16, 0, tzinfo=UTC), name="b.mp4", has_cat=True)
 
     stmt = apply_clip_filters(
-        select(func.count()).select_from(Clip),  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
+        select(func.count()).select_from(Clip),
         ClipsFilter(reviewed="any", camera="pantry", has_cat=True, day=date(2026, 7, 2)),
         display_tz=_EASTERN,
     )

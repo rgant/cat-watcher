@@ -56,7 +56,7 @@ def query_single_cat_frames(engine: Engine) -> list[CatFrameRow]:
         .join(Subject, Subject.id == ClipFrameSubject.subject_id)
         .where(Subject.kind == "cat")
         .group_by(ClipFrameSubject.clip_frame_id)
-        .having(func.count(ClipFrameSubject.subject_id) == 1)  # pylint: disable=not-callable  # sqlalchemy func.count() is a generative construct, not the builtin; pylint false positive
+        .having(func.count(ClipFrameSubject.subject_id) == 1)
         .subquery()
     )
     stmt = (

@@ -146,10 +146,10 @@ def build_filter_qs(f: ClipsFilter) -> str:
     return urlencode(params)
 
 
-def apply_clip_filters[TP: tuple[object, ...]](stmt: Select[TP], f: ClipsFilter, *, display_tz: tzinfo) -> Select[TP]:
+def apply_clip_filters[*Ts](stmt: Select[*Ts], f: ClipsFilter, *, display_tz: tzinfo) -> Select[*Ts]:
     """Apply ``f`` to a statement selecting from ``Clip``, preserving its row type.
 
-    ``TP`` is bound rather than fixed so one implementation serves ``select(Clip.id)``,
+    ``Ts`` is generic rather than fixed so one implementation serves ``select(Clip.id)``,
     ``select(Clip)``, and ``select(func.count()).select_from(Clip)`` without the caller losing its
     row type.
 
