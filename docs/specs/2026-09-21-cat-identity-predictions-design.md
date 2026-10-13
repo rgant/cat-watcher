@@ -330,8 +330,9 @@ The operator then sees each model error.
 
 1. Train the new checkpoint locally, per the prerequisite.
 2. Run `deploy-update` on the mini. That pulls the code and runs the migration.
-3. Copy the checkpoint `.pt` file into `data/models/` on the mini. The poller
-   does not read the sidecar `.json`, so it stays local.
+3. Copy the checkpoint `.pt` file and its sidecar `.json` into `data/models/` on
+   the mini. The poller reads only the `.pt` file. The `classifier predict`
+   command of step 4 also reads the sidecar.
 4. On the mini, load the checkpoint and predict one known crop.
 5. Add the `[classifier]` table to the `config.toml` of the mini. Do this after
    step 2, because `extra="forbid"` rejects the table before the code exists.

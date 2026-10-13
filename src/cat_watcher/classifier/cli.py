@@ -91,7 +91,7 @@ def configure_classifier_parser(subparser: argparse.ArgumentParser) -> None:
         "--model",
         type=Path,
         default=None,
-        help="Checkpoint to benchmark; default is the newest cat-classifier-*.pt in <internal_root>/models",
+        help="Path to the checkpoint file to benchmark. The default is the newest cat-classifier-*.pt in <internal_root>/models",
     )
     _ = benchmark_parser.add_argument(
         "--target-accuracy",
@@ -139,7 +139,7 @@ def configure_classifier_parser(subparser: argparse.ArgumentParser) -> None:
         "--model",
         type=Path,
         default=None,
-        help="Checkpoint to score with; default is the newest cat-classifier-*.pt in <internal_root>/models",
+        help="Path to the checkpoint file to score with. The default is the newest cat-classifier-*.pt in <internal_root>/models",
     )
     _ = predict_parser.add_argument(
         "--threshold",
