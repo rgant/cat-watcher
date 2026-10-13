@@ -11,7 +11,7 @@
         <tr>
           <th scope="col">Sent</th>
           <th scope="col">Type</th>
-          <th scope="col">Camera</th>
+          <th scope="col">Source</th>
           <th scope="col">Email</th>
           <th scope="col">macOS</th>
           <th scope="col">Subject</th>
@@ -24,7 +24,7 @@
               <time datetime="{{ alert.sent_at.isoformat() }}">{{ alert.sent_at | localstamp }}</time>
             </td>
             <td data-label="Type">{{ alert.alert_type }}</td>
-            <td data-label="Camera">{{ alert.camera_display }}</td>
+            <td data-label="Source">{{ alert.source }}</td>
             <td data-label="Email">{{ "✓" if alert.email_ok else "✗" }}</td>
             <td data-label="macOS">{{ "✓" if alert.macos_ok else "✗" }}</td>
             <td data-label="Subject">{{ alert.subject }}</td>

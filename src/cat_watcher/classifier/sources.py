@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 from PIL import Image
 
-from cat_watcher.classifier.dataset import LOCALIZE_CONF, LoadedFrame, LocalizedBox
-from cat_watcher.detector import DetectorError, best_cat_box, extract_frame_at, load_yolo
+from cat_watcher.classifier.dataset import LoadedFrame, LocalizedBox
+from cat_watcher.detector import BOX_CONF, DetectorError, best_cat_box, extract_frame_at, load_yolo, to_yolo_input
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,18 +70,17 @@ def _read_thumb(thumb_path: Path) -> LoadedFrame | None:
     return LoadedFrame(image=array, source="thumb")
 
 
-def make_localizer(*, model_path: Path, conf: float = LOCALIZE_CONF) -> Localizer:
+def make_localizer(*, model_path: Path, conf: float = BOX_CONF) -> Localizer:
     """Return a ``Localizer`` that runs YOLO at ``conf`` and keeps the highest-confidence cat box.
 
     This function loads the model once and reuses it for every image. It passes ``conf`` into
-    the model call. ``Detector`` passes no threshold there, so ultralytics applies its own
-    default of 0.25. A caller's chosen confidence, not that default, must decide which boxes
-    count.
+    the model call, so the caller's confidence decides which boxes count. The model gets a BGR
+    copy of the RGB image.
     """
     model = load_yolo(model_path)
 
     def localize(image: np.ndarray) -> LocalizedBox | None:
-        results = cast("list[Results]", model(image, verbose=False, conf=conf))
+        results = cast("list[Results]", model(to_yolo_input(image), verbose=False, conf=conf))
         hit: CatHit | None = best_cat_box(results)
         if hit is None:
             return None

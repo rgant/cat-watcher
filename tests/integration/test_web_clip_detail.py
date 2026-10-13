@@ -5,11 +5,13 @@ clip_frame_subjects, absence of dropped <dl> rows, 404 for unknown IDs, and the 
 with HTMX wiring.
 """
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import db_helpers
+import pytest
 from db_helpers import AUTH_HEADER, DEFAULT_START_TS, make_clip_frame, seed_camera_and_clip_with_files, stamp_reviewed_at
 from sqlalchemy import event as sa_event
 
@@ -17,7 +19,7 @@ from cat_watcher.db import Camera, Clip, ClipFrame, ClipFrameSubject, Subject, c
 from cat_watcher.labels import query_cat_frame_counts
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from contextlib import AbstractContextManager
 
     from fastapi import FastAPI
@@ -694,7 +696,13 @@ def test_label_summary_endpoint_returns_recomputed_fields(
         response = client.get(f"/clips/{clip_id}/label-summary", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert response.json() == {"tag_summary": "marcel: 2, rufus: 0", "has_manual_cat": True}
+    assert response.json() == {
+        "tag_summary": "marcel: 2, rufus: 0",
+        "has_manual_cat": True,
+        "identity_html": (
+            '\n  <span class="identity-chip identity-chip-operator"\n        \n        title="Marcel (operator)">Marcel</span>\n\n'
+        ),
+    }
 
 
 def _seed_cats_and_events_for_summary(engine: Engine, clip_id: int) -> None:
@@ -1035,31 +1043,7 @@ def test_filter_scoped_next_points_to_next_unreviewed_clip_same_camera(
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
     seed_clip: Callable[..., int],
 ) -> None:
-    """Next link on /clips/{id}?reviewed=no&camera=pantry points to the next unreviewed clip in that camera."""
-    internal_root, storage_root = storage_dirs
-    config = make_config(internal_root, storage_root)
-    _, clip1_id, clip2_id, _ = _seed_three_unreviewed_clips(
-        db_session_factory,
-        seed_clip,
-        internal_root=internal_root,
-    )
-
-    with alembic_web_test_client(config) as client:
-        response = client.get(f"/clips/{clip1_id}?reviewed=no&camera=pantry", headers=AUTH_HEADER)
-
-    assert response.status_code == 200
-    expected_next_href = f'href="/clips/{clip2_id}?reviewed=no&amp;camera=pantry"'
-    assert expected_next_href in response.text, f"Expected {expected_next_href!r} in response"
-
-
-def test_filter_scoped_prev_points_to_prev_unreviewed_clip_same_camera(
-    storage_dirs: tuple[Path, Path],
-    make_config: Callable[..., Config],
-    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
-    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
-    seed_clip: Callable[..., int],
-) -> None:
-    """Previous link on /clips/{id}?reviewed=no&camera=pantry points to the previous unreviewed clip in that camera."""
+    """Next link on /clips/{id}?reviewed=no&camera=pantry points to the next older unreviewed clip in that camera."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, clip1_id, clip2_id, _ = _seed_three_unreviewed_clips(
@@ -1072,7 +1056,31 @@ def test_filter_scoped_prev_points_to_prev_unreviewed_clip_same_camera(
         response = client.get(f"/clips/{clip2_id}?reviewed=no&camera=pantry", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    expected_prev_href = f'href="/clips/{clip1_id}?reviewed=no&amp;camera=pantry"'
+    expected_next_href = f'href="/clips/{clip1_id}?reviewed=no&amp;camera=pantry" rel="next"'
+    assert expected_next_href in response.text, f"Expected {expected_next_href!r} in response"
+
+
+def test_filter_scoped_prev_points_to_prev_unreviewed_clip_same_camera(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """Previous link on /clips/{id}?reviewed=no&camera=pantry points to the next newer unreviewed clip in that camera."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, _, clip2_id, clip3_id = _seed_three_unreviewed_clips(
+        db_session_factory,
+        seed_clip,
+        internal_root=internal_root,
+    )
+
+    with alembic_web_test_client(config) as client:
+        response = client.get(f"/clips/{clip2_id}?reviewed=no&camera=pantry", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    expected_prev_href = f'href="/clips/{clip3_id}?reviewed=no&amp;camera=pantry" rel="prev"'
     assert expected_prev_href in response.text, f"Expected {expected_prev_href!r} in response"
 
 
@@ -1086,13 +1094,13 @@ def test_filter_scoped_next_at_end_of_queue_links_back_to_clips(
     """Next link on the last clip in the filtered queue points back to /clips?{filter_qs}."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
-    _, _, _, clip3_id = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
+    _, clip1_id, _, _ = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
 
     with alembic_web_test_client(config) as client:
-        response = client.get(f"/clips/{clip3_id}?reviewed=no&camera=pantry", headers=AUTH_HEADER)
+        response = client.get(f"/clips/{clip1_id}?reviewed=no&camera=pantry", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    expected_next_href = 'href="/clips?reviewed=no&amp;camera=pantry"'
+    expected_next_href = 'href="/clips?reviewed=no&amp;camera=pantry" rel="next"'
     assert expected_next_href in response.text, f"Expected {expected_next_href!r} in response"
 
 
@@ -1131,19 +1139,17 @@ def _mark_clip_reviewed_at(internal_root: Path, clip_id: int, reviewed_at: datet
         engine.dispose()
 
 
-def test_after_marking_reviewed_prev_skips_just_marked_clip(
+def test_after_marking_reviewed_next_skips_just_marked_clip(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
     seed_clip: Callable[..., int],
 ) -> None:
-    """After marking clip2 reviewed, its prev link (in reviewed=no queue) skips clip2 and points to clip1.
+    """After marking clip2 reviewed, the next link of clip3 (in reviewed=no queue) skips clip2 and points to clip1.
 
     This tests the documented limitation: the detail page is rendered from db state at request time.
-    Once clip2 is marked reviewed and the user navigates back, prev skips clip2 in the unreviewed
-    set. We assert this by loading clip3?reviewed=no after marking clip2 reviewed, verifying
-    prev=clip1.
+    Once clip2 is marked reviewed, next skips clip2 in the unreviewed set.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -1159,25 +1165,23 @@ def test_after_marking_reviewed_prev_skips_just_marked_clip(
         response = client.get(f"/clips/{clip3_id}?reviewed=no&camera=pantry", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    expected_prev_href = f'href="/clips/{clip1_id}?reviewed=no&amp;camera=pantry"'
-    assert expected_prev_href in response.text, f"Expected prev to skip clip2; expected {expected_prev_href!r}"
-    unexpected_prev_href = f'href="/clips/{clip2_id}?reviewed=no&amp;camera=pantry"'
-    assert unexpected_prev_href not in response.text, "Prev should not point to just-marked clip2"
+    expected_next_href = f'href="/clips/{clip1_id}?reviewed=no&amp;camera=pantry" rel="next"'
+    assert expected_next_href in response.text, f"Expected next to skip clip2; expected {expected_next_href!r}"
+    unexpected_href = f'href="/clips/{clip2_id}?reviewed=no&amp;camera=pantry"'
+    assert unexpected_href not in response.text, "Neither link points to just-marked clip2"
 
 
-def test_filter_scoped_reviewed_yes_nav_orders_by_reviewed_at(
+def test_filter_scoped_reviewed_yes_nav_orders_by_start_ts(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
     seed_clip: Callable[..., int],
 ) -> None:
-    """Under ``reviewed=yes`` prev/next follow ``reviewed_at`` recency, not ``start_ts``.
+    """Under ``reviewed=yes`` prev/next follow ``start_ts`` like every other filter, not ``reviewed_at``.
 
     ``reviewed_at`` is seeded inverted relative to ``start_ts`` (clip1 reviewed last, clip3 reviewed
-    first) so a regression that fell back to the ``start_ts`` ordering would point the opposite way.
-    From the middle clip: Previous (← Newer) is the more-recently-reviewed clip; Next (Older →) is
-    the earlier-reviewed clip.
+    first), so a ``reviewed_at`` order points the opposite way.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -1194,10 +1198,161 @@ def test_filter_scoped_reviewed_yes_nav_orders_by_reviewed_at(
         response = client.get(f"/clips/{clip2_id}?reviewed=yes&camera=pantry", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    expected_prev_href = f'href="/clips/{clip1_id}?reviewed=yes&amp;camera=pantry"'
-    expected_next_href = f'href="/clips/{clip3_id}?reviewed=yes&amp;camera=pantry"'
-    assert expected_prev_href in response.text, f"Expected prev (more-recently-reviewed) {expected_prev_href!r}"
-    assert expected_next_href in response.text, f"Expected next (earlier-reviewed) {expected_next_href!r}"
+    assert f'href="/clips/{clip3_id}?reviewed=yes&amp;camera=pantry" rel="prev"' in response.text
+    assert f'href="/clips/{clip1_id}?reviewed=yes&amp;camera=pantry" rel="next"' in response.text
+
+
+def _sorted_nav_page(
+    config: Config,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    clip_id: int,
+    query: str,
+) -> str:
+    """Return the body of the detail page of ``clip_id`` after the status and tripwire checks."""
+    with alembic_web_test_client(config) as client:
+        response = client.get(f"/clips/{clip_id}?{query}", headers=AUTH_HEADER)
+    assert response.status_code == 200
+    _assert_no_tripwire(response.text)
+    return response.text
+
+
+def test_filter_scoped_nav_follows_the_default_newest_sort(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """With no ``sort`` key, prev is the newer clip and next the older one. ``page`` goes along unchanged."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, older_id, middle_id, newer_id = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
+
+    body = _sorted_nav_page(config, alembic_web_test_client, middle_id, "reviewed=no&page=3")
+
+    assert f'<a href="/clips/{newer_id}?reviewed=no&amp;page=3" rel="prev">← Newer</a>' in body
+    assert f'<a href="/clips/{older_id}?reviewed=no&amp;page=3" rel="next">Older →</a>' in body
+    assert '<a href="/clips?reviewed=no&amp;page=3">All clips</a>' in body
+
+
+def test_filter_scoped_nav_follows_the_oldest_sort(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """With ``sort=oldest``, prev is the older clip and next the newer one, and the labels say so.
+
+    The ``page`` value goes along unchanged. The links do not compute the page of the neighbor.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, older_id, middle_id, newer_id = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
+
+    body = _sorted_nav_page(config, alembic_web_test_client, middle_id, "reviewed=no&sort=oldest&page=3")
+
+    carried = "reviewed=no&amp;sort=oldest&amp;page=3"
+    assert f'<a href="/clips/{older_id}?{carried}" rel="prev">← Older</a>' in body
+    assert f'<a href="/clips/{newer_id}?{carried}" rel="next">Newer →</a>' in body
+    assert f'<a href="/clips?{carried}">All clips</a>' in body
+
+
+def test_filter_scoped_nav_under_oldest_sort_ends_on_the_newest_clip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """The newest clip is the end of an oldest-first list, so its next link returns to the list."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, _, middle_id, newer_id = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
+
+    body = _sorted_nav_page(config, alembic_web_test_client, newer_id, "reviewed=no&sort=oldest")
+
+    assert f'<a href="/clips/{middle_id}?reviewed=no&amp;sort=oldest" rel="prev">← Older</a>' in body
+    assert '<a href="/clips?reviewed=no&amp;sort=oldest" rel="next">Newer →</a>' in body
+
+
+def _seed_start_ts_tie(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+    *,
+    internal_root: Path,
+) -> tuple[int, int]:
+    """Seed two clips on two cameras with one ``start_ts``. Return ``(lower_id, higher_id)``."""
+    with db_session_factory(internal_root) as session:
+        cams = [Camera(name=name, display_name=name.title(), host="cam.example.com") for name in ("pantry", "garage")]
+        session.add_all(cams)
+        session.flush()
+        cam_ids = [cam.id for cam in cams]
+    start_ts = datetime(2026, 6, 1, 10, 0, 0, tzinfo=UTC)
+    engine = _detail_engine_for(internal_root)
+    try:
+        first = seed_clip(engine, camera_id=cam_ids[0], start_ts=start_ts, has_cat=False)
+        second = seed_clip(engine, camera_id=cam_ids[1], start_ts=start_ts, has_cat=False)
+    finally:
+        engine.dispose()
+    return min(first, second), max(first, second)
+
+
+def test_filter_scoped_nav_steps_to_a_start_ts_tie_under_the_newest_sort(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """Newest first lists the higher ``id`` first on a tie, so its next link is the lower ``id``."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    lower_id, higher_id = _seed_start_ts_tie(db_session_factory, seed_clip, internal_root=internal_root)
+
+    higher = _sorted_nav_page(config, alembic_web_test_client, higher_id, "reviewed=no")
+    lower = _sorted_nav_page(config, alembic_web_test_client, lower_id, "reviewed=no")
+
+    assert f'<a href="/clips/{lower_id}?reviewed=no" rel="next">Older →</a>' in higher
+    assert f'<a href="/clips/{higher_id}?reviewed=no" rel="prev">← Newer</a>' in lower
+
+
+def test_filter_scoped_nav_steps_to_a_start_ts_tie_under_the_oldest_sort(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """Oldest first lists the lower ``id`` first on a tie, so its next link is the higher ``id``."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    lower_id, higher_id = _seed_start_ts_tie(db_session_factory, seed_clip, internal_root=internal_root)
+
+    lower = _sorted_nav_page(config, alembic_web_test_client, lower_id, "reviewed=no&sort=oldest")
+    higher = _sorted_nav_page(config, alembic_web_test_client, higher_id, "reviewed=no&sort=oldest")
+
+    assert f'<a href="/clips/{higher_id}?reviewed=no&amp;sort=oldest" rel="next">Newer →</a>' in lower
+    assert f'<a href="/clips/{lower_id}?reviewed=no&amp;sort=oldest" rel="prev">← Older</a>' in higher
+
+
+def test_legacy_nav_steps_to_a_start_ts_tie(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> None:
+    """With no filter keys, the global nav also steps from the higher ``id`` to the lower one on a tie."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    lower_id, higher_id = _seed_start_ts_tie(db_session_factory, seed_clip, internal_root=internal_root)
+
+    with alembic_web_test_client(config) as client:
+        response = client.get(f"/clips/{higher_id}", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert f'href="http://testserver/clips/{lower_id}" rel="next"' in response.text
 
 
 def test_review_endpoint_stamp_matches_the_rendered_page(
@@ -1223,3 +1378,223 @@ def test_review_endpoint_stamp_matches_the_rendered_page(
     body = cast("dict[str, str]", posted.json())
     assert f">{body['reviewed_at_stamp']}</time>" in rendered.text
     assert f'<span class="review-badge">Reviewed {body["reviewed_at_date"]}</span>' in rendered.text
+
+
+_TRIPWIRES = ("{_fmt", "{self.", "{cam.", "{cfg.", "NoneType")
+
+
+def _seed_model_frames(engine: Engine, clip_id: int, *, marcel_id: int) -> list[int]:
+    """Add four frames: a confident Marcel, an unsure one, no box, and not classified."""
+    specs: list[tuple[int | None, float | None, str | None]] = [
+        (marcel_id, 0.95, "model@abc"),
+        (marcel_id, 0.40, "model@abc"),
+        (None, None, "model@abc"),
+        (None, None, None),
+    ]
+    with get_session(engine) as session:
+        frame_ids: list[int] = []
+        for ordinal, (subject_id, confidence, version) in enumerate(specs):
+            frame = ClipFrame(
+                clip_id=clip_id,
+                ordinal=ordinal,
+                t_offset_seconds=float(ordinal),
+                score=0.9,
+                thumb_path=f"thumbs/model_{clip_id}_{ordinal}.jpg",
+                predicted_subject_id=subject_id,
+                prediction_confidence=confidence,
+                classifier_version=version,
+            )
+            session.add(frame)
+            session.flush()
+            frame_ids.append(frame.id)
+    return frame_ids
+
+
+def _tag_rows(html: str) -> list[str]:
+    return re.findall(r'<tr class="tag-row[^"]*">.*?</tr>', html, flags=re.DOTALL)
+
+
+def _predictions(row: str) -> list[tuple[str, str]]:
+    """Return ``(class, text)`` of each prediction element in a tag row."""
+    return re.findall(r'<(?:span|button)\b[^>]*class="(prediction[^"]*)"[^>]*>(.*?)</', row, flags=re.DOTALL)
+
+
+def _attribute_pairs(tag: str) -> list[tuple[str, str]]:
+    return re.findall(r'([\w:-]+)="([^"]*)"', tag)
+
+
+def _tag_buttons(row: str) -> list[dict[str, str]]:
+    """Return the attributes of each ``button.tag-btn`` in a tag row, in document order."""
+    tags: list[str] = re.findall(r'<button\b[^>]*class="tag-btn[^"]*"[^>]*>', row, flags=re.DOTALL)
+    return [dict(_attribute_pairs(tag)) for tag in tags]
+
+
+def _assert_no_tripwire(text: str) -> None:
+    for tripwire in _TRIPWIRES:
+        assert tripwire not in text
+
+
+class _ModelClip(NamedTuple):
+    config: Config
+    clip_id: int
+    marcel_id: int
+    rufus_id: int
+    frame_ids: list[int]
+    engine: Engine
+
+
+@pytest.fixture
+def model_clip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> Generator[_ModelClip]:
+    """Seed a cat-positive clip with four predicted frames and the cats Marcel and Rufus."""
+    internal_root, storage_root = storage_dirs
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    engine = _detail_engine_for(internal_root)
+    marcel_id = db_helpers.seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=1)
+    rufus_id = db_helpers.seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=2)
+    frame_ids = _seed_model_frames(engine, clip_id, marcel_id=marcel_id)
+    yield _ModelClip(make_config(internal_root, storage_root), clip_id, marcel_id, rufus_id, frame_ids, engine)
+    engine.dispose()
+
+
+def _detail_html(
+    clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> str:
+    with alembic_web_test_client(clip.config) as client:
+        response = client.get(f"/clips/{clip.clip_id}", headers=AUTH_HEADER)
+    assert response.status_code == 200
+    _assert_no_tripwire(response.text)
+    return response.text
+
+
+def test_clip_detail_shows_model_label_beside_each_frame(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """Each frame row shows its stored model result: a confident cat, unsure, no box, not classified."""
+    html = _detail_html(model_clip, alembic_web_test_client)
+
+    labels = [text.strip() for row in _tag_rows(html) for _, text in _predictions(row)]
+    assert labels == ["Marcel 0.95", "unsure (0.40)", "no cat box found", "not classified"]
+
+
+def test_clip_detail_shows_model_label_on_tagged_frame_and_leaves_untagged_unpressed(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A tagged frame shows its tag pressed and its model label. An untagged frame has no pressed button."""
+    with get_session(model_clip.engine) as session:
+        session.add(ClipFrameSubject(clip_frame_id=model_clip.frame_ids[1], subject_id=model_clip.marcel_id))
+
+    rows = _tag_rows(_detail_html(model_clip, alembic_web_test_client))
+
+    assert len(rows) == 4
+    assert [row.count("tag-btn-on") for row in rows] == [0, 1, 0, 0]
+    assert [row.count('aria-pressed="true"') for row in rows] == [0, 1, 0, 0]
+    assert [text.strip() for _, text in _predictions(rows[1])] == ["unsure (0.40)"]
+
+
+def test_model_label_is_not_a_tag_button(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """The tag buttons keep their order and data attributes, and no prediction uses a tag class."""
+    rows = _tag_rows(_detail_html(model_clip, alembic_web_test_client))
+
+    assert len(rows) == len(model_clip.frame_ids)
+    for row, frame_id in zip(rows, model_clip.frame_ids, strict=True):
+        predictions = _predictions(row)
+        assert predictions
+        assert all("tag-btn" not in css_class for css_class, _ in predictions)
+        assert [(b["data-subject-slug"], b["data-frame-id"], b["data-subject-id"]) for b in _tag_buttons(row)] == [
+            ("marcel", str(frame_id), str(model_clip.marcel_id)),
+            ("rufus", str(frame_id), str(model_clip.rufus_id)),
+        ]
+
+
+def test_clip_detail_shows_clip_identity_in_metadata(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """The metadata list holds the clip result in dd#clip-identity."""
+    match = re.search(r'<dd id="clip-identity">(.*?)</dd>', _detail_html(model_clip, alembic_web_test_client), flags=re.DOTALL)
+
+    assert match is not None
+    assert "identity-chip identity-chip-model" in match.group(1)
+    assert "Marcel" in match.group(1)
+
+
+def test_clip_detail_shows_no_cat_in_identity_for_a_clip_that_is_not_cat_positive(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A reviewed clip with no cat tag renders ``no cat`` in dd#clip-identity, never an empty cell."""
+    with alembic_web_test_client(model_clip.config) as client:
+        assert client.post(f"/clips/{model_clip.clip_id}/reviewed", headers=AUTH_HEADER).status_code < 300
+        response = client.get(f"/clips/{model_clip.clip_id}", headers=AUTH_HEADER)
+    match = re.search(r'<dd id="clip-identity">(.*?)</dd>', response.text, flags=re.DOTALL)
+
+    assert match is not None
+    assert match.group(1).strip() != ""
+    assert "no cat" in match.group(1)
+    assert "identity-chip" not in match.group(1)
+
+
+def test_label_summary_identity_html_follows_tag_and_review_toggles(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """identity_html changes after a tag toggle and again after a review toggle."""
+    clip_id = model_clip.clip_id
+    tag_url = f"/clips/{clip_id}/frames/{model_clip.frame_ids[0]}/subjects/{model_clip.rufus_id}"
+
+    def identity_html(client: TestClient) -> str:
+        response = client.get(f"/clips/{clip_id}/label-summary", headers=AUTH_HEADER)
+        assert response.status_code == 200
+        _assert_no_tripwire(response.text)
+        return str(cast("dict[str, object]", response.json())["identity_html"])
+
+    with alembic_web_test_client(model_clip.config) as client:
+        initial = identity_html(client)
+        assert "identity-chip-model" in initial
+        assert "Marcel" in initial
+
+        assert client.put(tag_url, headers=AUTH_HEADER).status_code < 300
+        tagged = identity_html(client)
+        assert tagged != initial
+        assert "identity-chip-operator" in tagged
+        assert "Rufus" in tagged
+
+        assert client.delete(tag_url, headers=AUTH_HEADER).status_code < 300
+        assert identity_html(client) == initial
+
+        assert client.post(f"/clips/{clip_id}/reviewed", headers=AUTH_HEADER).status_code < 300
+        assert "no cat" in identity_html(client)
+        assert "identity-chip" not in identity_html(client)
+
+
+def test_clip_detail_names_operator_cat_on_unreviewed_clip_the_detector_calls_no_cat(
+    model_clip: _ModelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A cat tag names its cat before the cat-positive check, and the model cat stays hidden.
+
+    A tag does not mark the clip reviewed, so the view keeps the detector verdict ``no cat``.
+    """
+    with get_session(model_clip.engine) as session:
+        clip = session.get(Clip, model_clip.clip_id)
+        assert clip is not None
+        clip.has_cat = False
+        session.add(ClipFrameSubject(clip_frame_id=model_clip.frame_ids[1], subject_id=model_clip.rufus_id))
+
+    match = re.search(r'<dd id="clip-identity">(.*?)</dd>', _detail_html(model_clip, alembic_web_test_client), flags=re.DOTALL)
+
+    assert match is not None
+    assert "identity-chip identity-chip-operator" in match.group(1)
+    assert "Rufus" in match.group(1)
+    assert "identity-chip-model" not in match.group(1)
+    assert "no cat" not in match.group(1)

@@ -356,6 +356,18 @@ video {
   color: var(--color-muted);
 }
 
+/* ---------- stats tables ---------- */
+
+/* The page heading names no span, so each caption shows the span of its table. */
+.stats-list {
+  margin-block-end: var(--space-md);
+
+  & caption {
+    font-weight: 600;
+    text-align: start;
+  }
+}
+
 /* =================================================================================================
  * Tablet: 768px+
  * ============================================================================================== */
@@ -447,6 +459,15 @@ video {
   .clip-list td::before,
   .clip-list .thumb-cell::before {
     content: none;
+  }
+
+  /* On a phone the per-cat table uses the .clip-list card padding, so this rule waits for 768px. */
+  .stats-list {
+    & th,
+    & td {
+      padding: var(--space-xs) var(--space-sm);
+      text-align: start;
+    }
   }
 
   .clip-list img {
@@ -591,6 +612,11 @@ video {
     fill: var(--color-no-cat-graphic);
   }
 
+  /* The route sets --lane-color inline from the cat color. A cat with no color gets the text color. */
+  & .clip-cat-lane {
+    fill: var(--lane-color, var(--color-text));
+  }
+
   & .clip-manual {
     stroke: var(--color-manual);
     stroke-width: 1.5;
@@ -603,18 +629,9 @@ video {
 }
 
 @media (hover: hover) {
-  .timeline-svg .clip:hover,
-  .timeline-svg .bucket:hover {
+  .timeline-svg .clip:hover {
     filter: drop-shadow(0 0 2px var(--color-link));
   }
-}
-
-.timeline-svg .bucket-cat {
-  fill: var(--color-cat-graphic);
-}
-
-.timeline-svg .bucket-no-cat {
-  fill: var(--color-no-cat-graphic);
 }
 
 .timeline-svg .alert-line {
@@ -791,6 +808,14 @@ video {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The cat names sit under the photo. A chip on the photo gradient is hard to read. */
+.thumb-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding-block-start: var(--space-xs);
 }
 
 @media (hover: hover) {
@@ -1056,7 +1081,9 @@ video {
   }
 }
 
-.clip-nav {
+/* The clip detail nav and the clip list page controls share one layout. */
+.clip-nav,
+.pagination {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem;
@@ -1071,7 +1098,12 @@ video {
   }
 }
 
-.clip-nav-disabled {
+.pagination {
+  margin-block-start: 1rem;
+}
+
+.clip-nav-disabled,
+.pagination-disabled {
   cursor: not-allowed;
   color: var(--color-muted);
 }
@@ -1200,6 +1232,29 @@ video {
   white-space: nowrap;
 }
 
+/* The model label is text, not a control. It shares the dashed, unfilled look of a model chip. */
+.tag-row-model {
+  white-space: nowrap;
+}
+
+.prediction {
+  --chip-color: var(--color-border);
+
+  display: inline-block;
+
+  padding: 0 var(--space-xs);
+  border: 2px dashed var(--chip-color);
+  border-radius: .25rem;
+
+  font-size: .875rem;
+  color: var(--color-text);
+}
+
+.prediction-fallback {
+  font-style: italic;
+  color: var(--color-muted);
+}
+
 .tag-btn {
   min-block-size: var(--tap-target);
   margin: var(--space-xs);
@@ -1246,5 +1301,42 @@ video {
 
 .review-badge {
   font-size: .875rem;
+  color: var(--color-muted);
+}
+
+/* ---------- cat identity (clips list, clip detail) ---------- */
+
+/* A model chip has a dashed border and no fill. An operator chip has a solid fill. Neither is a
+   tag control, so neither uses the .tag-btn classes. The subject color is set inline as
+   --chip-color. */
+.identity-chip {
+  --chip-color: var(--color-border);
+
+  display: inline-block;
+
+  padding: 0 var(--space-xs);
+  border: 2px solid var(--chip-color);
+  border-radius: .25rem;
+
+  font-size: .875rem;
+}
+
+.identity-chip-model {
+  border-style: dashed;
+  color: var(--color-text);
+}
+
+/* A cat with no color gets the text color as its fill, so the light text stays readable. */
+.identity-chip-operator {
+  --chip-color: var(--color-text);
+
+  font-weight: 600;
+  color: var(--color-bg-card);
+  background: var(--chip-color);
+}
+
+.identity-fallback {
+  font-size: .875rem;
+  font-style: italic;
   color: var(--color-muted);
 }

@@ -200,7 +200,7 @@ def test_every_control_malformed_at_once_reports_all_of_them(
 
     with alembic_web_test_client(config) as client:
         response = client.get(
-            "/clips?camera=nope&has_cat=maybe&date_str=abc&reviewed=bogus",
+            "/clips?camera=nope&has_cat=maybe&date_str=abc&reviewed=bogus&sort=bogus&page=abc",
             headers=AUTH_HEADER,
         )
 

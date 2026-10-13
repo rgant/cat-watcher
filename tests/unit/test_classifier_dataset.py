@@ -13,11 +13,9 @@ import pytest
 from image_helpers import gradient_rgb
 from PIL import Image
 
+from cat_watcher.classifier.crop import CROP_MAX_WIDTH, CROP_QUALITY, crop_frame, write_crop_jpeg
 from cat_watcher.classifier.dataset import (
-    CROP_MAX_WIDTH,
-    CROP_QUALITY,
     DATASET_SUBDIR,
-    LOCALIZE_CONF,
     MIN_CROPS_PER_CLASS,
     CropRecord,
     ExportError,
@@ -34,6 +32,7 @@ from cat_watcher.classifier.dataset import (
 from cat_watcher.classifier.geometry import PAD_FRAC, square_pad_box
 from cat_watcher.classifier.labels_query import CatFrameRow
 from cat_watcher.classifier.splitting import RATIOS, SEED, split_by_clip
+from cat_watcher.detector import BOX_CONF
 from cat_watcher.thumbnails import encode_frame
 
 if TYPE_CHECKING:
@@ -109,7 +108,6 @@ def _sources(
 def test_module_constants_match_the_task_brief() -> None:
     """Every module constant holds the value the brief specifies verbatim."""
     assert DATASET_SUBDIR == "classifier/dataset"
-    assert LOCALIZE_CONF == 0.10
     assert MIN_CROPS_PER_CLASS == 20
     assert CROP_MAX_WIDTH == 256
     assert CROP_QUALITY == 92
@@ -428,6 +426,29 @@ def test_export_dataset_writes_crops_at_crop_quality(tmp_path: Path) -> None:
     assert written != at_thumb_quality.read_bytes()
 
 
+def test_export_dataset_crop_bytes_equal_the_shared_crop_pipeline(tmp_path: Path) -> None:
+    """An exported crop file equals ``write_crop_jpeg`` on ``crop_frame`` for the same frame and box."""
+    rows = _rows_for_clips("marcel", [1, 2, 3]) + _rows_for_clips("rufus", [4, 5, 6])
+    gradient = gradient_rgb(200, 200)
+    box = (50.0, 60.0, 150.0, 170.0)
+    manifest = export_dataset(
+        rows,
+        classes=("marcel", "rufus"),
+        dataset_root=tmp_path / "dataset",
+        sources=_sources(
+            frame_source=_FrameSourceStub(image_by_frame_id=dict.fromkeys((r.frame_id for r in rows), gradient)),
+            localizer=_LocalizerStub(box=box),
+        ),
+        params=ExportParams(min_crops_per_class=3),
+    )
+    record = manifest.records[0]
+    crop, padded = crop_frame(gradient, box)
+    expected = tmp_path / "expected.jpg"
+    write_crop_jpeg(crop, expected)
+    assert record.box_xyxy == padded
+    assert (tmp_path / "dataset" / record.crop_relpath).read_bytes() == expected.read_bytes()
+
+
 def test_write_manifest_then_read_manifest_round_trips(tmp_path: Path) -> None:
     """``write_manifest`` then ``read_manifest`` returns a manifest equal to the original."""
     rows = _rows_for_clips("marcel", [1, 2, 3]) + _rows_for_clips("rufus", [4, 5, 6])
@@ -641,10 +662,10 @@ def test_export_summary_records_the_export_parameters() -> None:
         seed=1729,
         ratios=(0.7, 0.15, 0.15),
         pad_frac=0.12,
-        localize_conf=LOCALIZE_CONF,
+        localize_conf=BOX_CONF,
         dataset_hash="deadbeef",
     )
-    assert summary.localize_conf == LOCALIZE_CONF
+    assert summary.localize_conf == BOX_CONF
 
 
 def test_crop_record_holds_the_documented_fields() -> None:
@@ -676,7 +697,7 @@ def test_export_manifest_holds_summary_and_records() -> None:
         seed=1729,
         ratios=(0.7, 0.15, 0.15),
         pad_frac=0.12,
-        localize_conf=LOCALIZE_CONF,
+        localize_conf=BOX_CONF,
         dataset_hash="deadbeef",
     )
     record = CropRecord(

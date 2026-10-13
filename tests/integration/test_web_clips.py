@@ -10,29 +10,33 @@ from ``tests/conftest.py``. The auth path itself is exhaustively covered by ``te
 this module just attaches a constant ``Authorization`` header to every request.
 """
 
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import pytest
 from db_helpers import (
     AUTH_HEADER,
     DEFAULT_START_TS,
     build_detector_clip,
+    build_test_clip,
     seed_cat_subject,
     stamp_reviewed_at,
     tag_clip_frame,
 )  # pytest pythonpath makes this importable
-from sqlalchemy import desc, select
+from sqlalchemy import desc, event, select
+from sqlalchemy.engine import Engine
 
-from cat_watcher.db import Camera, Clip, ClipFrame, create_engine, get_session
+from cat_watcher.db import Camera, Clip, ClipFrame, Subject, create_engine, get_session
+from cat_watcher.identity import ClipIdentity
+from cat_watcher.web.clips_routes import _identity_fields
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from contextlib import AbstractContextManager
 
     from fastapi.testclient import TestClient
-    from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
@@ -867,17 +871,16 @@ def test_media_clip_returns_rfc_correct_status_for_bad_range_headers(  # noqa: P
     assert response.status_code == expected_status
 
 
-def test_clips_list_renders_in_start_ts_ascending_order_for_reviewed_no(
+def test_clips_list_renders_in_start_ts_descending_order_for_reviewed_no(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """Default ``?reviewed=no`` orders unreviewed rows by ``start_ts ASC`` — oldest first.
+    """Default ``?reviewed=no`` orders unreviewed rows by ``start_ts DESC``, newest first.
 
-    The review queue surfaces the oldest unreviewed clip at the top so operators work through
-    footage in chronological order. Seed three unreviewed clips out-of-order; the rendered HTML
-    must show their detail links oldest-first.
+    Seed three unreviewed clips out of order. The rendered HTML must show their detail links
+    newest first.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -911,9 +914,9 @@ def test_clips_list_renders_in_start_ts_ascending_order_for_reviewed_no(
 
     assert response.status_code == 200
     body = response.text
-    positions = [body.find(f"/clips/{cid}") for cid in (oldest_id, middle_id, newest_id)]
+    positions = [body.find(f"/clips/{cid}") for cid in (newest_id, middle_id, oldest_id)]
     assert all(p > 0 for p in positions), "every clip's detail link must appear in body"
-    assert positions == sorted(positions), "rows must render oldest-first (start_ts ASC) for reviewed=no"
+    assert positions == sorted(positions), "rows must render newest-first (start_ts DESC) for reviewed=no"
 
 
 def test_clips_list_any_renders_in_start_ts_descending_order(
@@ -922,7 +925,7 @@ def test_clips_list_any_renders_in_start_ts_descending_order(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """``?reviewed=any`` preserves the legacy ``start_ts DESC`` ordering.
+    """``?reviewed=any`` orders rows by ``start_ts DESC``.
 
     Seed three clips out-of-chronological-insert-order; the rendered HTML must show their
     detail-page links in newest-first order.
@@ -1307,7 +1310,11 @@ def test_clips_list_reviewed_yes_only_reviewed_clips(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """``?reviewed=yes`` shows only clips with ``reviewed_at IS NOT NULL``, ordered ``reviewed_at DESC``."""
+    """``?reviewed=yes`` shows only reviewed clips, ordered ``start_ts DESC``, not by ``reviewed_at``.
+
+    ``reviewed_at`` runs opposite to ``start_ts``, so a ``reviewed_at`` order puts the rows the
+    other way round.
+    """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, unreviewed_id = _seed_camera_and_clip(
@@ -1334,8 +1341,8 @@ def test_clips_list_reviewed_yes_only_reviewed_clips(
     )
     engine = _clips_engine_for(internal_root)
     try:
-        stamp_reviewed_at(engine, reviewed_earlier_id, datetime(2026, 5, 2, 10, 0, 0, tzinfo=UTC))
-        stamp_reviewed_at(engine, reviewed_later_id, datetime(2026, 5, 2, 14, 0, 0, tzinfo=UTC))
+        stamp_reviewed_at(engine, reviewed_earlier_id, datetime(2026, 5, 2, 14, 0, 0, tzinfo=UTC))
+        stamp_reviewed_at(engine, reviewed_later_id, datetime(2026, 5, 2, 10, 0, 0, tzinfo=UTC))
     finally:
         engine.dispose()
 
@@ -1344,10 +1351,9 @@ def test_clips_list_reviewed_yes_only_reviewed_clips(
 
     assert response.status_code == 200
     assert f"/clips/{unreviewed_id}" not in response.text
-    # reviewed_later should appear before reviewed_earlier in the page (reviewed_at DESC).
     later_pos = response.text.find(f"/clips/{reviewed_later_id}")
     earlier_pos = response.text.find(f"/clips/{reviewed_earlier_id}")
-    assert later_pos < earlier_pos, "most-recently-reviewed clip must render first"
+    assert later_pos < earlier_pos, "the clip that starts later must render first"
 
 
 def test_clips_list_reviewed_column_shows_dash_for_unreviewed(
@@ -1546,3 +1552,474 @@ def test_clips_list_marking_reviewed_removes_from_no_queue(
 
     assert list_response.status_code == 200
     assert f"/clips/{clip_id}" not in list_response.text
+
+
+_TRIPWIRES = ("{_fmt", "{self.", "{cam.", "{cfg.", "NoneType")
+
+
+@pytest.fixture
+def identity_engine(storage_dirs: tuple[Path, Path]) -> Generator[Engine]:
+    """Yield an engine on the test database for seeding identity rows. The fixture disposes it."""
+    engine = _clips_engine_for(storage_dirs[0])
+    yield engine
+    engine.dispose()
+
+
+def _seed_cat_with_color(engine: Engine, *, slug: str, display_name: str, color: str, display_order: int) -> int:
+    subject_id = seed_cat_subject(engine, slug=slug, display_name=display_name, display_order=display_order)
+    with get_session(engine) as session:
+        subject = session.get(Subject, subject_id)
+        assert subject is not None
+        subject.color = color
+    return subject_id
+
+
+class _Prediction(NamedTuple):
+    classifier_version: str | None
+    predicted_slug: str | None
+    confidence: float | None
+
+
+class _MarcelClip(NamedTuple):
+    config: Config
+    clip_id: int
+    marcel_id: int
+    engine: Engine
+
+
+@pytest.fixture
+def marcel_clip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    identity_engine: Engine,
+) -> _MarcelClip:
+    """Seed a cat-positive clip and the cat Marcel."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    marcel = _seed_cat_with_color(identity_engine, slug="marcel", display_name="Marcel", color="#ff8800", display_order=1)
+    return _MarcelClip(config, clip_id, marcel, identity_engine)
+
+
+def _seed_predicted_frame(
+    engine: Engine,
+    *,
+    clip_id: int,
+    subject_id: int | None = None,
+    confidence: float | None = None,
+    classifier_version: str | None = "model@abc",
+) -> None:
+    with get_session(engine) as session:
+        session.add(
+            ClipFrame(
+                clip_id=clip_id,
+                ordinal=0,
+                t_offset_seconds=0.0,
+                score=0.9,
+                thumb_path=f"thumbs/predicted_{clip_id}.jpg",
+                predicted_subject_id=subject_id,
+                prediction_confidence=confidence,
+                classifier_version=classifier_version,
+            ),
+        )
+
+
+def _clips_list_body(
+    config: Config,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> str:
+    with alembic_web_test_client(config) as client:
+        response = client.get("/clips?reviewed=any", headers=AUTH_HEADER)
+    assert response.status_code == 200
+    for tripwire in _TRIPWIRES:
+        assert tripwire not in response.text
+    return response.text
+
+
+def test_clips_list_shows_model_identity_chip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    identity_engine: Engine,
+) -> None:
+    """A cat-positive clip with a model result shows the cat name as a model chip in its subject color."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    marcel = _seed_cat_with_color(identity_engine, slug="marcel", display_name="Marcel", color="#ff8800", display_order=1)
+    _seed_predicted_frame(identity_engine, clip_id=clip_id, subject_id=marcel, confidence=0.95)
+
+    body = _clips_list_body(config, alembic_web_test_client)
+
+    assert "identity-chip identity-chip-model" in body
+    assert "Marcel" in body
+    assert "#ff8800" in body
+    assert "identity-chip-operator" not in body
+
+
+def test_clips_list_shows_operator_identity_chip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    identity_engine: Engine,
+) -> None:
+    """A clip with an operator cat tag shows that cat as an operator chip."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    rufus = _seed_cat_with_color(identity_engine, slug="rufus", display_name="Rufus", color="#0088ff", display_order=2)
+    tag_clip_frame(identity_engine, clip_id=clip_id, subject_id=rufus, reviewed_at=datetime.now(UTC))
+
+    body = _clips_list_body(config, alembic_web_test_client)
+
+    assert "identity-chip identity-chip-operator" in body
+    assert "Rufus" in body
+    assert "identity-chip-model" not in body
+
+
+@pytest.mark.parametrize(
+    ("prediction", "label"),
+    [
+        (_Prediction(None, None, None), "not classified"),
+        (_Prediction("model@abc", None, None), "no cat box found"),
+        (_Prediction("model@abc", "marcel", 0.2), "unsure"),
+    ],
+)
+def test_clips_list_shows_fallback_label_for_cat_positive_clip_without_named_cat(
+    marcel_clip: _MarcelClip,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    prediction: _Prediction,
+    label: str,
+) -> None:
+    """A cat-positive clip that names no cat shows its clip result, never an empty cell."""
+    _seed_predicted_frame(
+        marcel_clip.engine,
+        clip_id=marcel_clip.clip_id,
+        subject_id=marcel_clip.marcel_id if prediction.predicted_slug == "marcel" else None,
+        confidence=prediction.confidence,
+        classifier_version=prediction.classifier_version,
+    )
+
+    body = _clips_list_body(marcel_clip.config, alembic_web_test_client)
+
+    assert re.search(rf">\s*{label}\s*<", body) is not None
+    assert "identity-chip" not in body
+
+
+def test_clips_list_shows_not_classified_for_cat_positive_clip_without_frames(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A cat-positive clip with no frame rows still shows a label."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _ = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+
+    body = _clips_list_body(config, alembic_web_test_client)
+
+    assert "not classified" in body
+
+
+def test_clips_list_keeps_no_cat_cell_for_clip_without_cat(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    identity_engine: Engine,
+) -> None:
+    """A clip that is not cat-positive shows ``no cat`` and no identity."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, clip_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root, has_cat=False)
+    marcel = _seed_cat_with_color(identity_engine, slug="marcel", display_name="Marcel", color="#ff8800", display_order=1)
+    _seed_predicted_frame(identity_engine, clip_id=clip_id, subject_id=marcel, confidence=0.95)
+
+    body = _clips_list_body(config, alembic_web_test_client)
+
+    assert "badge-no-cat" in body
+    assert "no cat" in body
+    assert "identity-chip" not in body
+    assert "not classified" not in body
+
+
+def test_clips_list_identity_query_count_does_not_grow_with_page_size(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    identity_engine: Engine,
+) -> None:
+    """More clips on the page add no ``clip_frames`` queries."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _, first_id = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    marcel = _seed_cat_with_color(identity_engine, slug="marcel", display_name="Marcel", color="#ff8800", display_order=1)
+    _seed_predicted_frame(identity_engine, clip_id=first_id, subject_id=marcel, confidence=0.95)
+
+    statements: list[str] = []
+
+    def _record(_conn: object, _cursor: object, statement: str, *_rest: object) -> None:
+        if "clip_frames" in statement:
+            statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", _record)
+    try:
+        _ = _clips_list_body(config, alembic_web_test_client)
+        single_page_count = len(statements)
+        for index in range(5):
+            start_ts = DEFAULT_START_TS + timedelta(hours=index + 1)
+            _seed_extra_clip(db_session_factory, internal_root, source_filename=f"extra{index}.mp4", start_ts=start_ts, has_cat=True)
+        statements.clear()
+        _ = _clips_list_body(config, alembic_web_test_client)
+    finally:
+        event.remove(Engine, "before_cursor_execute", _record)
+
+    assert single_page_count > 0
+    assert len(statements) == single_page_count
+
+
+def test_identity_fields_label_cat_positive_clip_that_names_no_cat_and_has_no_fallback() -> None:
+    """The label differs from the ``cat`` badge, so the cell does not contradict itself."""
+    fields = _identity_fields(ClipIdentity(cats=(), fallback=None), {}, effective_has_cat=True, label_non_cat=False)
+
+    assert fields == {"identity_chips": [], "identity_fallback_label": "no cat named"}
+
+
+@pytest.mark.parametrize(("label_non_cat", "expected"), [(True, "no cat"), (False, None)])
+def test_identity_fields_label_a_clip_that_is_not_cat_positive_only_when_asked(*, label_non_cat: bool, expected: str | None) -> None:
+    """The detail page labels a non-cat clip. The list leaves its cell as the ``no cat`` badge shows it."""
+    fields = _identity_fields(None, {}, effective_has_cat=False, label_non_cat=label_non_cat)
+
+    assert fields == {"identity_chips": [], "identity_fallback_label": expected}
+
+
+# --- sort and pages ------------------------------------------------------------------------------
+
+_PAGE_BASE_TS = datetime(2026, 5, 1, 0, 0, 0, tzinfo=UTC)
+
+
+def _seed_clip_run(
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    internal_root: Path,
+    *,
+    count: int,
+) -> list[int]:
+    """Seed one camera and ``count`` clips one minute apart. Return the ids, oldest first."""
+    with db_session_factory(internal_root) as session:
+        cam = Camera(name="pantry", display_name="Pantry Litter Box", host="cam.example.com")
+        session.add(cam)
+        session.flush()
+        clips = [
+            build_test_clip(cam.id, start_ts=_PAGE_BASE_TS + timedelta(minutes=index), source_filename=f"run{index:03d}.mp4")
+            for index in range(count)
+        ]
+        session.add_all(clips)
+        session.flush()
+        return [clip.id for clip in clips]
+
+
+def _clips_page(
+    config: Config,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    query: str,
+) -> str:
+    """Return the body of ``/clips?{query}`` after the status and tripwire checks."""
+    with alembic_web_test_client(config) as client:
+        response = client.get(f"/clips?{query}", headers=AUTH_HEADER)
+    assert response.status_code == 200
+    for tripwire in _TRIPWIRES:
+        assert tripwire not in response.text
+    return response.text
+
+
+def _row_ids(body: str) -> list[int]:
+    """Return the clip id of each list row, in page order."""
+    clip_ids: list[str] = re.findall(r'<td class="thumb-cell">\s*<a href="[^"]*/clips/(\d+)\?', body)
+    return [int(clip_id) for clip_id in clip_ids]
+
+
+@pytest.mark.parametrize("reviewed", ["no", "yes", "any"])
+def test_clips_list_default_sort_is_newest_first_for_each_reviewed_value(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    reviewed: str,
+) -> None:
+    """The review queue sorts like every other filter. No ``sort`` key means newest first."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    ids = _seed_clip_run(db_session_factory, internal_root, count=3)
+    if reviewed == "yes":
+        engine = _clips_engine_for(internal_root)
+        try:
+            # The newest clip is reviewed first, so a reviewed_at order also differs from newest first.
+            for offset, clip_id in enumerate(reversed(ids)):
+                stamp_reviewed_at(engine, clip_id, _PAGE_BASE_TS + timedelta(days=1, minutes=offset))
+        finally:
+            engine.dispose()
+
+    body = _clips_page(config, alembic_web_test_client, f"reviewed={reviewed}")
+
+    assert _row_ids(body) == list(reversed(ids))
+
+
+def test_clips_list_sort_oldest_lists_oldest_first(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """``sort=oldest`` reverses the order, and the row links carry the sort."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    ids = _seed_clip_run(db_session_factory, internal_root, count=3)
+
+    body = _clips_page(config, alembic_web_test_client, "reviewed=no&sort=oldest")
+
+    assert _row_ids(body) == ids
+    assert f"/clips/{ids[0]}?reviewed=no&amp;sort=oldest" in body
+
+
+def test_clips_list_splits_101_clips_over_two_pages(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Page 1 holds 100 rows and page 2 the last row. Both pages show the controls."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    ids = _seed_clip_run(db_session_factory, internal_root, count=101)
+
+    first = _clips_page(config, alembic_web_test_client, "reviewed=no")
+    second = _clips_page(config, alembic_web_test_client, "reviewed=no&page=2")
+
+    assert _row_ids(first) == list(reversed(ids))[:100]
+    assert _row_ids(second) == [ids[0]]
+    assert "Page 1 of 2" in first
+    assert 'href="/clips?reviewed=no&amp;page=2" rel="next"' in first
+    assert "Page 2 of 2" in second
+    assert 'href="/clips?reviewed=no" rel="prev"' in second
+
+
+def test_clips_list_hides_the_controls_when_every_clip_fits_on_one_page(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """100 clips fill exactly one page, so no page controls show."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _ = _seed_clip_run(db_session_factory, internal_root, count=100)
+
+    body = _clips_page(config, alembic_web_test_client, "reviewed=no")
+
+    assert len(_row_ids(body)) == 100
+    assert 'class="pagination"' not in body
+    assert "Page 1 of 1" not in body
+
+
+def test_clips_list_page_past_the_end_shows_the_last_page(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A page past the end is not an error. The row links carry the page they show."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    ids = _seed_clip_run(db_session_factory, internal_root, count=101)
+
+    body = _clips_page(config, alembic_web_test_client, "reviewed=no&page=999")
+
+    assert _row_ids(body) == [ids[0]]
+    assert "Page 2 of 2" in body
+    assert f"/clips/{ids[0]}?reviewed=no&amp;page=2" in body
+    assert "page=999" not in body
+
+
+def test_clips_list_row_on_page_two_links_back_to_page_two_with_the_sort(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A row link carries ``sort`` and ``page``, and the detail back link returns to that page."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    ids = _seed_clip_run(db_session_factory, internal_root, count=101)
+
+    body = _clips_page(config, alembic_web_test_client, "reviewed=no&sort=oldest&page=2")
+    assert _row_ids(body) == [ids[100]]
+    row_qs = "reviewed=no&sort=oldest&page=2"
+    assert f"/clips/{ids[100]}?{row_qs.replace('&', '&amp;')}" in body
+
+    with alembic_web_test_client(config) as client:
+        detail = client.get(f"/clips/{ids[100]}?{row_qs}", headers=AUTH_HEADER)
+    assert detail.status_code == 200
+    assert f'<a href="/clips?{row_qs.replace("&", "&amp;")}">All clips</a>' in detail.text
+
+
+def test_clips_list_progress_count_ignores_the_page(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The progress count covers every clip of the filter, on every page."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    _ = _seed_clip_run(db_session_factory, internal_root, count=101)
+
+    body = _clips_page(config, alembic_web_test_client, "reviewed=no&page=2")
+
+    assert "0 / 101 reviewed" in body
+
+
+def test_clips_list_reports_bad_sort_and_page_values(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A bad ``sort`` and a bad ``page`` snap to their defaults and show in the notice."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    ids = _seed_clip_run(db_session_factory, internal_root, count=2)
+
+    body = _clips_page(config, alembic_web_test_client, "reviewed=no&sort=sideways&page=abc")
+
+    assert "sort=&#34;sideways&#34;, page=&#34;abc&#34;" in body
+    assert _row_ids(body) == list(reversed(ids))
+
+
+def test_clips_list_breaks_a_start_ts_tie_by_id_in_the_sort_direction(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Two cameras can record a clip in the same second. ``id`` orders them, in the sort direction."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    with db_session_factory(internal_root) as session:
+        cams = [Camera(name=name, display_name=name.title(), host="cam.example.com") for name in ("pantry", "garage")]
+        session.add_all(cams)
+        session.flush()
+        clips = [build_test_clip(cam.id, start_ts=_PAGE_BASE_TS) for cam in cams]
+        session.add_all(clips)
+        session.flush()
+        ids = sorted(clip.id for clip in clips)
+
+    newest = _clips_page(config, alembic_web_test_client, "reviewed=no")
+    oldest = _clips_page(config, alembic_web_test_client, "reviewed=no&sort=oldest")
+
+    assert _row_ids(newest) == list(reversed(ids))
+    assert _row_ids(oldest) == ids

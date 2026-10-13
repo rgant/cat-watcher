@@ -1,20 +1,22 @@
 """Integration tests for the cat-watcher cameras / stats / alerts pages.
 
-Covers ``GET /cameras`` (per-camera health table + recent alerts), ``GET /stats`` (30-day daily
-aggregation across all cameras with cat-positive counts from the ``clip_label_summary`` view), and
+Covers ``GET /cameras`` (per-camera health table + recent alerts), ``GET /stats`` (per-cat visits of
+7 local days, and the 30-day daily clip counts per camera from the ``clip_label_summary`` view), and
 ``GET /alerts`` (last 30 days of dispatched alerts with email/macOS delivery flags). Auth is
 exercised exhaustively in ``test_web_health.py``; this module attaches a constant ``Authorization``
 header.
 """
 
-from datetime import UTC, datetime, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
-from db_helpers import AUTH_HEADER, tag_clip_frame
+from db_helpers import AUTH_HEADER, add_clip, apply_clip_label_summary_view, recorded_statements, seed_cat_subject, tag_clip_frame
 
-from cat_watcher.db import AlertSent, AlertType, Camera, Clip, PollStatus, Subject, create_engine, get_session
+from cat_watcher.db import AlertSent, AlertType, Base, Camera, Clip, PollStatus, Subject, create_engine, get_session
+from cat_watcher.web.stats_routes import _cat_stat_rows, _stat_days
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -257,13 +259,21 @@ def _row_positions(body: str, rows: list[tuple[str, str]]) -> list[int]:
     return offsets
 
 
+def _table(body: str, table_id: str) -> str:
+    """Return the ``<table>`` element with ``id="table_id"`` in ``body``."""
+    start = body.index(f'<table id="{table_id}"')
+    return body[start : body.index("</table>", start)]
+
+
 def _row_for(body: str, camera_display_name: str, date_iso: str) -> str | None:
     """Find the single ``<tr>`` block on the stats page containing both ``camera_display_name`` and ``date_iso``.
 
     Returns the substring spanning the row, or ``None`` if no matching row is found. Used to scope
     substring assertions to the right row instead of the whole page (e.g. so a ``2`` from a
-    different row doesn't satisfy the cat-count check).
+    different row does not satisfy the cat-count check). The search covers the per-camera table only,
+    because a per-cat last-visit cell can also hold a camera name and a date.
     """
+    body = _table(body, "camera-stats")
     cursor = 0
     while True:
         start = body.find("<tr", cursor)
@@ -333,7 +343,7 @@ def test_alerts_page_renders_em_dash_for_non_camera_alerts(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """Alerts with ``camera_id IS NULL`` (e.g. WEB_DOWN, DISK_LOW) show "—" in the camera column."""
+    """Alerts with ``camera_id IS NULL``, such as WEB_DOWN and DISK_LOW, show a dash in the Source column."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     now = datetime.now(UTC)
@@ -360,6 +370,50 @@ def test_alerts_page_renders_em_dash_for_non_camera_alerts(
     # The em-dash placeholder is the contract; tested verbatim so the route can't accidentally fall
     # back to ``None`` / empty / ``-`` (which would silently break operator scanability).
     assert "—" in response.text
+
+
+def test_alerts_page_source_column_names_cat_camera_or_placeholder(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A per-cat alert shows the cat name, a camera alert the camera name, and any other alert a dash."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    now = datetime.now(UTC)
+    with db_session_factory(internal_root) as session:
+        cam = Camera(name="pantry", display_name="Pantry", host="cam.example.com", poll_status=PollStatus.OK)
+        cat = Subject(slug="marcel", display_name="Marcel", kind="cat", display_order=1)
+        session.add_all([cam, cat])
+        session.flush()
+        session.add_all(
+            [
+                AlertSent(
+                    alert_type=AlertType.INACTIVITY,
+                    subject_id=cat.id,
+                    sent_at=now - timedelta(hours=1),
+                    subject="cat alert",
+                    body="b",
+                ),
+                AlertSent(
+                    alert_type=AlertType.INACTIVITY,
+                    camera_id=cam.id,
+                    sent_at=now - timedelta(hours=2),
+                    subject="camera alert",
+                    body="b",
+                ),
+                AlertSent(alert_type=AlertType.DISK_LOW, sent_at=now - timedelta(hours=3), subject="disk alert", body="b"),
+            ],
+        )
+
+    with alembic_web_test_client(config) as client:
+        response = client.get("/alerts", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    assert '<th scope="col">Source</th>' in response.text
+    cells = re.findall(r'<td data-label="Source">([^<]*)</td>', response.text)
+    assert cells == ["Marcel", "Pantry", "—"]
 
 
 def test_alerts_page_omits_alerts_older_than_30_days(
@@ -454,12 +508,11 @@ def test_stats_omits_clips_older_than_30_days(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """A clip with ``start_ts`` 45 days back doesn't appear in ``/stats``; one yesterday does.
+    """A clip with ``start_ts`` 45 days back does not appear in ``/stats``. A clip from yesterday does.
 
-    Symmetric to ``test_alerts_page_omits_alerts_older_than_30_days``. The 30-day cutoff lives in
-    two routes (stats + alerts) sharing a single ``_HISTORY_DAYS`` constant; without this test, a
-    regression that flips ``>=`` to ``>`` in the stats query — or widens the window only there —
-    would slip through the suite.
+    This test pairs with ``test_alerts_page_omits_alerts_older_than_30_days``. The stats route and
+    the alerts route share one ``HISTORY_DAYS`` constant. Without this test, two changes can pass
+    the suite. One flips ``>=`` to ``>`` in the stats query. The other widens the window there only.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -804,3 +857,353 @@ def test_stats_rows_are_ordered_newest_day_then_camera(
     ]
     positions = _row_positions(response.text, expected)
     assert positions == sorted(positions), f"rows out of order: {expected} landed at {positions}"
+
+
+# --- per-cat stats ------------------------------------------------------------------------------
+
+
+def _stats_engine(internal_root: Path) -> Engine:
+    """Return an engine on the test DB with the tables and the ``clip_label_summary`` view."""
+    engine = create_engine(f"sqlite:///{internal_root / 'cat_watcher.sqlite'}")
+    Base.metadata.create_all(engine)
+    apply_clip_label_summary_view(engine)
+    return engine
+
+
+def _seed_pantry(engine: Engine) -> int:
+    """Insert the camera ``Pantry`` and return its id."""
+    with get_session(engine) as session:
+        cam = Camera(name="pantry", display_name="Pantry", host="cam.example.com", poll_status=PollStatus.OK)
+        session.add(cam)
+        session.flush()
+        return cam.id
+
+
+def _add_cat_clip(engine: Engine, cam_id: int, subject_id: int, start_ts: datetime) -> int:
+    """Insert a 2-second clip that an operator tag names as ``subject_id``, and return its id."""
+    clip_id = add_clip(engine, cam_id, start_ts=start_ts, name=f"{start_ts:%Y%m%d-%H%M%S%f}.mp4")
+    tag_clip_frame(engine, clip_id=clip_id, subject_id=subject_id, reviewed_at=start_ts)
+    return clip_id
+
+
+def _archive(engine: Engine, subject_id: int) -> None:
+    with get_session(engine) as session:
+        subject = session.get(Subject, subject_id)
+        assert subject is not None
+        subject.archived_at = datetime.now(UTC)
+
+
+def _cat_row(body: str, display_name: str) -> str | None:
+    """Return the per-cat table row that names ``display_name``, or ``None``."""
+    for match in re.finditer(r"<tr>.*?</tr>", _table(body, "cat-stats"), flags=re.DOTALL):
+        if f">{display_name}<" in match.group(0):
+            return match.group(0)
+    return None
+
+
+def _day_counts(row: str) -> dict[str, int]:
+    """Map the ISO day of each day cell in a per-cat ``row`` to its visit count."""
+    return {match.group(1): int(match.group(2)) for match in re.finditer(r'data-day="([0-9-]+)"[^>]*>\s*(\d+)\s*<', row)}
+
+
+def _local_noon(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, 12, tzinfo=_DISPLAY_TZ)
+
+
+def _only_stat_row(engine: Engine, config: Config, now: datetime) -> dict[str, object]:
+    """Return the per-cat row of the one cat in the test DB."""
+    with get_session(engine) as session:
+        rows = _cat_stat_rows(session, config=config, now=now, camera_display_by_id={})
+    assert len(rows) == 1
+    return rows[0]
+
+
+def _day_cells(row: dict[str, object]) -> list[dict[str, object]]:
+    return cast("list[dict[str, object]]", row["day_counts"])
+
+
+def _counts(row: dict[str, object]) -> list[object]:
+    return [day["count"] for day in _day_cells(row)]
+
+
+def test_stats_heading_names_no_span_and_each_table_names_its_own(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """The page heading names no span. The per-cat caption names 7 days and the per-camera caption 30 days."""
+    internal_root, storage_root = storage_dirs
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        _ = _add_cat_clip(engine, cam_id, seed_cat_subject(engine), datetime.now(UTC) - timedelta(hours=1))
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/stats", headers=AUTH_HEADER).text
+
+    assert "<h1>Activity</h1>" in body
+    assert "last 7 days" in _table(body, "cat-stats")
+    assert "last 30 days" in _table(body, "camera-stats")
+    assert body.index('id="cat-stats"') < body.index('id="camera-stats"')
+
+
+def test_stats_counts_a_2330_visit_on_its_local_day(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A visit at 23:30 local time counts on that local day, not on the next UTC day."""
+    internal_root, storage_root = storage_dirs
+    today = datetime.now(_DISPLAY_TZ).date()
+    yesterday = today - timedelta(days=1)
+    start = datetime(yesterday.year, yesterday.month, yesterday.day, 23, 30, tzinfo=_DISPLAY_TZ)
+    # The premise the assertion depends on, checked rather than assumed.
+    assert start.astimezone(UTC).date() == today
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        subj_id = seed_cat_subject(engine)
+        _ = _add_cat_clip(engine, cam_id, subj_id, start)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/stats", headers=AUTH_HEADER).text
+
+    row = _cat_row(body, "Marcel")
+    assert row is not None
+    counts = _day_counts(row)
+    assert list(counts) == [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+    assert counts[yesterday.isoformat()] == 1
+    assert counts[today.isoformat()] == 0
+    # 1 visit over the 6 complete days, shown with one decimal.
+    assert ">0.2<" in row
+    assert "Pantry" in row
+    assert " ago" in row
+    assert f"{start:%a %Y-%m-%d %H:%M}" in row
+
+
+def test_stats_week_across_a_dst_change_has_seven_local_days(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+) -> None:
+    """The window starts at local midnight 6 days before today, and each visit counts on its local day.
+
+    America/New_York leaves daylight time on 2026-11-01. A window start derived from the EST offset
+    of today is 05:00 UTC, so it drops the 00:30 EDT visit on the first day.
+    """
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    assert config.web.display_timezone == "America/New_York"
+    now = datetime(2026, 11, 4, 17, 0, tzinfo=UTC)
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        subj_id = seed_cat_subject(engine)
+        for local in (
+            datetime(2026, 10, 28, 23, 30, tzinfo=_DISPLAY_TZ),  # before the window
+            datetime(2026, 10, 29, 0, 30, tzinfo=_DISPLAY_TZ),  # EDT
+            datetime(2026, 10, 31, 23, 30, tzinfo=_DISPLAY_TZ),  # EDT
+            datetime(2026, 11, 1, 23, 30, tzinfo=_DISPLAY_TZ),  # EST
+        ):
+            _ = _add_cat_clip(engine, cam_id, subj_id, local)
+        row = _only_stat_row(engine, config, now)
+    finally:
+        engine.dispose()
+
+    assert _stat_days(now, _DISPLAY_TZ) == [date(2026, 10, 29) + timedelta(days=offset) for offset in range(7)]
+    assert [day["day"] for day in _day_cells(row)] == [(date(2026, 10, 29) + timedelta(days=offset)).isoformat() for offset in range(7)]
+    assert _counts(row) == [1, 0, 1, 1, 0, 0, 0]
+    assert row["total"] == 3
+
+
+def test_stats_mean_ignores_today(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+) -> None:
+    """The mean divides the visits of the 6 complete days by 6. Today's visits count in the total only."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    now = datetime(2026, 10, 12, 20, 0, tzinfo=UTC)
+    today = now.astimezone(_DISPLAY_TZ).date()
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        subj_id = seed_cat_subject(engine)
+        # 4 visits on the complete days, 5 today. Visits are 10 minutes apart so none merge.
+        for days_back, offset in ((6, 0), (6, 1), (3, 0), (1, 0)):
+            _ = _add_cat_clip(engine, cam_id, subj_id, _local_noon(today - timedelta(days=days_back)) + timedelta(minutes=10 * offset))
+        for offset in range(5):
+            _ = _add_cat_clip(engine, cam_id, subj_id, _local_noon(today) + timedelta(minutes=10 * offset))
+        row = _only_stat_row(engine, config, now)
+    finally:
+        engine.dispose()
+
+    assert _counts(row) == [2, 0, 0, 1, 0, 1, 5]
+    assert row["total"] == 9
+    assert row["mean"] == 0.7
+
+
+def test_stats_two_clips_less_than_2_minutes_apart_count_as_one_visit(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+) -> None:
+    """A gap of less than 2 minutes joins a visit. A gap of exactly 2 minutes starts a new visit."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    now = datetime(2026, 10, 12, 20, 0, tzinfo=UTC)
+    first = _local_noon(now.astimezone(_DISPLAY_TZ).date())
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        subj_id = seed_cat_subject(engine)
+        _ = _add_cat_clip(engine, cam_id, subj_id, first)
+        # A 2-second clip, then a gap of 58 seconds: one visit.
+        _ = _add_cat_clip(engine, cam_id, subj_id, first + timedelta(minutes=1))
+        # A gap of exactly 2 minutes from the end of the last clip: a new visit.
+        _ = _add_cat_clip(engine, cam_id, subj_id, first + timedelta(minutes=3, seconds=2))
+        row = _only_stat_row(engine, config, now)
+    finally:
+        engine.dispose()
+
+    assert _counts(row)[-1] == 2
+
+
+def test_stats_visit_that_starts_before_day_1_does_not_count_on_day_1(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+) -> None:
+    """A visit counts on the day of its first clip, so a visit from the day before day 1 does not count."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    now = datetime(2026, 10, 12, 20, 0, tzinfo=UTC)
+    day_1 = _stat_days(now, _DISPLAY_TZ)[0]
+    midnight = datetime(day_1.year, day_1.month, day_1.day, tzinfo=_DISPLAY_TZ)
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        subj_id = seed_cat_subject(engine)
+        # The 2-second clip at 23:59:00 ends 88 seconds before the next clip starts: one visit.
+        _ = _add_cat_clip(engine, cam_id, subj_id, midnight - timedelta(minutes=1))
+        _ = _add_cat_clip(engine, cam_id, subj_id, midnight + timedelta(seconds=30))
+        row = _only_stat_row(engine, config, now)
+    finally:
+        engine.dispose()
+
+    assert _counts(row) == [0, 0, 0, 0, 0, 0, 0]
+
+
+def test_stats_last_visit_says_none_for_a_cat_with_no_visit(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """An active cat with no visit gets a row with "none" and a zero on each day."""
+    internal_root, storage_root = storage_dirs
+    engine = _stats_engine(internal_root)
+    try:
+        _ = seed_cat_subject(engine)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/stats", headers=AUTH_HEADER).text
+
+    row = _cat_row(body, "Marcel")
+    assert row is not None
+    assert re.search(r'data-label="Last visit">\s*none\s*<', row) is not None
+    assert set(_day_counts(row).values()) == {0}
+
+
+def test_stats_archived_cat_gets_a_row_only_with_a_visit_in_the_7_days(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A visit 10 days ago is a last visit, but it is not in the 7 days, so it gives no row."""
+    internal_root, storage_root = storage_dirs
+    now = datetime.now(UTC)
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        _ = seed_cat_subject(engine, slug="active", display_name="Active", display_order=1)
+        recent_id = seed_cat_subject(engine, slug="recent", display_name="Recent", display_order=2)
+        old_id = seed_cat_subject(engine, slug="old", display_name="Old", display_order=3)
+        idle_id = seed_cat_subject(engine, slug="idle", display_name="Idle", display_order=4)
+        _ = _add_cat_clip(engine, cam_id, recent_id, now - timedelta(days=3))
+        _ = _add_cat_clip(engine, cam_id, old_id, now - timedelta(days=10))
+        for subject_id in (recent_id, old_id, idle_id):
+            _archive(engine, subject_id)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/stats", headers=AUTH_HEADER).text
+
+    assert _cat_row(body, "Active") is not None
+    assert _cat_row(body, "Recent") is not None
+    assert _cat_row(body, "Old") is None
+    assert _cat_row(body, "Idle") is None
+
+
+def test_stats_cat_name_carries_its_color_only_when_set(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+) -> None:
+    """A cat with a color sets ``--chip-color``. A cat with no color renders with the CSS fallback."""
+    internal_root, storage_root = storage_dirs
+    engine = _stats_engine(internal_root)
+    try:
+        _ = seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=1, color="#d97706")
+        _ = seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=2)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/stats", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    marcel = _cat_row(response.text, "Marcel")
+    rufus = _cat_row(response.text, "Rufus")
+    assert marcel is not None
+    assert rufus is not None
+    assert "--chip-color: #d97706;" in marcel
+    assert "style=" not in rufus
+    assert response.text.index(">Marcel<") < response.text.index(">Rufus<")
+
+
+def _seed_daily_visits(engine: Engine, cam_id: int, *, slug: str, order: int, last_noon: datetime) -> None:
+    """Seed one cat with a visit on each of the 7 days. ``order`` sets the minute, so no file name repeats."""
+    subject_id = seed_cat_subject(engine, slug=slug, display_name=slug, display_order=order)
+    for offset in range(7):
+        _ = _add_cat_clip(engine, cam_id, subject_id, last_noon - timedelta(days=offset) + timedelta(minutes=order))
+
+
+def test_stats_per_cat_rows_read_a_fixed_number_of_queries(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+) -> None:
+    """More cats and visits on more days do not add a query."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    now = datetime(2026, 10, 12, 20, 0, tzinfo=UTC)
+    today = now.astimezone(_DISPLAY_TZ).date()
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        first_id = seed_cat_subject(engine, slug="first", display_name="First", display_order=1)
+        _ = _add_cat_clip(engine, cam_id, first_id, _local_noon(today))
+        with get_session(engine) as session, recorded_statements(engine) as small:
+            _ = _cat_stat_rows(session, config=config, now=now, camera_display_by_id={})
+        for index in range(3):
+            _seed_daily_visits(engine, cam_id, slug=f"more-{index}", order=2 + index, last_noon=_local_noon(today))
+        with get_session(engine) as session, recorded_statements(engine) as large:
+            rows = _cat_stat_rows(session, config=config, now=now, camera_display_by_id={})
+    finally:
+        engine.dispose()
+
+    assert len(rows) == 4
+    assert len(large) == len(small)

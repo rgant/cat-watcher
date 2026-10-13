@@ -8,19 +8,19 @@
 {% block content %}
   <nav class="clip-nav" aria-label="Clip navigation">
     {% if prev_url %}
-      <a href="{{ prev_url }}" rel="prev">← Newer</a>
+      <a href="{{ prev_url }}" rel="prev">{{ prev_label }}</a>
     {% elif prev_clip_id %}
-      <a href="{{ url_for('clip_detail', clip_id=prev_clip_id) }}" rel="prev">← Newer</a>
+      <a href="{{ url_for('clip_detail', clip_id=prev_clip_id) }}" rel="prev">{{ prev_label }}</a>
     {% else %}
-      <span class="clip-nav-disabled" aria-disabled="true">← Newer</span>
+      <span class="clip-nav-disabled" aria-disabled="true">{{ prev_label }}</span>
     {% endif %}
     <a href="{{ all_clips_url }}">All clips</a>
     {% if next_url %}
-      <a href="{{ next_url }}" rel="next">Older →</a>
+      <a href="{{ next_url }}" rel="next">{{ next_label }}</a>
     {% elif next_clip_id %}
-      <a href="{{ url_for('clip_detail', clip_id=next_clip_id) }}" rel="next">Older →</a>
+      <a href="{{ url_for('clip_detail', clip_id=next_clip_id) }}" rel="next">{{ next_label }}</a>
     {% else %}
-      <span class="clip-nav-disabled" aria-disabled="true">Older →</span>
+      <span class="clip-nav-disabled" aria-disabled="true">{{ next_label }}</span>
     {% endif %}
   </nav>
   {% if filter_notice %}
@@ -120,6 +120,11 @@
                     {% endfor %}
                   </td>
                 {% endfor %}
+                <td class="tag-row-model">
+                  <span class="{{ row.model_css_class }}"
+                        title="Model result for this frame"
+                        {% if row.model_color %}style="--chip-color: {{ row.model_color }};"{% endif %}>{{ row.model_label }}</span>
+                </td>
               </tr>
             {% endfor %}
           </tbody>
@@ -183,6 +188,12 @@
       <dt>has_manual_cat</dt>
       <dd id="detail-has-manual-cat">
         {{ "Yes" if has_manual_cat else "No" }}
+      </dd>
+      <dt>cat</dt>
+      <dd id="clip-identity">
+        {% with chips=identity_chips, fallback_label=identity_fallback_label %}
+          {% include "_clip_identity.html.jinja" %}
+        {% endwith %}
       </dd>
       <dt>tag_summary</dt>
       <dd id="detail-tag-summary" data-clip-id="{{ clip.id }}">

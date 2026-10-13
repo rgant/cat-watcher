@@ -30,8 +30,11 @@ holds only the reasoning that the code cannot carry.
   happens after the fact.
 - No multi-user support. One shared password, and last-write-wins on every
   toggle endpoint.
-- Detector accuracy beyond stock YOLO is accepted as-is. The 12-hour inactivity
-  watchdog catches the misses that matter.
+- Detector accuracy beyond stock YOLO is accepted as-is. The per-cat inactivity
+  rule fires when the last visit of a cat starts more than `inactivity_hours`
+  ago. The rule counts only clips that name the cat, from an operator tag or a
+  prediction. A cat tag on the missed clip plus the review mark corrects a false
+  alert.
 
 ## HTTP client
 
@@ -181,8 +184,10 @@ zero rows below a select that reads "All cameras".
   `ix_clips_camera_hascat_start` does not serve that path. The view computes
   `effective_has_cat` with a correlated `EXISTS`. Diagnose a future slowdown
   here first.
-- `/stats` and `/alerts` cut at `now - 30 days`, not at a local midnight. One
-  constant must not mean two different windows.
+- The per-camera `/stats` table and `/alerts` cut at `now - 30 days`, not at a
+  local midnight. One constant must not mean two different windows.
+- The per-cat `/stats` table starts at local midnight 6 days before today. It
+  counts calendar days, so a daylight-saving change does not move its start.
 - `alerts.py` uses rolling `timedelta` windows only, so the display zone changes
   no alert rule.
 
@@ -204,10 +209,13 @@ clicks through to `/clips/{id}` to label. Every trade-off below serves that job.
 - No auto-refresh. Polling adds out-of-band swaps, stale tooltip state, and
   cache invalidation when storage flaps. The "now" marker renders at request
   time and stays static.
-- 30 days is the ceiling. Older clips stay on disk for training. The web app
-  never visualizes them.
 - The thumb card shows no score. The border color already encodes the verdict. A
   number competes with the photo.
+- Every range shows one marker per clip. Each marker is a keyboard-focusable
+  link to its clip.
+- The timeline ranges stop at 3d, so the markers stay legible without an
+  aggregate. Older clips stay on disk for training.
+- The thumb strip shows on every range.
 - No per-camera empty state. A quiet camera renders an empty lane. This matches
   `/clips`.
 - `_load_timeline_data` and `_build_lanes_view` are split to satisfy pylint
@@ -218,13 +226,10 @@ clicks through to `/clips/{id}` to label. Every trade-off below serves that job.
 - `--color-no-cat-graphic` is below the WCAG 1.4.11 3:1 non-text minimum. The
   choice is deliberate, so cat-positive entries pop. `--color-cat-graphic`
   clears 3:1, and that is the meaningful state.
-- Bucket rects are not keyboard-focusable. They aggregate hours and have no
-  single `clip_id` to link to. Click-to-filter will close this gap.
-- The thumb strip is hidden at 7d and 30d. This loses the triage surface for
-  recent clips. A capped most-recent-N strip can restore it.
 - `focusin`, `focusout`, and the HTMX error toast have no automated test. A
   browser-test harness must exist first.
-- `/clips` has no 30-day cap. `/stats` and `/alerts` use `_HISTORY_DAYS`.
+- `/clips` has no 30-day cap. The per-camera `/stats` table and `/alerts` use
+  `HISTORY_DAYS`.
 
 ## Unrecorded values
 

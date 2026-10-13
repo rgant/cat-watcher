@@ -42,7 +42,7 @@ from cat_watcher.__main__ import (
     main,
 )
 from cat_watcher.amcrest_client import AmcrestClient, CameraUnreachableError, NtpConfig
-from cat_watcher.config import Config, _resolve_config_path
+from cat_watcher.config import ClassifierConfig, Config, _resolve_config_path
 from cat_watcher.db import (
     AgentStart,
     AlertSent,
@@ -180,6 +180,27 @@ def test_run_import_local_returns_two_when_poller_lock_held(tmp_path: Path, make
         exit_code = _run_import_local(args)
 
     assert exit_code == 2
+
+
+def test_run_import_local_no_detect_does_not_load_the_classifier(
+    tmp_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Without a detector no frame has a box, so ``--no-detect`` does not look for the checkpoint."""
+    args = _make_args(tmp_path, no_detect=True)
+    config = config_with_dirs(tmp_path, make_config).model_copy(update={"classifier": ClassifierConfig(model="absent.pt")})
+    init_schema(config.internal_root)
+    clean_report = ImportReport(inspected=0, ingested=0, duplicates=0, skipped=0, errors=0)
+
+    with (
+        patch("cat_watcher.__main__.load_config", return_value=config),
+        patch("cat_watcher.__main__.import_local", return_value=clean_report),
+    ):
+        exit_code = _run_import_local(args)
+
+    assert exit_code == 0
+    assert not [record for record in caplog.records if "classifier checkpoint" in record.getMessage()]
 
 
 def test_run_import_local_disposes_engine_even_when_import_raises(tmp_path: Path, make_config: Callable[[Path, Path], Config]) -> None:

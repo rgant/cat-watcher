@@ -13,7 +13,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from cat_watcher.db import Base
 
@@ -187,3 +187,171 @@ def test_upgrade_head_matches_current_models(alembic_cfg: Config, tmp_path: Path
         engine.dispose()
 
     assert diff == [], f"model/migration drift: {diff}"
+
+
+_PRE_PREDICTIONS_REVISION = "8e3979c693dc"  # pragma: allowlist secret
+
+
+def _seed_pre_predictions_rows(db_url: str) -> None:
+    """Insert a camera, a clip, two frames, a subject, and one operator tag with raw SQL.
+
+    The ORM maps the head schema, so it cannot write to a database at an older revision. One frame
+    holds JSON ``'null'`` and the other SQL ``NULL``. The clip holds JSON ``'null'``.
+    """
+    engine = create_engine(db_url)
+    try:
+        with engine.begin() as conn:
+            _ = conn.execute(
+                text(
+                    "INSERT INTO cameras (id, name, display_name, host, poll_status, clock_correction_streak) "
+                    "VALUES (1, 'pantry', 'Pantry', 'cam.example.com', 'OK', 0)",
+                ),
+            )
+            _ = conn.execute(
+                text(
+                    "INSERT INTO clips (id, camera_id, source_filename, start_ts, end_ts, duration_seconds, "
+                    "file_path, thumb_path, file_size_bytes, has_cat, max_score, frames_sampled, "
+                    "frames_with_cat, best_box_xyxy, detector_version, ingested_at) "
+                    "VALUES (1, 1, 'a.mp4', '2026-05-03 12:00:00.000000', '2026-05-03 12:00:30.000000', 30.0, "
+                    "'clips/a.mp4', 'thumbs/a.jpg', 100, 1, 0.9, 2, 1, 'null', 'yolo11n.pt@x', "
+                    "'2026-05-03 12:01:00.000000')",
+                ),
+            )
+            _ = conn.execute(
+                text(
+                    "INSERT INTO clip_frames (id, clip_id, ordinal, t_offset_seconds, score, thumb_path, bbox_xyxy) "
+                    "VALUES (1, 1, 0, 0.0, 0.9, 'frames/0.jpg', 'null'), "
+                    "(2, 1, 1, 1.5, 0.0, 'frames/1.jpg', NULL)",
+                ),
+            )
+            _ = conn.execute(
+                text(
+                    "INSERT INTO subjects (id, slug, display_name, kind, display_order, created_at) "
+                    "VALUES (1, 'marcel', 'Marcel', 'cat', 1, '2026-05-01 00:00:00.000000')",
+                ),
+            )
+            _ = conn.execute(
+                text(
+                    "INSERT INTO clip_frame_subjects (clip_frame_id, subject_id, created_at) VALUES (1, 1, '2026-05-03 13:00:00.000000')",
+                ),
+            )
+    finally:
+        engine.dispose()
+
+
+def _tag_rows_and_view_rows(db_url: str) -> tuple[list[tuple[int, int]], list[tuple[int, str]]]:
+    """Return the operator tags and the ``clip_label_summary`` rows."""
+    engine = create_engine(db_url)
+    try:
+        with engine.connect() as conn:
+            tags = [(row[0], row[1]) for row in conn.execute(text("SELECT clip_frame_id, subject_id FROM clip_frame_subjects"))]
+            view = [(row[0], row[1]) for row in conn.execute(text("SELECT clip_id, tagged_subject_slugs FROM clip_label_summary"))]
+    finally:
+        engine.dispose()
+    return tags, view
+
+
+def test_frame_predictions_migration_keeps_tags_and_view(alembic_cfg: Config, tmp_path: Path) -> None:
+    """The predictions revision adds its columns and FK, and normalizes JSON ``'null'`` boxes to SQL ``NULL``.
+
+    The batch rebuild of ``clip_frames`` must keep the operator tags and the view, in both directions.
+    """
+    db_url = f"sqlite:///{tmp_path / 'round.sqlite'}"
+    command.upgrade(alembic_cfg, _PRE_PREDICTIONS_REVISION)
+    _seed_pre_predictions_rows(db_url)
+
+    command.upgrade(alembic_cfg, "head")
+
+    engine = create_engine(db_url)
+    try:
+        frame_cols = {col["name"] for col in inspect(engine).get_columns("clip_frames")}
+        assert {"predicted_subject_id", "prediction_confidence", "classifier_version"} <= frame_cols
+        with engine.connect() as conn:
+            # Row form: (id, seq, table, from, to, on_update, on_delete, match).
+            fks = [(row[2], row[3], row[4], row[6]) for row in conn.execute(text("PRAGMA foreign_key_list(clip_frames)"))]
+            json_null_frames = cast("int", conn.execute(text("SELECT COUNT(*) FROM clip_frames WHERE bbox_xyxy = 'null'")).scalar_one())
+            json_null_clips = cast("int", conn.execute(text("SELECT COUNT(*) FROM clips WHERE best_box_xyxy = 'null'")).scalar_one())
+            sql_null_frames = cast("int", conn.execute(text("SELECT COUNT(*) FROM clip_frames WHERE bbox_xyxy IS NULL")).scalar_one())
+    finally:
+        engine.dispose()
+    assert ("subjects", "predicted_subject_id", "id", "SET NULL") in fks
+    assert json_null_frames == 0
+    assert json_null_clips == 0
+    assert sql_null_frames == 2
+
+    tags, view = _tag_rows_and_view_rows(db_url)
+    assert tags == [(1, 1)]
+    assert view == [(1, "marcel")]
+
+    command.downgrade(alembic_cfg, _PRE_PREDICTIONS_REVISION)
+
+    tags, view = _tag_rows_and_view_rows(db_url)
+    assert tags == [(1, 1)]
+    assert view == [(1, "marcel")]
+
+
+_PRE_ALERT_SUBJECT_REVISION = "22ec4c8a5459"  # pragma: allowlist secret
+
+
+def _alert_index_columns(db_url: str) -> dict[str, list[str | None]]:
+    """Return the ``alerts_sent`` index names with their column lists."""
+    engine = create_engine(db_url)
+    try:
+        return {str(idx["name"]): list(idx["column_names"]) for idx in inspect(engine).get_indexes("alerts_sent")}
+    finally:
+        engine.dispose()
+
+
+def test_alerts_sent_subject_id_migration_keeps_rows_and_swaps_index(alembic_cfg: Config, tmp_path: Path) -> None:
+    """The revision adds a NULL ``subject_id`` and swaps the cool-down index, in both directions."""
+    db_url = f"sqlite:///{tmp_path / 'round.sqlite'}"
+    command.upgrade(alembic_cfg, _PRE_ALERT_SUBJECT_REVISION)
+    engine = create_engine(db_url)
+    try:
+        with engine.begin() as conn:
+            _ = conn.execute(
+                text(
+                    "INSERT INTO cameras (id, name, display_name, host, poll_status, clock_correction_streak) "
+                    "VALUES (1, 'pantry', 'Pantry', 'cam.example.com', 'OK', 0)",
+                ),
+            )
+            _ = conn.execute(
+                text(
+                    "INSERT INTO alerts_sent (id, alert_type, camera_id, sent_at, subject, body, email_ok, macos_ok) "
+                    "VALUES (1, 'INACTIVITY', 1, '2026-05-03 12:00:00.000000', 'Subject', 'Body', 1, 0)",
+                ),
+            )
+    finally:
+        engine.dispose()
+    assert "ix_alerts_camera_type_sent" in _alert_index_columns(db_url)
+
+    command.upgrade(alembic_cfg, "head")
+
+    engine = create_engine(db_url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT id, alert_type, camera_id, subject, body, email_ok, macos_ok, subject_id FROM alerts_sent"),
+            ).one()
+            # Row form: (id, seq, table, from, to, on_update, on_delete, match).
+            fks = [(fk[2], fk[3], fk[4], fk[6]) for fk in conn.execute(text("PRAGMA foreign_key_list(alerts_sent)"))]
+    finally:
+        engine.dispose()
+    assert tuple(row) == (1, "INACTIVITY", 1, "Subject", "Body", 1, 0, None)
+    assert ("subjects", "subject_id", "id", "NO ACTION") in fks
+    indexes = _alert_index_columns(db_url)
+    assert "ix_alerts_camera_type_sent" not in indexes
+    assert indexes["ix_alerts_camera_subject_type_sent"] == ["camera_id", "subject_id", "alert_type", "sent_at"]
+
+    command.downgrade(alembic_cfg, _PRE_ALERT_SUBJECT_REVISION)
+
+    indexes = _alert_index_columns(db_url)
+    assert "ix_alerts_camera_subject_type_sent" not in indexes
+    assert indexes["ix_alerts_camera_type_sent"] == ["camera_id", "alert_type", "sent_at"]
+    engine = create_engine(db_url)
+    try:
+        assert "subject_id" not in {col["name"] for col in inspect(engine).get_columns("alerts_sent")}
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM alerts_sent")).scalar_one() == 1
+    finally:
+        engine.dispose()

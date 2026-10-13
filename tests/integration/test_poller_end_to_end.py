@@ -24,15 +24,19 @@ from alembic.config import Config as AlembicConfig
 from db_helpers import scored_frames_with_boxes
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
+from tz_helpers import frozen_clock
 
 from cat_watcher.config import CameraConfig, Config
-from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, Heartbeat, PollStatus, create_engine, get_session
+from cat_watcher.db import AgentStart, AlertSent, AlertType, Camera, Clip, Heartbeat, PollStatus, Subject, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
 from cat_watcher.poller import PollerArgs, PollerError, PollerLockedError, run_tick
 from cat_watcher.poller import main as poller_main
+from cat_watcher.predictions import FrameCounts, LiveClassifier
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+    from cat_watcher.classifier.benchmark import PredictFn
 
 
 def _apply_schema(db_path: Path) -> None:
@@ -143,7 +147,7 @@ def test_full_tick_ingests_clip_to_canonical_layout(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -194,7 +198,7 @@ def test_full_tick_with_no_detect_skips_inference_and_marks_clip(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), no_detect=True)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -238,7 +242,7 @@ def test_full_tick_list_only_is_strict_dry_run(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), list_only=True)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -288,7 +292,7 @@ def test_list_only_emits_per_clip_lines_and_count_to_stdout(
 
         args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), list_only=True)
         try:
-            run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+            run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
         finally:
             engine.dispose()
 
@@ -327,7 +331,7 @@ def test_full_tick_default_window_advances_last_polled_at(
 
     args = PollerArgs()  # default retention-derived window
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -364,7 +368,7 @@ def test_full_tick_with_limit_does_not_advance_cursor(
 
     args = PollerArgs(limit=1, no_detect=True)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -397,8 +401,8 @@ def test_full_tick_idempotent_on_second_invocation(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -436,7 +440,7 @@ def test_full_tick_camera_unreachable_records_status(
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     detector = _make_detector(has_cat=False)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -486,7 +490,7 @@ def test_full_tick_isolates_per_camera_failures(  # pylint: disable=too-many-loc
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -525,7 +529,7 @@ def test_full_tick_records_analysis_error_when_detector_fails(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -583,7 +587,7 @@ def test_full_tick_respects_limit_cap(
     detector = _make_detector(has_cat=False)
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), limit=1)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -631,7 +635,7 @@ def test_full_tick_file_before_row_ordering_leaves_only_orphan_file_on_db_failur
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -676,7 +680,7 @@ def test_full_tick_writes_heartbeat_and_agent_starts_row(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), no_detect=True)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -752,7 +756,7 @@ def test_full_tick_invokes_retention_sweep_to_prune_aged_clips(
 
     args = PollerArgs(no_detect=True)  # default-window tick
     try:
-        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -789,7 +793,7 @@ def test_poller_writes_per_frame_thumbs_and_clip_frames(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -838,7 +842,7 @@ def test_poller_writes_bbox_xyxy_on_frames_with_detections(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -871,7 +875,7 @@ def test_poller_no_detect_falls_back_to_single_thumb(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC), no_detect=True)
     try:
-        run_tick(config=config, args=args, engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -970,7 +974,7 @@ def test_safety_net_fires_poller_empty_after_quiet_when_amcrest_returns_zero_row
     _seed_empty_amcrest_mocks()
 
     try:
-        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -1016,7 +1020,7 @@ def test_overlap_zone_clip_is_ingested_via_extended_query_window(
     _seed_amcrest_mocks_for_clip(start_ts=clip_start_ts, payload=synthetic_clip_path.read_bytes())
 
     try:
-        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -1059,7 +1063,7 @@ def test_safety_net_widening_recovers_clip_and_suppresses_alert(
     _seed_amcrest_mocks_for_clip(start_ts=clip_start_ts, payload=synthetic_clip_path.read_bytes())
 
     try:
-        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, now=_NOW)
+        run_tick(config=config, args=PollerArgs(), engine=engine, detector=None, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -1098,7 +1102,7 @@ def test_poller_detection_error_falls_back_to_single_thumb(
 
     args = PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC))
     try:
-        run_tick(config=config, args=args, engine=engine, detector=detector, now=_NOW)
+        run_tick(config=config, args=args, engine=engine, detector=detector, clock=frozen_clock(_NOW))
     finally:
         engine.dispose()
 
@@ -1224,3 +1228,234 @@ def test_main_passes_verbose_to_setup_agent_logging(
 
     assert rc == 0
     assert restore_root_logger.level == logging.INFO
+
+
+_CLASSIFIER_VERSION = "cat-classifier@cafe"
+
+
+_LOAD_SECONDS = 0.25
+
+
+def _live_classifier(engine: Engine, predict: PredictFn) -> tuple[LiveClassifier, int]:
+    """Seed one cat subject and build a ``LiveClassifier`` around ``predict``. Returns it with the subject id."""
+    with get_session(engine) as session:
+        subject = Subject(slug="marcel", display_name="Marcel", kind="cat", display_order=1)
+        session.add(subject)
+        session.flush()
+        subject_id = subject.id
+    classifier = LiveClassifier(
+        predict=predict,
+        version=_CLASSIFIER_VERSION,
+        subject_id_by_slug={"marcel": subject_id},
+        totals=FrameCounts(),
+        load_seconds=_LOAD_SECONDS,
+    )
+    return classifier, subject_id
+
+
+def _fixed_predict(image_path: Path) -> tuple[str, float]:
+    _ = image_path
+    return "marcel", 0.91
+
+
+def _raising_predict(image_path: Path) -> tuple[str, float]:
+    _ = image_path
+    msg = "model exploded"
+    raise RuntimeError(msg)
+
+
+def _tick_with_classifier(
+    *,
+    config: Config,
+    synthetic_clip_path: Path,
+    scored: tuple[ScoredFrame, ...],
+    predict: PredictFn | None,
+    caplog: pytest.LogCaptureFixture | None = None,
+) -> tuple[Path, int | None, LiveClassifier | None]:
+    """Run one tick over the default clip. Returns the DB path, the seeded subject id, and the classifier.
+
+    Alembic's ``fileConfig`` disables existing loggers and drops the root handlers. Pass ``caplog`` to
+    restore its capture after the schema step.
+    """
+    db_path = config.internal_root / "test.sqlite"
+    _apply_schema(db_path)
+    # Alembic's fileConfig in ``_apply_schema`` disables existing loggers.
+    logging.getLogger("cat_watcher.poller").disabled = False
+    if caplog is not None:
+        logging.getLogger().addHandler(caplog.handler)
+    engine = create_engine(f"sqlite:///{db_path}")
+    _seed_amcrest_mocks(synthetic_clip_path.read_bytes())
+    detector = _make_detector(has_cat=True, scored_frames=scored)
+    classifier, subject_id = _live_classifier(engine, predict) if predict is not None else (None, None)
+    try:
+        run_tick(
+            config=config,
+            args=PollerArgs(since=datetime(2026, 4, 30, tzinfo=UTC)),
+            engine=engine,
+            detector=detector,
+            clock=frozen_clock(_NOW),
+            classifier=classifier,
+        )
+    finally:
+        engine.dispose()
+    return db_path, subject_id, classifier
+
+
+@respx.mock
+def test_poller_with_classifier_stores_predictions_with_the_clip(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """A frame with a box gets all three columns. A frame without a box gets the version only."""
+    scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
+    db_path, subject_id, _ = _tick_with_classifier(
+        config=make_config(*storage_dirs),
+        synthetic_clip_path=synthetic_clip_path,
+        scored=scored,
+        predict=_fixed_predict,
+    )
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            frames = session.query(Clip).one().frames
+            assert [f.predicted_subject_id for f in frames] == [subject_id, None, subject_id]
+            assert [f.prediction_confidence for f in frames] == [0.91, None, 0.91]
+            assert [f.classifier_version for f in frames] == [_CLASSIFIER_VERSION] * 3
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_without_classifier_stores_null_prediction_columns(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """With no classifier the three prediction columns stay ``NULL``."""
+    scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
+    db_path, _, _ = _tick_with_classifier(
+        config=make_config(*storage_dirs),
+        synthetic_clip_path=synthetic_clip_path,
+        scored=scored,
+        predict=None,
+    )
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            frames = session.query(Clip).one().frames
+            assert len(frames) == 3
+            assert all(f.predicted_subject_id is None for f in frames)
+            assert all(f.prediction_confidence is None for f in frames)
+            assert all(f.classifier_version is None for f in frames)
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_ingests_clip_when_predict_raises(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """A failing model fails neither the clip nor the camera tick. Boxed frames stay unclassified."""
+    scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
+    db_path, _, classifier = _tick_with_classifier(
+        config=make_config(*storage_dirs),
+        synthetic_clip_path=synthetic_clip_path,
+        scored=scored,
+        predict=_raising_predict,
+    )
+
+    assert classifier is not None
+    assert classifier.totals.errored == 2
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            clip = session.query(Clip).one()
+            assert [f.classifier_version for f in clip.frames] == [None, _CLASSIFIER_VERSION, None]
+            camera = session.query(Camera).one()
+            assert camera.poll_status == PollStatus.OK
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_clip_without_any_box_stores_no_box_state_on_each_frame(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """No frame has a box, so each frame stores the version and no subject (the "no cat box found" state)."""
+    stub_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    scored = tuple(ScoredFrame(ordinal=i, t_offset_seconds=float(i + 1), score=0.0, frame=stub_frame, box=None) for i in range(3))
+    db_path, _, classifier = _tick_with_classifier(
+        config=make_config(*storage_dirs),
+        synthetic_clip_path=synthetic_clip_path,
+        scored=scored,
+        predict=_fixed_predict,
+    )
+
+    assert classifier is not None
+    assert classifier.totals.no_box == 3
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        with get_session(engine) as session:
+            frames = session.query(Clip).one().frames
+            assert [f.classifier_version for f in frames] == [_CLASSIFIER_VERSION] * 3
+            assert all(f.predicted_subject_id is None for f in frames)
+            assert all(f.prediction_confidence is None for f in frames)
+    finally:
+        engine.dispose()
+
+
+@respx.mock
+def test_poller_logs_classifier_tick_with_totals(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One INFO ``classifier_tick`` record carries the totals of the tick."""
+    scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
+    with caplog.at_level(logging.INFO, logger="cat_watcher.poller"):
+        _ = _tick_with_classifier(
+            config=make_config(*storage_dirs),
+            synthetic_clip_path=synthetic_clip_path,
+            scored=scored,
+            predict=_fixed_predict,
+            caplog=caplog,
+        )
+
+    records = [r for r in caplog.records if r.message == "classifier_tick"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.INFO
+    assert record.__dict__["classified"] == 2
+    assert record.__dict__["no_box"] == 1
+    assert record.__dict__["errored"] == 0
+    assert record.__dict__["elapsed_seconds"] >= 0.0
+    assert record.__dict__["load_seconds"] == _LOAD_SECONDS
+
+
+@respx.mock
+def test_poller_logs_no_classifier_tick_without_classifier(
+    storage_dirs: tuple[Path, Path],
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With no classifier the tick logs no ``classifier_tick`` record."""
+    scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
+    with caplog.at_level(logging.INFO, logger="cat_watcher.poller"):
+        _ = _tick_with_classifier(
+            config=make_config(*storage_dirs),
+            synthetic_clip_path=synthetic_clip_path,
+            scored=scored,
+            predict=None,
+            caplog=caplog,
+        )
+
+    assert not [r for r in caplog.records if r.message == "classifier_tick"]

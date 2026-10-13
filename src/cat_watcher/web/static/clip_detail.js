@@ -41,8 +41,9 @@ function showInlineError(btn, status) {
   }, 4000);
 }
 
-// Re-fetches the server-computed tag_summary / has_manual_cat after a membership change and writes
-// them into the Detection <dl>, so the aggregate matches a full reload without one. Recomputing in
+// Re-fetches the server-computed tag_summary / has_manual_cat / identity_html after a membership or
+// review change. It writes them into the Detection <dl>, so the aggregate matches a full reload
+// without one. Recomputing in
 // the browser would miss archived-subject contributions the button row doesn't render.
 function updateLabelSummary(clipId) {
   'use strict';
@@ -61,6 +62,11 @@ function updateLabelSummary(clipId) {
       var manualEl = document.getElementById('detail-has-manual-cat');
       if (manualEl) {
         manualEl.textContent = data.has_manual_cat ? 'Yes' : 'No';
+      }
+      var identityEl = document.getElementById('clip-identity');
+      if (identityEl) {
+        // The server renders identity_html from a template with autoescape on.
+        identityEl.innerHTML = data.identity_html;
       }
     });
 }
@@ -157,6 +163,11 @@ function handleReviewResponse(evt, btn) {
     }
     updateReviewedAtRow(wasPost ? payload : null);
     htmx.process(btn);
+    // A review toggle changes which frames count as cat-free, so the clip result needs a refresh.
+    var summaryEl = document.getElementById('detail-tag-summary');
+    if (summaryEl) {
+      updateLabelSummary(summaryEl.dataset.clipId);
+    }
   } else {
     showInlineError(btn, status);
   }

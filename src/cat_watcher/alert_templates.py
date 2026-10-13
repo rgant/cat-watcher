@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from cat_watcher.timefmt import ago
+
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -31,13 +34,10 @@ if TYPE_CHECKING:
 
 _MACOS_SUMMARY_MAX = 120
 _BYTES_PER_GB = 1_000_000_000
-_SECONDS_PER_MINUTE = 60
-_MINUTES_PER_HOUR = 60
 
 
-# Inactivity-rule branch labels. The `poll_status_unreachable` branch is parameterized at render
-# time because it embeds the unreachable-since timestamp; the other two are static strings.
-INACTIVITY_BRANCH_NO_CATS = "no cats seen"
+# Per-camera INACTIVITY branch label. The unreachable branch label comes from
+# :func:`inactivity_branch_unreachable`, because it embeds the unreachable-since timestamp.
 INACTIVITY_BRANCH_NO_CLIPS = "no clips received"
 
 
@@ -59,22 +59,9 @@ def _fmt(dt: datetime, tz_name: str) -> str:
     return f"{local.strftime('%Y-%m-%d %H:%M:%S')} {abbr} ({offset_fmt})"
 
 
-def _ago(dt: datetime, now: datetime) -> str:
-    """Render ``now - dt`` as ``45s ago`` / ``12m ago`` / ``14h 18m ago`` per spec §4.14 examples."""
-    delta = now - dt
-    seconds = max(0, int(delta.total_seconds()))
-    if seconds < _SECONDS_PER_MINUTE:
-        return f"{seconds}s ago"
-    minutes_total = seconds // _SECONDS_PER_MINUTE
-    if minutes_total < _MINUTES_PER_HOUR:
-        return f"{minutes_total}m ago"
-    hours, minutes = divmod(minutes_total, _MINUTES_PER_HOUR)
-    return f"{hours}h {minutes}m ago"
-
-
 def _fmt_with_relative(dt: datetime, tz_name: str, now: datetime) -> str:
-    """Combine :func:`_fmt` with :func:`_ago` as ``<absolute> — <ago>`` (em-dash separator per §4.14)."""
-    return f"{_fmt(dt, tz_name)} — {_ago(dt, now)}"
+    """Combine :func:`_fmt` with :func:`cat_watcher.timefmt.ago` as ``<absolute> — <ago>`` (em-dash separator per §4.14)."""
+    return f"{_fmt(dt, tz_name)} — {ago(dt, now)}"
 
 
 def _fmt_with_relative_or_never(dt: datetime | None, tz_name: str, now: datetime) -> str:
@@ -110,9 +97,9 @@ def render_inactivity(  # noqa: PLR0913  # spec §4.14 INACTIVITY body has 9 dis
 ) -> AlertContent:
     """Render the ``INACTIVITY`` alert per spec §4.14.
 
-    ``branch`` is one of :data:`INACTIVITY_BRANCH_NO_CATS`, :data:`INACTIVITY_BRANCH_NO_CLIPS`, or a
-    string from :func:`inactivity_branch_unreachable` (caller-built so the unreachable-since
-    timestamp survives without re-passing ``poll_status_since`` here).
+    ``branch`` is :data:`INACTIVITY_BRANCH_NO_CLIPS` or a string from
+    :func:`inactivity_branch_unreachable` (caller-built so the unreachable-since timestamp survives
+    without re-passing ``poll_status_since`` here).
     """
     subject = f"[cat-watcher] INACTIVITY: {camera_display_name}"
     body = (
@@ -127,57 +114,52 @@ def render_inactivity(  # noqa: PLR0913  # spec §4.14 INACTIVITY body has 9 dis
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
-def render_inactivity_no_cats_global(  # noqa: PLR0913  # spec §4.14 INACTIVITY (no-cats global) body has 4 distinct fields plus tz + clock
+def render_cat_inactivity(  # noqa: PLR0913  # per-cat INACTIVITY body has 4 distinct fields plus tz + clock
     *,
-    last_cat_seen_at: datetime,
-    last_cat_seen_camera_name: str,
+    cat_display_name: str,
+    last_visit_start: datetime,
+    last_visit_camera_name: str,
     inactivity_hours: int,
     public_url: str,
     tz_name: str,
     now: datetime,
 ) -> AlertContent:
-    """Render the fleet-wide ``no cats seen on any camera`` INACTIVITY alert per spec §4.14.
-
-    Distinct from :func:`render_inactivity` because the per-camera fields (``Last poll``,
-    ``Last clip``, ``Poll status``) don't apply to a fleet-wide check. The ``last_cat_seen_at`` line
-    identifies which camera was the most recent to see a cat, so the operator knows where to start
-    looking when activity resumes.
-    """
-    subject = "[cat-watcher] INACTIVITY: no cats seen on any camera"
+    """Render the per-cat ``INACTIVITY`` alert: the cat, the start and camera of its last visit, and the hours since."""
+    subject = f"[cat-watcher] INACTIVITY: {cat_display_name}"
     body = (
-        "Branch:         no cats seen on any camera\n"
-        f"Last cat seen:  {_fmt_with_relative(last_cat_seen_at, tz_name, now)} ({last_cat_seen_camera_name})\n"
+        f"Cat:            {cat_display_name}\n"
+        f"Last visit:     {_fmt_with_relative(last_visit_start, tz_name, now)} ({last_visit_camera_name})\n"
         f"Threshold:      {inactivity_hours}h\n"
         f"Web UI:         {public_url}\n"
     )
-    summary = _capped_summary(f"no cats seen on any camera in {_ago(last_cat_seen_at, now).removesuffix(' ago')}")
+    summary = _capped_summary(f"{cat_display_name}: no visit in {ago(last_visit_start, now).removesuffix(' ago')}")
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
-def render_frequency(  # noqa: PLR0913  # spec §4.14 FREQUENCY body has 8 distinct fields
+def render_cat_frequency(  # noqa: PLR0913  # per-cat FREQUENCY body has 7 distinct fields plus tz
     *,
-    camera_display_name: str,
+    cat_display_name: str,
     count: int,
     window_hours: int,
     threshold: int,
-    first_in_window: datetime,
-    latest_in_window: datetime,
+    first_visit_start: datetime,
+    latest_visit_start: datetime,
+    camera_names: Sequence[str],
     public_url: str,
     tz_name: str,
 ) -> AlertContent:
-    """Render the ``FREQUENCY`` alert per spec §4.14."""
-    subject = f"[cat-watcher] FREQUENCY: {camera_display_name} ({count} in {window_hours}h)"
+    """Render the per-cat ``FREQUENCY`` alert: the visit count in the window and the cameras of those visits."""
+    subject = f"[cat-watcher] FREQUENCY: {cat_display_name} ({count} visits in {window_hours}h)"
     body = (
-        f"Camera:                          {camera_display_name}\n"
-        f"Cat-positive clips in last {window_hours}h:   {count}\n"
-        f"Threshold:                       {threshold}\n"
-        f"First in window:                 {_fmt(first_in_window, tz_name)}\n"
-        f"Latest:                          {_fmt(latest_in_window, tz_name)}\n"
-        f"Web UI:                          {public_url}\n"
+        f"Cat:                 {cat_display_name}\n"
+        f"Visits in last {window_hours}h:   {count}\n"
+        f"Threshold:           {threshold}\n"
+        f"First visit:         {_fmt(first_visit_start, tz_name)}\n"
+        f"Latest visit:        {_fmt(latest_visit_start, tz_name)}\n"
+        f"Cameras:             {', '.join(camera_names)}\n"
+        f"Web UI:              {public_url}\n"
     )
-    summary = _capped_summary(
-        f"{camera_display_name}: {count} cat-positive clips in {window_hours}h (threshold {threshold})",
-    )
+    summary = _capped_summary(f"{cat_display_name}: {count} visits in {window_hours}h (threshold {threshold})")
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
@@ -197,7 +179,7 @@ def render_heartbeat_watchdog(  # noqa: PLR0913  # spec §4.14 POLLER_STUCK / WE
         f"Last heartbeat:  {_fmt_with_relative(last_heartbeat, tz_name, now)}\n"
         f"Web UI:          {public_url}\n"
     )
-    summary = _capped_summary(f"{agent_name} heartbeat {_ago(last_heartbeat, now)}")
+    summary = _capped_summary(f"{agent_name} heartbeat {ago(last_heartbeat, now)}")
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 
@@ -223,14 +205,14 @@ def render_poller_empty_after_quiet(  # noqa: PLR0913  # body has camera + 3 tim
     body = (
         f"Camera:         {camera_display_name}\n"
         f"Last clip:      {_fmt_with_relative(last_clip_at, tz_name, now)}\n"
-        f"Quiet for:      {_ago(last_clip_at, now).removesuffix(' ago')}\n"
+        f"Quiet for:      {ago(last_clip_at, now).removesuffix(' ago')}\n"
         f"Queried since:  {_fmt(queried_since, tz_name)}\n"
         f"Queried until:  {_fmt(queried_until, tz_name)}\n"
         f"Result:         findFile returned 0 rows\n"
         f"What to check:  camera power, SD card health, camera's own recording UI\n"
         f"Web UI:         {public_url}\n"
     )
-    summary = _capped_summary(f"{camera_display_name}: no clips after {_ago(last_clip_at, now).removesuffix(' ago')} quiet")
+    summary = _capped_summary(f"{camera_display_name}: no clips after {ago(last_clip_at, now).removesuffix(' ago')} quiet")
     return AlertContent(subject=subject, body=body, macos_summary=summary)
 
 

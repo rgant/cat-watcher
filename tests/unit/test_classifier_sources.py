@@ -7,7 +7,7 @@ directly.
 """
 
 from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations are evaluated by collectors
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -238,3 +238,19 @@ def test_localizer_passes_conf_into_the_model_call(tmp_path: Path, monkeypatch: 
 
     assert model.call_args is not None
     assert model.call_args.kwargs.get("conf") == 0.10
+
+
+def test_localizer_gives_the_model_a_bgr_array(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ultralytics reads a NumPy array as BGR. The localizer converts the RGB frame first."""
+    model = MagicMock(spec=YOLO)
+    model.return_value = _fake_results(cls_ids=[], confidences=[], boxes=[])
+    _patch_yolo_factory(monkeypatch, model)
+    localizer = make_localizer(model_path=tmp_path / "weights.pt")
+    image = gradient_rgb(4, 4)
+
+    _ = localizer(image)
+
+    assert model.call_args is not None
+    given = cast("np.ndarray", model.call_args.args[0])
+    assert np.array_equal(given[..., 0], image[..., 2])
+    assert np.array_equal(given[..., 2], image[..., 0])

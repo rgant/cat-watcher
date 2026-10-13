@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlencode
 
 from cat_watcher.db import Camera, Clip, ClipLabelSummary
+from cat_watcher.web.pagination import parse_page
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
@@ -22,21 +23,29 @@ if TYPE_CHECKING:
 
 #: The querystring keys the page understands, in the order the notice lists them. Public because
 #: the tests parametrize over it, so a control added later is covered the day it lands.
-RECOGNIZED_KEYS: tuple[str, ...] = ("reviewed", "camera", "has_cat", "date_str")
+RECOGNIZED_KEYS: tuple[str, ...] = ("reviewed", "camera", "has_cat", "date_str", "sort", "page")
 
 _Reviewed = Literal["any", "no", "yes"]
 _REVIEWED_VALUES: tuple[_Reviewed, ...] = ("any", "no", "yes")
+ClipsSort = Literal["newest", "oldest"]
+_SORT_VALUES: tuple[ClipsSort, ...] = ("newest", "oldest")
 _HAS_CAT_VALUES: dict[str, bool] = {"true": True, "false": False}
 
 
 @dataclass(frozen=True, slots=True)
 class ClipsFilter:
-    """The resolved filter set. Every field holds a usable value, never a raw querystring string."""
+    """The resolved filter set. Every field holds a usable value, never a raw querystring string.
+
+    ``sort`` and ``page`` select the order and the slice of the list. They select no rows, so
+    :func:`apply_clip_filters` does not read them. ``page`` is ``None`` for the first page.
+    """
 
     reviewed: _Reviewed = "no"
     camera: str | None = None
     has_cat: bool | None = None
     day: date | None = None
+    sort: ClipsSort = "newest"
+    page: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +84,12 @@ def parse_clips_filter(params: Mapping[str, str], *, camera_names: Collection[st
     camera, camera_bad = _parse_camera(params.get("camera"), camera_names)
     has_cat, has_cat_bad = _parse_has_cat(params.get("has_cat"))
     day, day_bad = _parse_day(params.get("date_str"))
+    sort, sort_bad = _parse_sort(params.get("sort"))
+    page, page_bad = _parse_page(params.get("page"))
     # Ordered by RECOGNIZED_KEYS, not by querystring order, so the notice text is stable.
-    ignored = tuple(bad for bad in (reviewed_bad, camera_bad, has_cat_bad, day_bad) if bad is not None)
+    ignored = tuple(bad for bad in (reviewed_bad, camera_bad, has_cat_bad, day_bad, sort_bad, page_bad) if bad is not None)
     return ParsedClipsFilter(
-        clips_filter=ClipsFilter(reviewed=reviewed, camera=camera, has_cat=has_cat, day=day),
+        clips_filter=ClipsFilter(reviewed=reviewed, camera=camera, has_cat=has_cat, day=day, sort=sort, page=page),
         ignored=ignored,
         any_key_present=any(key in params for key in RECOGNIZED_KEYS),
     )
@@ -117,6 +128,27 @@ def _parse_day(raw: str | None) -> tuple[date | None, IgnoredFilter | None]:
         return None, IgnoredFilter(param="date_str", value=raw)
 
 
+def _parse_sort(raw: str | None) -> tuple[ClipsSort, IgnoredFilter | None]:
+    if not raw:
+        return "newest", None
+    if raw in _SORT_VALUES:
+        return raw, None
+    return "newest", IgnoredFilter(param="sort", value=raw)
+
+
+def _parse_page(raw: str | None) -> tuple[int | None, IgnoredFilter | None]:
+    """Return the requested page. Page 1 becomes ``None``, because both show the first page.
+
+    A page past the end is not reported here. Only the route knows the last page, and it clamps.
+    """
+    if not raw:
+        return None, None
+    page = parse_page(raw)
+    if page is None:
+        return None, IgnoredFilter(param="page", value=raw)
+    return (page if page > 1 else None), None
+
+
 def build_ignored_notice(ignored: Sequence[IgnoredFilter]) -> str:
     """Render the operator-facing notice, or ``""`` when nothing was rejected.
 
@@ -133,8 +165,9 @@ def build_ignored_notice(ignored: Sequence[IgnoredFilter]) -> str:
 def build_filter_qs(f: ClipsFilter) -> str:
     """Serialize ``f`` for row-link and prev/next carry-through.
 
-    ``reviewed`` is always emitted so the detail page can rebuild a complete back-link. Rejected
-    values cannot appear here: the filter holds what the parser snapped to, not what arrived.
+    ``reviewed`` is always emitted so the detail page can rebuild a complete back-link. Every other
+    key is left out at its default. Rejected values cannot appear here: the filter holds what the
+    parser snapped to, not what arrived.
     """
     params: list[tuple[str, str]] = [("reviewed", f.reviewed)]
     if f.camera:
@@ -143,6 +176,10 @@ def build_filter_qs(f: ClipsFilter) -> str:
         params.append(("has_cat", str(f.has_cat).lower()))
     if f.day is not None:
         params.append(("date_str", f.day.isoformat()))
+    if f.sort != "newest":
+        params.append(("sort", f.sort))
+    if f.page is not None:
+        params.append(("page", str(f.page)))
     return urlencode(params)
 
 
@@ -160,7 +197,8 @@ def apply_clip_filters[*Ts](stmt: Select[*Ts], f: ClipsFilter, *, display_tz: tz
     * The caller must not have joined ``Camera`` or ``ClipLabelSummary`` itself.
     * Row cardinality is preserved — the ``Camera`` join is on a ``NOT NULL`` FK and the view has
       exactly one row per clip, so neither can drop or duplicate rows.
-    * ``ORDER BY``, ``LIMIT``, and any further ``WHERE`` on ``Clip`` stay with the caller.
+    * ``ORDER BY``, ``LIMIT``, and any further ``WHERE`` on ``Clip`` stay with the caller. The
+      caller reads ``f.sort`` and ``f.page`` for them.
 
     Callers that deliberately count across review states — the progress indicator — must pass
     ``replace(f, reviewed="any")`` rather than relying on this function to skip the clause.

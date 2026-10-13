@@ -43,12 +43,19 @@
         <option value="any" {% if filters.reviewed == "any" %}selected{% endif %}>Any</option>
       </select>
     </label>
+    <label>
+      Sort
+      <select name="sort">
+        <option value="newest" {% if filters.sort == "newest" %}selected{% endif %}>Newest first</option>
+        <option value="oldest" {% if filters.sort == "oldest" %}selected{% endif %}>Oldest first</option>
+      </select>
+    </label>
     <button type="submit">Filter</button>
   </form>
   <p class="progress-indicator">{{ progress.reviewed }} / {{ progress.total }} reviewed</p>
   {% if clip_rows %}
     <table class="clip-list">
-      <caption class="sr-only">Clips, capped at 200 rows.</caption>
+      <caption class="sr-only">Clips, page {{ page.number }} of {{ page.page_count }}.</caption>
       <thead>
         <tr>
           <th scope="col">Thumbnail</th>
@@ -89,12 +96,30 @@
                 {{ 'cat' if row.effective_has_cat else 'no cat' }}
                 {% if row.manual_badge %}(manual){% endif %}
               </span>
+              {% with chips=row.identity_chips, fallback_label=row.identity_fallback_label %}
+                {% include "_clip_identity.html.jinja" %}
+              {% endwith %}
             </td>
             <td data-label="Score">{{ "%.2f"|format(row.max_score) }}</td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
+    {% if page.show_controls %}
+      <nav class="pagination" aria-label="Clip pages">
+        {% if previous_page_url %}
+          <a href="{{ previous_page_url }}" rel="prev">← Previous</a>
+        {% else %}
+          <span class="pagination-disabled" aria-disabled="true">← Previous</span>
+        {% endif %}
+        <span>Page {{ page.number }} of {{ page.page_count }}</span>
+        {% if next_page_url %}
+          <a href="{{ next_page_url }}" rel="next">Next →</a>
+        {% else %}
+          <span class="pagination-disabled" aria-disabled="true">Next →</span>
+        {% endif %}
+      </nav>
+    {% endif %}
   {% else %}
     <p class="empty-state">
       No clips match these filters.

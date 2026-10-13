@@ -38,9 +38,9 @@ from cat_watcher.web.routes import (
     media_router,
     membership_router,
     review_router,
-    stats_router,
     timeline_router,
 )
+from cat_watcher.web.stats_routes import stats_router
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, MutableMapping, Sequence

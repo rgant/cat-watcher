@@ -14,11 +14,11 @@ Sub-commands:
 * ``fetch-models [--model NAME]``: pull weights into ``<internal_root>/models/``. Default is
   ``detector.model``. A no-op when the target file exists with non-zero size. To refresh, name a
   new file or delete the existing one. This performs no in-place update and no checksum check.
-* ``reanalyze [--camera N] [--limit N] [--all]`` — re-score clips whose detection failed (default
-  filter: ``analysis_error IS NOT NULL``) or every clip (``--all``, e.g. after a model upgrade).
-  Preserves all ``clip_frame_subjects`` rows plus ``reviewed_at`` on ``clips``. Only detector-output
-  columns are touched: ``clips.has_cat``, ``clips.max_score``, ``clip_frames.score``,
-  ``clip_frames.bbox_xyxy``, and ``clips.detector_version``.
+* ``reanalyze [--camera N] [--limit N] [--all | --predictions]``: re-score clips. The default
+  mode selects clips whose detection failed. ``--all`` selects every clip. ``--predictions`` needs
+  a loaded classifier. It selects clips that the active detector or classifier checkpoint did not
+  score. If a classifier loads, every mode classifies the frames. The command writes only detector
+  output and frame predictions. Operator tags and ``clips.reviewed_at`` stay.
 * ``backup`` — proxy to :func:`cat_watcher.backup.run_backup` (same code path the LaunchAgent uses).
 * ``restore-backup <date>`` — copy a dated backup file onto ``<internal_root>/cat_watcher.sqlite``.
   Refuses while any cat-watcher LaunchAgent is loaded; operator must ``launchctl bootout`` first.
@@ -41,11 +41,12 @@ from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 
 from cat_watcher.amcrest_client import AmcrestClient, CameraError
 from cat_watcher.backup import run_backup
@@ -58,6 +59,7 @@ from cat_watcher.db import (
     AlertSent,
     Camera,
     Clip,
+    ClipFrame,
     ClipLabelSummary,
     Heartbeat,
     Subject,
@@ -73,19 +75,23 @@ from cat_watcher.logs_viewer import RunArgs as LogsRunArgs
 from cat_watcher.logs_viewer import run as run_logs
 from cat_watcher.notifier import send_email, send_macos_notification
 from cat_watcher.poller import DetectionFields, PollerLockedError, detection_for, write_per_frame_thumbs
+from cat_watcher.predictions import FrameCounts, classify_frames, load_live_classifier
 from cat_watcher.storage import StorageUnavailableError, ensure_storage_layout, wait_for_storage_using_config
+from cat_watcher.subjects_sync import sync_subjects_at_startup
 from cat_watcher.timefmt import local_stamp
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from datetime import tzinfo
     from typing import IO
 
     from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
+    from sqlalchemy.sql.elements import ColumnElement
 
     from cat_watcher.config import Config
     from cat_watcher.detector import ScoredFrame
+    from cat_watcher.predictions import LiveClassifier
 
 
 logger = logging.getLogger(__name__)
@@ -144,6 +150,7 @@ class _ParsedArgs(LogsNamespace, ClassifierNamespace):
     source_dir: Path = Path()
     clip_id: int = 0
     all: bool = False
+    predictions: bool = False
     backup_date: str = ""
     fetch_model: str | None = None  # distinct from the inherited ``ClassifierNamespace.model`` (a checkpoint ``Path``)
 
@@ -192,7 +199,13 @@ def _build_parser() -> argparse.ArgumentParser:
     reanalyze = subparsers.add_parser("reanalyze", parents=[common], help="Re-score clips whose analysis failed (or all)")
     _ = reanalyze.add_argument("--camera", default="", help="Restrict to clips from one camera (by name)")
     _ = reanalyze.add_argument("--limit", type=int, default=None, help="Process at most N qualifying clips")
-    _ = reanalyze.add_argument("--all", action="store_true", help="Re-score every clip, not just analysis_error rows")
+    scope = reanalyze.add_mutually_exclusive_group()
+    _ = scope.add_argument("--all", action="store_true", help="Re-score every clip, not just analysis_error rows")
+    _ = scope.add_argument(
+        "--predictions",
+        action="store_true",
+        help="Re-score clips that the active detector or classifier checkpoint did not score",
+    )
 
     _ = subparsers.add_parser("backup", parents=[common], help="Run a one-shot DB backup (proxy to backup agent)")
 
@@ -264,6 +277,8 @@ def _run_import_local(args: _ParsedArgs) -> int:
     ensure_storage_layout(internal_root=config.internal_root, storage_root=config.storage_root)
     engine = engine_for(config.internal_root)
     try:
+        if sync_subjects_at_startup(engine, config.subjects, logger) is None:
+            return _EXIT_LOCKED
         detector = (
             None
             if args.no_detect
@@ -273,6 +288,8 @@ def _run_import_local(args: _ParsedArgs) -> int:
                 confidence_threshold=config.detector.confidence_threshold,
             )
         )
+        # Without a detector no frame has a box, so the classifier has nothing to classify.
+        classifier = None if detector is None else load_live_classifier(config, engine)
         try:
             report = import_local(
                 engine=engine,
@@ -282,6 +299,7 @@ def _run_import_local(args: _ParsedArgs) -> int:
                 detector=detector,
                 limit=args.limit,
                 now=datetime.now(UTC),
+                classifier=classifier,
             )
         except PollerLockedError:
             logger.exception(
@@ -726,11 +744,15 @@ _REANALYZE_BATCH_SIZE = 100
 
 @dataclass
 class _ReanalyzeCameraCounts:
-    """One camera's tally in a reanalyze run. Buckets are mutually exclusive per clip."""
+    """One camera's tally in a reanalyze run.
+
+    The clip buckets are mutually exclusive per clip. ``frames`` holds the classifier result of each frame.
+    """
 
     rescored: int = 0
     skipped_missing: int = 0
     errored: int = 0
+    frames: FrameCounts = field(default_factory=FrameCounts)
 
 
 @dataclass
@@ -748,9 +770,14 @@ class _ReanalyzeReport:
         """Drives the exit-code branch."""
         return sum(c.errored for c in self.per_camera.values())
 
+    @property
+    def total_frames_errored(self) -> int:
+        """Frames the classifier failed on. ``--predictions`` exits non-zero when this is above zero."""
+        return sum(c.frames.errored for c in self.per_camera.values())
+
 
 def _run_reanalyze(args: _ParsedArgs) -> int:
-    """Re-score qualifying clips. ``--all`` widens the filter to every clip regardless of status."""
+    """Load the detector, the subjects, and the classifier, then re-score the qualifying clips."""
     config = load_config(args.config)
     weights = config.internal_root / _MODELS_SUBDIR / config.detector.model
     if not weights.is_file():
@@ -767,95 +794,201 @@ def _run_reanalyze(args: _ParsedArgs) -> int:
     )
     engine = engine_for(config.internal_root)
     try:
-        report, camera_display_by_id = _reanalyze_loop(engine=engine, config=config, detector=detector, args=args)
+        # The classifier maps its slugs to subject ids, so the subjects table must match the config first.
+        if sync_subjects_at_startup(engine, config.subjects, logger) is None:
+            return _EXIT_LOCKED
+        run = _ReanalyzeRun(
+            engine=engine,
+            config=config,
+            detect=partial(detection_for, detector),
+            detector_version=detector.version,
+            # Every mode classifies when a checkpoint loads. Without this, new boxes get no prediction.
+            classifier=load_live_classifier(config, engine),
+        )
+        return _reanalyze(run, args)
     finally:
         engine.dispose()
+
+
+type _Detect = Callable[[Path], tuple[DetectionFields, tuple[ScoredFrame, ...]]]
+
+
+@dataclass(frozen=True)
+class _ReanalyzeRun:
+    """The loaded inputs of one reanalyze run. ``detect`` runs detection on one clip file."""
+
+    engine: Engine
+    config: Config
+    detect: _Detect
+    detector_version: str
+    classifier: LiveClassifier | None
+
+
+def _reanalyze(run: _ReanalyzeRun, args: _ParsedArgs) -> int:
+    """Re-score the qualifying clips, print one summary line per camera, and return the exit code."""
+    if args.predictions and run.classifier is None:
+        print(
+            "reanalyze: --predictions needs a classifier checkpoint. "
+            "Set [classifier].model and copy the checkpoint into <internal_root>/models/.",
+            file=sys.stderr,
+        )
+        return _EXIT_MISSING_DEPENDENCY
+    report, camera_display_by_id = _reanalyze_loop(run, args)
     if not report.per_camera:
         print("reanalyze: no qualifying clips")
         return _EXIT_OK
     for camera_id, counts in sorted(report.per_camera.items()):
         label = camera_display_by_id.get(camera_id, f"camera_id={camera_id}")
-        print(f"reanalyze [{label}]: rescored={counts.rescored} skipped_missing={counts.skipped_missing} errored={counts.errored}")
-    return _EXIT_OK if report.total_errored == 0 else _EXIT_GENERIC_FAILURE
+        frames = counts.frames
+        print(
+            f"reanalyze [{label}]: rescored={counts.rescored} skipped_missing={counts.skipped_missing} errored={counts.errored} "
+            f"frames_classified={frames.classified} frames_no_box={frames.no_box} frames_errored={frames.errored}",
+        )
+    failed = report.total_errored > 0 or (args.predictions and report.total_frames_errored > 0)
+    return _EXIT_GENERIC_FAILURE if failed else _EXIT_OK
 
 
 @dataclass(frozen=True)
 class _ReanalyzeContext:
-    """Per-loop inputs that ``_backfill_clip_frames`` needs."""
+    """Per-run inputs that each clip of the reanalyze loop needs."""
 
-    config: Config
+    run: _ReanalyzeRun
     camera_name_by_id: dict[int, str]
     camera_tz_by_name: dict[str, ZoneInfo]
 
 
-def _reanalyze_loop(
-    *,
-    engine: Engine,
-    config: Config,
-    detector: Detector,
-    args: _ParsedArgs,
-) -> tuple[_ReanalyzeReport, dict[int, str]]:
-    """Process qualifying clips one at a time, committing per clip.
+class _ReanalyzeCandidate(NamedTuple):
+    """The clip columns that detection and thumb encode need before the per-clip session opens."""
 
-    Per-clip commits prevent concurrent writers (web/poller heartbeats) from being starved while
-    YOLO + JPEG encoding holds the per-clip session.
+    clip_id: int
+    file_path: str
+    camera_id: int
+    start_ts: datetime
+
+
+@dataclass(frozen=True)
+class _EncodedFrames:
+    """The result of the encode step: unattached frames, the best thumb, and the classifier counts."""
+
+    thumb_relpath: str
+    clip_frames: list[ClipFrame]
+    frame_counts: FrameCounts
+
+
+def _is_stale(run: _ReanalyzeRun) -> ColumnElement[bool]:
+    """Match a clip that the active detector or the active classifier checkpoint did not score.
+
+    A clip with no frame rows matches only on its detector version. The caller exits before the
+    loop when no classifier loads.
+    """
+    classifier_version = "" if run.classifier is None else run.classifier.version
+    stale_frame = (
+        select(ClipFrame.id)
+        .where(ClipFrame.clip_id == Clip.id)
+        .where(or_(ClipFrame.classifier_version.is_(None), ClipFrame.classifier_version != classifier_version))
+        .exists()
+    )
+    return or_(Clip.detector_version != run.detector_version, stale_frame)
+
+
+def _reanalyze_loop(run: _ReanalyzeRun, args: _ParsedArgs) -> tuple[_ReanalyzeReport, dict[int, str]]:
+    """Read the candidates in one session, then process each clip with its own short session.
+
+    Detection and inference hold no session. Each clip commits on its own, so the web app and the
+    poller can write to the SQLite file between clips.
+
+    ``--predictions`` skips a clip whose detection failed. That clip has no new box to classify,
+    and the default mode selects it. Without this rule, a clip that fails on each run takes the
+    ``--limit`` budget of each run.
     """
     report = _ReanalyzeReport()
-    stmt = select(Clip.id).order_by(Clip.start_ts.asc())
-    if not args.all:
+    stmt = select(Clip.id, Clip.file_path, Clip.camera_id, Clip.start_ts).order_by(Clip.start_ts.asc())
+    if args.predictions:
+        stmt = stmt.where(Clip.analysis_error.is_(None), _is_stale(run))
+    elif not args.all:
         stmt = stmt.where(Clip.analysis_error.is_not(None))
     if args.camera:
         stmt = stmt.join(Camera).where(Camera.name == args.camera)
     if args.limit is not None:
         stmt = stmt.limit(args.limit)
 
+    config = run.config
     camera_tz_by_name = {cam.name: ZoneInfo(cam.timezone or config.web.display_timezone) for cam in config.cameras}
 
-    with get_session(engine) as session:
+    with get_session(run.engine) as session:
         cameras = list(session.scalars(select(Camera)))
         camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
         ctx = _ReanalyzeContext(
-            config=config,
+            run=run,
             camera_name_by_id={cam.id: cam.name for cam in cameras},
             camera_tz_by_name=camera_tz_by_name,
         )
-        clip_ids: list[int] = list(session.scalars(stmt).all())
+        candidates = [_ReanalyzeCandidate(*row) for row in session.execute(stmt)]
 
-    for clip_id in clip_ids:
-        with get_session(engine) as session:
-            clip = session.get(Clip, clip_id)
-            if clip is None:
-                continue
-            _reanalyze_one_clip(
-                clip=clip,
-                detector=detector,
-                ctx=ctx,
-                counts=report.for_camera(clip.camera_id),
-            )
+    for candidate in candidates:
+        _reanalyze_one_clip(candidate=candidate, ctx=ctx, counts=report.for_camera(candidate.camera_id))
     return report, camera_display_by_id
 
 
 def _reanalyze_one_clip(
     *,
-    clip: Clip,
-    detector: Detector,
+    candidate: _ReanalyzeCandidate,
     ctx: _ReanalyzeContext,
     counts: _ReanalyzeCameraCounts,
 ) -> None:
-    """Re-detect one clip in place. On success, refresh ``clip_frames`` and repoint ``thumb_path``."""
-    full_path = ctx.config.storage_root / clip.file_path
+    """Re-detect one clip with no session open, then write the result in one session for that clip.
+
+    A thumb file is removed only after the session commits. If the commit fails, the old
+    ``thumb_path`` still names a file on disk.
+    """
+    storage_root = ctx.run.config.storage_root
+    full_path = storage_root / candidate.file_path
     if not full_path.is_file():
-        logger.warning("reanalyze: clip %d file missing at %s; skipping", clip.id, full_path)
+        logger.warning("reanalyze: clip %d file missing at %s; skipping", candidate.clip_id, full_path)
         counts.skipped_missing += 1
         return
-    fields, scored_frames = detection_for(detector, full_path)
-    _apply_detection_fields(clip, fields)
+    fields, scored_frames = ctx.run.detect(full_path)
+    encoded = None
     if fields["analysis_error"] is None and scored_frames:
-        _backfill_clip_frames(clip=clip, scored_frames=scored_frames, ctx=ctx)
+        encoded = _encode_clip_frames(candidate=candidate, scored_frames=scored_frames, ctx=ctx)
+    obsolete_thumb: str | None = None
+    with get_session(ctx.run.engine) as session:
+        clip = session.get(Clip, candidate.clip_id)
+        if clip is not None:
+            _apply_detection_fields(clip, fields)
+            if encoded is not None:
+                obsolete_thumb = _apply_clip_frames(clip=clip, encoded=encoded)
+    if clip is None:
+        logger.warning("reanalyze: clip %d is absent from the database; skipping", candidate.clip_id)
+        if encoded is not None:
+            _remove_unowned_thumbs(storage_root, encoded)
+        counts.skipped_missing += 1
+        return
+    if obsolete_thumb is not None:
+        _unlink_thumb(storage_root / obsolete_thumb)
+    if encoded is not None:
+        counts.frames.add(encoded.frame_counts)
     if fields["analysis_error"] is not None:
         counts.errored += 1
     else:
         counts.rescored += 1
+
+
+def _unlink_thumb(path: Path) -> None:
+    """Remove one thumb file. A failure is logged, so one bad file does not stop the run."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("reanalyze: could not unlink thumb %s: %s", path, exc)
+
+
+def _remove_unowned_thumbs(storage_root: Path, encoded: _EncodedFrames) -> None:
+    """Remove the thumbs written for a clip that was deleted during the run, and their empty directory."""
+    for frame in encoded.clip_frames:
+        _unlink_thumb(storage_root / frame.thumb_path)
+    per_clip_dir = (storage_root / encoded.thumb_relpath).parent
+    with suppress(OSError):
+        per_clip_dir.rmdir()
 
 
 def _apply_detection_fields(clip: Clip, fields: DetectionFields) -> None:
@@ -874,36 +1007,48 @@ def _apply_detection_fields(clip: Clip, fields: DetectionFields) -> None:
     clip.analysis_error = fields["analysis_error"]
 
 
-def _backfill_clip_frames(
+def _encode_clip_frames(
     *,
-    clip: Clip,
+    candidate: _ReanalyzeCandidate,
     scored_frames: tuple[ScoredFrame, ...],
     ctx: _ReanalyzeContext,
-) -> None:
-    """Encode per-frame thumbs, refresh ``clip_frames`` in place, repoint ``Clip.thumb_path``, unlink legacy thumb.
+) -> _EncodedFrames:
+    """Encode per-frame thumbs and classify the frames. This step opens no session.
+
+    A per-frame thumb filename comes from the ordinal, so a refreshed frame overwrites its own JPEG.
+    """
+    camera_name = ctx.camera_name_by_id[candidate.camera_id]
+    camera_tz = ctx.camera_tz_by_name.get(camera_name) or ZoneInfo(ctx.run.config.web.display_timezone)
+    local_dt = candidate.start_ts.astimezone(camera_tz)
+    thumb_relpath, clip_frames = write_per_frame_thumbs(
+        scored_frames=scored_frames,
+        storage_root=ctx.run.config.storage_root,
+        camera_name=camera_name,
+        local_dt=local_dt,
+    )
+    classifier = ctx.run.classifier
+    frame_counts = (
+        FrameCounts() if classifier is None else classify_frames(scored_frames, clip_frames, classifier, clip_label=str(candidate.clip_id))
+    )
+    return _EncodedFrames(thumb_relpath=thumb_relpath, clip_frames=clip_frames, frame_counts=frame_counts)
+
+
+def _apply_clip_frames(*, clip: Clip, encoded: _EncodedFrames) -> str | None:
+    """Merge the encoded frames into ``clip_frames`` in place and repoint ``Clip.thumb_path``.
 
     ``(clip_id, ordinal)`` identifies a frame, so a re-score updates the row that ordinal already
     has. Operator work hangs off ``clip_frames.id`` through ``clip_frame_subjects``, which cascades
     on delete, so a delete-then-insert discards every hand-applied tag on the clip. An ordinal
     the new detection does not produce is dropped, and its tags go with it.
 
-    A per-frame thumb filename comes from the ordinal, so a refreshed frame overwrites its own JPEG.
-    The legacy single-frame thumb at the old ``thumb_path`` is unlinked best-effort once
-    ``thumb_path`` actually changes. A permission failure is logged, so a single bad file does
-    not abort the whole reanalyze run. Row updates and the thumb_path repoint commit atomically with
-    the caller's per-clip session.
+    The prediction columns come from the same pass as the new box. With no classifier they are
+    ``NULL``. A prediction made on a different box does not apply to the new box.
+
+    If no frame uses the old ``thumb_path``, return it. A legacy single-frame thumb is an example.
+    If the old path is the thumb of a frame, return ``None``, because that file is live.
     """
-    camera_name = ctx.camera_name_by_id[clip.camera_id]
-    camera_tz = ctx.camera_tz_by_name.get(camera_name) or ZoneInfo(ctx.config.web.display_timezone)
-    local_dt = clip.start_ts.astimezone(camera_tz)
-    new_thumb_relpath, clip_frames = write_per_frame_thumbs(
-        scored_frames=scored_frames,
-        storage_root=ctx.config.storage_root,
-        camera_name=camera_name,
-        local_dt=local_dt,
-    )
     stale_by_ordinal = {frame.ordinal: frame for frame in clip.frames}
-    for fresh in clip_frames:
+    for fresh in encoded.clip_frames:
         existing = stale_by_ordinal.pop(fresh.ordinal, None)
         if existing is None:
             clip.frames.append(fresh)
@@ -912,16 +1057,15 @@ def _backfill_clip_frames(
         existing.score = fresh.score
         existing.thumb_path = fresh.thumb_path
         existing.bbox_xyxy = fresh.bbox_xyxy
+        existing.predicted_subject_id = fresh.predicted_subject_id
+        existing.prediction_confidence = fresh.prediction_confidence
+        existing.classifier_version = fresh.classifier_version
     for surplus in stale_by_ordinal.values():
         clip.frames.remove(surplus)
     old_thumb_relpath = clip.thumb_path
-    clip.thumb_path = new_thumb_relpath
-    if old_thumb_relpath != clip.thumb_path:
-        old_thumb_full = ctx.config.storage_root / old_thumb_relpath
-        try:
-            old_thumb_full.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("reanalyze: could not unlink legacy thumb %s: %s", old_thumb_full, exc)
+    clip.thumb_path = encoded.thumb_relpath
+    live_thumbs = {frame.thumb_path for frame in encoded.clip_frames}
+    return None if old_thumb_relpath in live_thumbs else old_thumb_relpath
 
 
 # --- backup --------------------------------------------------------------------------------------

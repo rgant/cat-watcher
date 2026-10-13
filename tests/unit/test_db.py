@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import Dialect, select
+from sqlalchemy import Dialect, select, text
 from sqlalchemy.exc import IntegrityError, StatementError
 
 from cat_watcher.db import (
@@ -16,6 +16,7 @@ from cat_watcher.db import (
     ClipFrame,
     Heartbeat,
     PollStatus,
+    Subject,
     UtcDateTime,
     create_engine,
     get_session,
@@ -218,6 +219,98 @@ def test_clip_frame_model_round_trip_and_cascades(db_engine: Engine) -> None:
     with get_session(db_engine) as session:
         assert session.scalars(select(Clip)).all() == []
         assert session.scalars(select(ClipFrame)).all() == []
+
+
+def _make_cat_subject() -> Subject:
+    """Build a minimally-valid cat Subject row for tests."""
+    return Subject(slug="marcel", display_name="Marcel", kind="cat", display_order=1)
+
+
+@pytest.mark.parametrize(
+    ("classifier_version", "with_subject", "confidence"),
+    [
+        pytest.param(None, False, None, id="not-classified"),
+        pytest.param("cat-classifier-a.pt@abc", False, None, id="no-cat-box"),
+        pytest.param("cat-classifier-a.pt@abc", True, 0.83, id="predicted-cat"),
+    ],
+)
+def test_clip_frame_prediction_states_round_trip(
+    db_engine: Engine,
+    classifier_version: str | None,
+    confidence: float | None,
+    *,
+    with_subject: bool,
+) -> None:
+    """Each prediction state in the spec table reads back as written."""
+    camera = _make_camera()
+    clip = _make_clip(camera)
+    subject = _make_cat_subject()
+    frame = ClipFrame(
+        clip=clip,
+        ordinal=0,
+        t_offset_seconds=0.0,
+        score=0.9,
+        thumb_path="frames/pantry/0000.jpg",
+        predicted_subject_id=None,
+        prediction_confidence=confidence,
+        classifier_version=classifier_version,
+    )
+    with get_session(db_engine) as session:
+        session.add_all([camera, clip, subject, frame])
+        session.flush()
+        if with_subject:
+            frame.predicted_subject_id = subject.id
+        subject_id = subject.id
+
+    with get_session(db_engine) as session:
+        loaded = session.scalars(select(ClipFrame)).one()
+        assert loaded.classifier_version == classifier_version
+        assert loaded.predicted_subject_id == (subject_id if with_subject else None)
+        assert loaded.prediction_confidence == confidence
+
+
+def test_absent_boxes_store_sql_null(db_engine: Engine) -> None:
+    """A ``None`` box stores SQL ``NULL``, not JSON ``'null'``. "No box" then has one form."""
+    camera = _make_camera()
+    clip = _make_clip(camera)
+    clip.best_box_xyxy = None
+    frame = ClipFrame(clip=clip, ordinal=0, t_offset_seconds=0.0, score=0.0, thumb_path="frames/pantry/0000.jpg", bbox_xyxy=None)
+    with get_session(db_engine) as session:
+        session.add_all([camera, clip, frame])
+
+    with db_engine.connect() as conn:
+        assert conn.execute(text("SELECT typeof(bbox_xyxy) FROM clip_frames")).scalar_one() == "null"
+        assert conn.execute(text("SELECT typeof(best_box_xyxy) FROM clips")).scalar_one() == "null"
+
+
+def test_subject_delete_clears_prediction_and_keeps_frame(db_engine: Engine) -> None:
+    """A delete of the predicted subject sets ``predicted_subject_id`` to ``NULL`` and keeps the frame row."""
+    camera = _make_camera()
+    clip = _make_clip(camera)
+    subject = _make_cat_subject()
+    with get_session(db_engine) as session:
+        session.add_all([camera, clip, subject])
+        session.flush()
+        session.add(
+            ClipFrame(
+                clip=clip,
+                ordinal=0,
+                t_offset_seconds=0.0,
+                score=0.9,
+                thumb_path="frames/pantry/0000.jpg",
+                predicted_subject_id=subject.id,
+                prediction_confidence=0.9,
+                classifier_version="cat-classifier-a.pt@abc",
+            ),
+        )
+
+    with get_session(db_engine) as session:
+        session.delete(session.scalars(select(Subject)).one())
+
+    with get_session(db_engine) as session:
+        loaded = session.scalars(select(ClipFrame)).one()
+        assert loaded.predicted_subject_id is None
+        assert loaded.classifier_version == "cat-classifier-a.pt@abc"
 
 
 def test_alert_sent_survives_camera_deletion(db_engine: Engine) -> None:

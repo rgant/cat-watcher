@@ -14,14 +14,16 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+from db_helpers import scored_frames_with_boxes
 from sqlalchemy.orm import Session
 
 from cat_watcher import import_local as importer_module
 from cat_watcher.config import Config  # noqa: TC001  # runtime: make_config callable annotation
-from cat_watcher.db import Base, Clip, create_engine, get_session
+from cat_watcher.db import Base, Clip, Subject, create_engine, get_session
 from cat_watcher.detector import DetectionResult, Detector, ScoredFrame
 from cat_watcher.import_local import ImportReport, import_local
 from cat_watcher.poller import PollerLockedError, pid_lock
+from cat_watcher.predictions import FrameCounts, LiveClassifier
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -629,3 +631,53 @@ def test_import_local_file_before_row_ordering_leaves_only_orphan_file_on_db_fai
             assert session.query(Clip).count() == 0
     finally:
         engine.dispose()
+
+
+def _fixed_predict(image_path: Path) -> tuple[str, float]:
+    _ = image_path
+    return "marcel", 0.91
+
+
+def test_import_local_with_classifier_stores_predictions(
+    tmp_path: Path,
+    synthetic_clip_path: Path,
+    make_config: Callable[[Path, Path], Config],
+) -> None:
+    """An import with a classifier stores the prediction columns on each frame with the clip."""
+    internal_root, storage_root, source_root = _setup_dirs(tmp_path)
+    _materialize_engine(internal_root)
+    scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
+    _ = _build_sd_tree(source_root, clip_payload=synthetic_clip_path.read_bytes())
+
+    engine = _open_engine(internal_root)
+    try:
+        with get_session(engine) as session:
+            subject = Subject(slug="marcel", display_name="Marcel", kind="cat", display_order=1)
+            session.add(subject)
+            session.flush()
+            subject_id = subject.id
+        classifier = LiveClassifier(
+            predict=_fixed_predict,
+            version="cat-classifier@cafe",
+            subject_id_by_slug={"marcel": subject_id},
+            totals=FrameCounts(),
+        )
+        report = import_local(
+            engine=engine,
+            config=make_config(internal_root, storage_root),
+            camera_name="pantry",
+            source_dir=source_root,
+            detector=_make_detector(scored_frames=scored),
+            limit=None,
+            now=_NOW,
+            classifier=classifier,
+        )
+        assert report.ingested == 1
+        with get_session(engine) as session:
+            frames = session.query(Clip).one().frames
+            assert [f.predicted_subject_id for f in frames] == [subject_id, None, subject_id]
+            assert [f.prediction_confidence for f in frames] == [0.91, None, 0.91]
+            assert [f.classifier_version for f in frames] == ["cat-classifier@cafe"] * 3
+    finally:
+        engine.dispose()
+    assert classifier.totals.classified == 2

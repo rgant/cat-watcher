@@ -225,7 +225,7 @@ class Clip(Base):
     frames_sampled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     frames_with_cat: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Phase-2 ROI overlap will populate this from the best-scoring frame; nullable today.
-    best_box_xyxy: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    best_box_xyxy: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     detector_version: Mapped[str] = mapped_column(String(128), nullable=False)
     ingested_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     analysis_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -268,7 +268,18 @@ class ClipFrame(Base):
     score: Mapped[float] = mapped_column(Float, nullable=False)
     thumb_path: Mapped[str] = mapped_column(String(512), nullable=False)
     activity: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    bbox_xyxy: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    # ``none_as_null`` stores ``None`` as SQL ``NULL``. Without it, JSON stores the text ``'null'``,
+    # and "no box" then has two forms.
+    bbox_xyxy: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    # A prediction is disposable, so a subject delete clears it. ``classifier_version`` is NULL when
+    # the frame is not classified. A set version with no subject means "no cat box found".
+    predicted_subject_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("subjects.id", name="fk_clip_frames_predicted_subject_id_subjects", ondelete="SET NULL"),
+        nullable=True,
+    )
+    prediction_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    classifier_version: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     clip: Mapped[Clip] = relationship(back_populates="frames")
     subjects: Mapped[list[ClipFrameSubject]] = relationship(
@@ -360,7 +371,15 @@ class AlertSent(Base):
     # Nullable + no ``ondelete=CASCADE``: keep the alert history even if a camera is later
     # deleted from config. The relationship side also has no cascade.
     camera_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("cameras.id"), nullable=True)
+    # The cat of a per-cat alert. NULL for every other alert. No cascade, for the same reason as
+    # ``camera_id``. The cool-down key is ``(camera_id, subject_id, alert_type)``.
+    subject_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("subjects.id", name="fk_alerts_sent_subject_id_subjects"),
+        nullable=True,
+    )
     sent_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    # The email subject line. The cat of the alert is ``cat``.
     subject: Mapped[str] = mapped_column(String(255), nullable=False)
     # Rendered body can be many lines; ``Text`` (no length cap) avoids a surprise truncation.
     body: Mapped[str] = mapped_column(Text, nullable=False)
@@ -369,8 +388,11 @@ class AlertSent(Base):
     delivery_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     camera: Mapped[Camera | None] = relationship(back_populates="alerts")
+    cat: Mapped[Subject | None] = relationship()
 
-    __table_args__: tuple[SchemaItem, ...] = (Index("ix_alerts_camera_type_sent", "camera_id", "alert_type", "sent_at"),)
+    __table_args__: tuple[SchemaItem, ...] = (
+        Index("ix_alerts_camera_subject_type_sent", "camera_id", "subject_id", "alert_type", "sent_at"),
+    )
 
 
 class Heartbeat(Base):

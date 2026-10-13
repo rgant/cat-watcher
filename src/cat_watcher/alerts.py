@@ -4,8 +4,9 @@ Per spec §4.5 + Task 18 plan. Three responsibilities, one module:
 
 1. **Rule evaluators** — pure functions that read DB / filesystem state and return an
    :class:`AlertCandidate` (or None, or a list for storage rules) describing what to fire. Per-camera
-   rules: ``INACTIVITY``, ``FREQUENCY``. Cross-agent watchdogs: ``POLLER_STUCK``, ``WEB_DOWN``,
-   ``WEB_FLAPPING``. Storage rules: ``STORAGE_UNAVAILABLE``, ``DISK_LOW``, ``BACKUP_STALE``.
+   rules: ``INACTIVITY``, ``CAMERA_CLOCK``. Per-cat rules: ``INACTIVITY``, ``FREQUENCY``.
+   Cross-agent watchdogs: ``POLLER_STUCK``, ``WEB_DOWN``, ``WEB_FLAPPING``. Storage rules:
+   ``STORAGE_UNAVAILABLE``, ``DISK_LOW``, ``BACKUP_STALE``.
    Evaluators don't render templates or send anything — they invoke the renderers in
    :mod:`cat_watcher.alert_templates` and hand the result back to the caller.
 
@@ -38,39 +39,41 @@ from cat_watcher.alert_templates import (
     inactivity_branch_unreachable,
     render_backup_stale,
     render_camera_clock,
+    render_cat_frequency,
+    render_cat_inactivity,
     render_disk_low,
-    render_frequency,
     render_heartbeat_watchdog,
     render_inactivity,
-    render_inactivity_no_cats_global,
     render_storage_unavailable,
     render_web_flapping,
 )
-from cat_watcher.config import load_config
+from cat_watcher.config import active_unsure_threshold, load_config
 from cat_watcher.db import (
     AgentStart,
     AlertSent,
     AlertType,
     Camera,
-    Clip,
-    ClipLabelSummary,
     Heartbeat,
     PollStatus,
     engine_for,
     get_session,
 )
+from cat_watcher.identity import query_cat_subjects
 from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.notifier import EmailResult, NotifResult, send_email, send_macos_notification
 from cat_watcher.storage import ensure_storage_layout, storage_available
 from cat_watcher.subjects_sync import sync_subjects_at_startup
+from cat_watcher.visits import last_visits_for, query_visits
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from sqlalchemy.engine import Engine
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import AlertConfig, Config, EmailSecrets
+    from cat_watcher.db import Subject
+    from cat_watcher.visits import Visit
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +106,7 @@ class AlertCandidate:
     alert_type: AlertType
     camera_id: int | None
     content: AlertContent
+    subject_id: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -136,16 +140,17 @@ def dispatch_alert(
     alert_type: AlertType,
     *,
     camera_id: int | None,
+    subject_id: int | None = None,
     content: AlertContent,
     env: DispatchEnv,
 ) -> None:
     """Send ``content`` for ``alert_type`` if the cool-down window is clear.
 
-    Cool-down key is ``(camera_id, alert_type)`` for camera alerts and ``(NULL, alert_type)`` for
-    the seven non-camera types (per plan §13 resolution 5: one global cool-down per non-camera
-    alert type). Suppression logs at INFO and writes **no** ``alerts_sent`` row; only dispatched
-    events persist a row. The helper never raises — both senders return typed results that are
-    recorded on the row.
+    Cool-down key is ``(camera_id, subject_id, alert_type)``. A NULL matches a NULL. Camera alerts
+    have a NULL ``subject_id``. A per-cat alert has a NULL ``camera_id``. The non-camera types keep
+    one global cool-down per alert type (per plan §13 resolution 5). Suppression logs at INFO and
+    writes **no** ``alerts_sent`` row. Only dispatched events persist a row. The helper never
+    raises. Both senders return typed results that are recorded on the row.
     """
     effective_now = env.now if env.now is not None else datetime.now(UTC)
     cooldown_h = cooldown_for(alert_type, env.rules)
@@ -155,14 +160,16 @@ def dispatch_alert(
         env.session,
         alert_type=alert_type,
         camera_id=camera_id,
+        subject_id=subject_id,
         cutoff=cutoff,
     )
     if last_sent_at is not None:
         remaining = (last_sent_at + timedelta(hours=cooldown_h)) - effective_now
         logger.info(
-            "alert suppressed: type=%s camera_id=%s remaining_cooldown_seconds=%d",
+            "alert suppressed: type=%s camera_id=%s subject_id=%s remaining_cooldown_seconds=%d",
             alert_type.value,
             camera_id,
+            subject_id,
             max(0, int(remaining.total_seconds())),
         )
         return
@@ -175,6 +182,7 @@ def dispatch_alert(
         AlertSent(
             alert_type=alert_type,
             camera_id=camera_id,
+            subject_id=subject_id,
             sent_at=effective_now,
             subject=content.subject,
             body=content.body,
@@ -198,13 +206,15 @@ def _most_recent_sent_at(
     *,
     alert_type: AlertType,
     camera_id: int | None,
+    subject_id: int | None = None,
     cutoff: datetime,
 ) -> datetime | None:
-    camera_predicate = AlertSent.camera_id.is_(None) if camera_id is None else AlertSent.camera_id == camera_id
+    # ``IS`` matches NULL to NULL and an int to an int.
     stmt = (
         select(AlertSent.sent_at)
         .where(AlertSent.alert_type == alert_type)
-        .where(camera_predicate)
+        .where(AlertSent.camera_id.is_(camera_id))
+        .where(AlertSent.subject_id.is_(subject_id))
         .where(AlertSent.sent_at >= cutoff)
         .order_by(AlertSent.sent_at.desc())
         .limit(1)
@@ -243,9 +253,8 @@ def evaluate_inactivity(
     1. ``poll_status != ok`` — fires immediately, no time threshold; cool-down still applies.
     2. ``last_clip_at`` set and older than ``inactivity_hours`` — camera producing nothing.
 
-    The fleet-wide "no cats seen on any camera" branch lives in
-    :func:`evaluate_inactivity_no_cats_global` because cats don't necessarily use every litter box
-    every day; activity on either camera satisfies the watchdog.
+    Cat absence is a per-cat rule (:func:`evaluate_cat_inactivity`), because a cat does not use
+    every litter box every day.
 
     Returns ``None`` when no branch fires. The ``poll_status_since`` value embeds in the unreachable
     branch label so the body distinguishes *which* branch fired (operator looks at camera or
@@ -276,85 +285,64 @@ def evaluate_inactivity(
     return AlertCandidate(alert_type=AlertType.INACTIVITY, camera_id=cam.id, content=content)
 
 
-def evaluate_inactivity_no_cats_global(
-    session: Session,
+def evaluate_cat_inactivity(  # noqa: PLR0913  # rule reads one last visit against a threshold, names its camera, formats with tz + clock
     *,
+    cat: Subject,
+    last_visit: Visit | None,
     inactivity_hours: int,
+    camera_name_by_id: Mapping[int, str],
     public_url: str,
     tz_name: str,
     now: datetime,
 ) -> AlertCandidate | None:
-    """Evaluate the fleet-wide ``no cats seen on any camera`` INACTIVITY branch per spec §4.5.
+    """Evaluate the per-cat ``INACTIVITY`` rule: the last visit of ``cat`` starts more than ``inactivity_hours`` ago.
 
-    Reads the camera with the most-recent ``last_cat_seen_at`` (NULL values excluded) and fires once
-    with ``camera_id=None`` if that timestamp is older than ``inactivity_hours``. Returns ``None``
-    when no camera has ever seen a cat (fresh install before backfill) or when the fleet-wide most-
-    recent sighting is within the threshold.
-
-    The cool-down key is ``(NULL, INACTIVITY)``, distinct from per-camera INACTIVITY cool-downs, so
-    a fleet-wide no-cats alert and a per-camera unreachable alert can coexist on the same tick.
+    A cat with no last visit gets no alert. The candidate has no camera, so a cat that changes
+    boxes keeps one cool-down.
     """
-    cam = session.scalar(
-        select(Camera)  # fmt: wrap
-        .where(Camera.last_cat_seen_at.is_not(None))
-        .order_by(Camera.last_cat_seen_at.desc())
-        .limit(1),
-    )
-    if cam is None or cam.last_cat_seen_at is None:
+    if last_visit is None or now - last_visit.start_ts <= timedelta(hours=inactivity_hours):
         return None
-    if (now - cam.last_cat_seen_at) <= timedelta(hours=inactivity_hours):
-        return None
-    content = render_inactivity_no_cats_global(
-        last_cat_seen_at=cam.last_cat_seen_at,
-        last_cat_seen_camera_name=cam.display_name,
+    content = render_cat_inactivity(
+        cat_display_name=cat.display_name,
+        last_visit_start=last_visit.start_ts,
+        last_visit_camera_name=camera_name_by_id[last_visit.camera_id],
         inactivity_hours=inactivity_hours,
         public_url=public_url,
         tz_name=tz_name,
         now=now,
     )
-    return AlertCandidate(alert_type=AlertType.INACTIVITY, camera_id=None, content=content)
+    return AlertCandidate(alert_type=AlertType.INACTIVITY, camera_id=None, subject_id=cat.id, content=content)
 
 
-def evaluate_frequency(  # noqa: PLR0913  # rule reads camera clips against 4 thresholds, formats output with tz + clock
-    session: Session,
-    cam: Camera,
+def evaluate_cat_frequency(  # noqa: PLR0913  # rule counts visits against a window + threshold, names their cameras, formats with tz + clock
     *,
+    cat: Subject,
+    visits: Sequence[Visit],
     window_hours: int,
     threshold: int,
+    camera_name_by_id: Mapping[int, str],
     public_url: str,
     tz_name: str,
     now: datetime,
 ) -> AlertCandidate | None:
-    """Evaluate the ``FREQUENCY`` rule per spec §4.5: ``count(cat-positive) >= threshold`` in window.
-
-    ``effective_has_cat`` (from ``clip_label_summary``) is the cat-positive projection — manual
-    overrides win once the clip is reviewed; before review the detector verdict stands.
-    """
+    """Evaluate the per-cat ``FREQUENCY`` rule: the visits of ``cat`` that start in the window, over all cameras."""
     cutoff = now - timedelta(hours=window_hours)
-    rows = list(
-        session.scalars(
-            select(Clip)
-            .join(ClipLabelSummary, ClipLabelSummary.clip_id == Clip.id)
-            .where(Clip.camera_id == cam.id)
-            .where(ClipLabelSummary.effective_has_cat.is_(True))
-            .where(Clip.start_ts >= cutoff)
-            .order_by(Clip.start_ts),
-        ).all(),
-    )
-    count = len(rows)
-    if count < threshold:
+    in_window = sorted((visit for visit in visits if visit.start_ts >= cutoff), key=lambda visit: visit.start_ts)
+    if len(in_window) < threshold:
         return None
-    content = render_frequency(
-        camera_display_name=cam.display_name,
-        count=count,
+    camera_ids = dict.fromkeys(visit.camera_id for visit in in_window)
+    content = render_cat_frequency(
+        cat_display_name=cat.display_name,
+        count=len(in_window),
         window_hours=window_hours,
         threshold=threshold,
-        first_in_window=rows[0].start_ts,
-        latest_in_window=rows[-1].start_ts,
+        first_visit_start=in_window[0].start_ts,
+        latest_visit_start=in_window[-1].start_ts,
+        camera_names=[camera_name_by_id[camera_id] for camera_id in camera_ids],
         public_url=public_url,
         tz_name=tz_name,
     )
-    return AlertCandidate(alert_type=AlertType.FREQUENCY, camera_id=cam.id, content=content)
+    return AlertCandidate(alert_type=AlertType.FREQUENCY, camera_id=None, subject_id=cat.id, content=content)
 
 
 def evaluate_heartbeat_watchdog(  # noqa: PLR0913  # watchdog needs the alert identity, the staleness threshold, and tz + clock for the rendered body
@@ -589,6 +577,7 @@ def dispatch_candidate(
         dispatch_alert(
             cand.alert_type,
             camera_id=cand.camera_id,
+            subject_id=cand.subject_id,
             content=cand.content,
             env=DispatchEnv(secrets=config.email, rules=config.alerts, session=session, now=now),
         )
@@ -607,13 +596,12 @@ def _dispatch_each(
 
 
 def _camera_candidates(
-    session: Session,
     cam: Camera,
     *,
     config: Config,
     now: datetime,
 ) -> Iterator[AlertCandidate]:
-    """Yield the per-camera ``INACTIVITY`` + ``FREQUENCY`` candidates for ``cam`` (each may be None)."""
+    """Yield the per-camera ``INACTIVITY`` + ``CAMERA_CLOCK`` candidates for ``cam``."""
     tz_name = config.web.display_timezone
     public_url = config.web.public_url
     ic = evaluate_inactivity(
@@ -625,17 +613,6 @@ def _camera_candidates(
     )
     if ic is not None:
         yield ic
-    fc = evaluate_frequency(
-        session,
-        cam,
-        window_hours=config.alerts.frequency_window_hours,
-        threshold=config.alerts.frequency_threshold_count,
-        public_url=public_url,
-        tz_name=tz_name,
-        now=now,
-    )
-    if fc is not None:
-        yield fc
     cc = evaluate_camera_clock(
         cam,
         streak_threshold=config.alerts.camera_clock_streak_threshold,
@@ -645,6 +622,54 @@ def _camera_candidates(
     )
     if cc is not None:
         yield cc
+
+
+def _cat_candidates(
+    session: Session,
+    *,
+    camera_name_by_id: Mapping[int, str],
+    config: Config,
+    now: datetime,
+) -> Iterator[AlertCandidate]:
+    """Yield the per-cat ``INACTIVITY`` + ``FREQUENCY`` candidates for every active cat.
+
+    The number of queries is fixed, independent of the cat count and the clip count.
+    """
+    cats = query_cat_subjects(session)
+    last_visits = last_visits_for(session, config, now=now, cats=cats)
+    window_visits = query_visits(
+        session,
+        since=now - timedelta(hours=config.alerts.frequency_window_hours),
+        until=now,
+        unsure_threshold=active_unsure_threshold(config),
+        cats=cats,
+    )
+    for cat in cats:
+        if cat.archived_at is not None:
+            continue
+        ic = evaluate_cat_inactivity(
+            cat=cat,
+            last_visit=last_visits.get(cat.slug),
+            inactivity_hours=config.alerts.inactivity_hours,
+            camera_name_by_id=camera_name_by_id,
+            public_url=config.web.public_url,
+            tz_name=config.web.display_timezone,
+            now=now,
+        )
+        if ic is not None:
+            yield ic
+        fc = evaluate_cat_frequency(
+            cat=cat,
+            visits=window_visits.get(cat.slug, []),
+            window_hours=config.alerts.frequency_window_hours,
+            threshold=config.alerts.frequency_threshold_count,
+            camera_name_by_id=camera_name_by_id,
+            public_url=config.web.public_url,
+            tz_name=config.web.display_timezone,
+            now=now,
+        )
+        if fc is not None:
+            yield fc
 
 
 def _watchdog_candidates(
@@ -717,17 +742,11 @@ def run_alerts_tick(*, config: Config, engine: Engine, now: datetime) -> None:
 
     pre_storage: list[AlertCandidate] = []
     with get_session(engine) as session:
-        for cam in session.scalars(select(Camera)).all():
-            pre_storage.extend(_camera_candidates(session, cam, config=config, now=now))
-        global_no_cats = evaluate_inactivity_no_cats_global(
-            session,
-            inactivity_hours=config.alerts.inactivity_hours,
-            public_url=config.web.public_url,
-            tz_name=config.web.display_timezone,
-            now=now,
-        )
-        if global_no_cats is not None:
-            pre_storage.append(global_no_cats)
+        cameras = session.scalars(select(Camera)).all()
+        for cam in cameras:
+            pre_storage.extend(_camera_candidates(cam, config=config, now=now))
+        camera_name_by_id = {cam.id: cam.display_name for cam in cameras}
+        pre_storage.extend(_cat_candidates(session, camera_name_by_id=camera_name_by_id, config=config, now=now))
         pre_storage.extend(_watchdog_candidates(session, config=config, now=now))
     _dispatch_each(pre_storage, config=config, engine=engine, now=now)
 

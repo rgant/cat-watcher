@@ -47,6 +47,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+BOX_CONF: float = 0.10
+"""Box confidence floor for every YOLO call. ``confidence_threshold`` gates ``has_cat`` only."""
+
+PIPELINE_REVISION: int = 2
+"""The revision of the frame pipeline around the weights, such as the channel order and ``BOX_CONF``.
+
+Increase it when a pipeline change alters the output for the same weights. It is part of
+``clips.detector_version``, so ``reanalyze --predictions`` selects each clip that an older pipeline scored.
+"""
+
 _COCO_CAT_CLASS_ID = 15
 _HASH_BLOCK_SIZE = 64 * 1024
 _FFPROBE_TIMEOUT_SECONDS = 30
@@ -127,6 +137,20 @@ def extract_frame_at(clip_path: Path, timestamp: float) -> np.ndarray:
     """
     _duration, width, height = _probe_video(clip_path)
     return _extract_frame(clip_path, timestamp, width=width, height=height)
+
+
+def to_yolo_input(frame_rgb: np.ndarray) -> np.ndarray:
+    """Return a C-contiguous BGR copy of an RGB frame.
+
+    ultralytics reads a NumPy array as BGR, but ffmpeg decodes RGB. The copy leaves the caller's
+    frame in RGB.
+    """
+    return np.ascontiguousarray(frame_rgb[..., ::-1])
+
+
+def weights_version(model_path: Path) -> str:
+    """Return ``<filename>@<sha256>`` for the weights file at ``model_path``."""
+    return f"{model_path.name}@{_hash_weights(model_path)}"
 
 
 def _hash_weights(model_path: Path) -> str:
@@ -264,7 +288,7 @@ class Detector:
         if not model_path.is_file():
             msg = f"weights file not found: {model_path}"
             raise FileNotFoundError(msg)
-        version = f"{model_path.name}@{_hash_weights(model_path)}"
+        version = f"{weights_version(model_path)}+p{PIPELINE_REVISION}"
         model = _yolo_factory(model_path)
         return cls(
             model=model,
@@ -275,7 +299,7 @@ class Detector:
 
     @property
     def version(self) -> str:
-        """The string written to ``clips.detector_version``: ``<filename>@<sha256>``."""
+        """The string written to ``clips.detector_version``: ``<filename>@<sha256>+p<PIPELINE_REVISION>``."""
         return self._version
 
     def detect(self, clip_path: Path) -> DetectionResult:
@@ -294,7 +318,7 @@ class Detector:
         for ordinal, (timestamp, frame) in enumerate(sampled):
             # ``YOLO.__call__`` returns bare ``list`` (no element type); cast at the boundary so
             # downstream code can access Results attributes directly.
-            results = cast("list[Results]", self._model(frame, verbose=False))
+            results = cast("list[Results]", self._model(to_yolo_input(frame), verbose=False, conf=BOX_CONF))
             hit = best_cat_box(results)
             score = hit.score if hit is not None else 0.0
             scored.append(

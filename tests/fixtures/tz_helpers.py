@@ -1,4 +1,4 @@
-"""Shared OS-local timezone manipulation helpers for tests.
+"""Shared time helpers for tests.
 
 Some code under test (the poller's ``_parse_iso_datetime``, the logs viewer's ``parse_since``)
 interprets naive datetimes as system-local. Tests that exercise that path need to pin the system
@@ -11,7 +11,8 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
+    from datetime import datetime
 
 
 @contextmanager
@@ -32,3 +33,12 @@ def pinned_tz(tz: str) -> Generator[None]:
         else:
             os.environ["TZ"] = saved
         time.tzset()
+
+
+def frozen_clock(when: datetime) -> Callable[[], datetime]:
+    """Return a clock that always reads ``when``."""
+
+    def clock() -> datetime:
+        return when
+
+    return clock

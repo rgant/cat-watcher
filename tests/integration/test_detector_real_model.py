@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cat_watcher.detector import Detector
+from cat_watcher.detector import PIPELINE_REVISION, Detector
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CAT_WATCHER_RUN_REAL_MODEL") != "1",
@@ -39,7 +39,9 @@ def test_detect_pipeline_runs_end_to_end(synthetic_clip_path: Path) -> None:
     result = detector.detect(synthetic_clip_path)
 
     assert result.frames_sampled == 5
-    # ``detector_version`` is ``<filename>@<sha256-of-bytes>``; sha256 is 64 hex chars.
+    # ``detector_version`` is ``<filename>@<sha256-of-bytes>+p<PIPELINE_REVISION>``. A sha256 is 64 hex characters.
     expected_version_prefix = f"{model_name}@"
+    expected_version_suffix = f"+p{PIPELINE_REVISION}"
     assert result.detector_version.startswith(expected_version_prefix)
-    assert len(result.detector_version) == len(expected_version_prefix) + 64
+    assert result.detector_version.endswith(expected_version_suffix)
+    assert len(result.detector_version) == len(expected_version_prefix) + 64 + len(expected_version_suffix)

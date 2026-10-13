@@ -49,6 +49,11 @@ model = "yolo11n.pt"
 confidence_threshold = 0.35
 frames_to_sample = 5
 
+# Optional. Without this table, the poller does not classify cat identity.
+[classifier]
+model = "cat-classifier-<hash8>.pt" # checkpoint filename under <internal_root>/models
+unsure_threshold = 0.70 # the UI names a cat for an untagged frame only at this confidence or higher
+
 [poller]
 cadence_seconds = 300 # how often the poller LaunchAgent fires (rendered into the plist at install)
 overlap_minutes = 15 # how far behind now the steady-state cursor lags so transient findFile lag is tolerated
@@ -71,10 +76,10 @@ cadence_minute = 0 # daily backup local minute (0-59)
 
 [alerts]
 cadence_seconds = 900 # how often the alerts LaunchAgent fires
-inactivity_hours = 12 # INACTIVITY rule: no clips / no cats for this long
-frequency_window_hours = 6 # FREQUENCY rule: rolling window
-frequency_threshold_count = 8 # FREQUENCY rule: cat-positive clips in window before firing
-cooldown_hours = 6 # default per-(camera, alert_type) cool-down
+inactivity_hours = 12 # INACTIVITY: a camera with no clips, or a cat with no visit, for this long
+frequency_window_hours = 6 # FREQUENCY: rolling window for the visits of one cat over all cameras
+frequency_threshold_count = 8 # FREQUENCY: visits of one cat in the window before firing
+cooldown_hours = 6 # default cool-down per (camera, cat, alert_type)
 poller_stuck_minutes = 15 # POLLER_STUCK if poller heartbeat older than this
 web_down_minutes = 5 # WEB_DOWN if web heartbeat older than this
 alerts_stuck_minutes = 30 # ALERTS_STUCK if alerts heartbeat older than this (poller fires)

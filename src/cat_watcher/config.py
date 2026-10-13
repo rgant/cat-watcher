@@ -57,6 +57,18 @@ class DetectorConfig(BaseModel, extra="forbid"):
     frames_to_sample: Annotated[int, Field(ge=1)] = 5
 
 
+DEFAULT_UNSURE_THRESHOLD: float = 0.70
+"""Lowest prediction confidence at which the UI names a cat for an untagged frame."""
+
+
+class ClassifierConfig(BaseModel, extra="forbid"):
+    """Cat identity classifier. The table is optional. Without it, the poller does not classify."""
+
+    # 128 characters keep ``<model>@<sha256>`` inside the 255-character ``classifier_version`` column.
+    model: Annotated[str, Field(max_length=128)]
+    unsure_threshold: Annotated[float, Field(gt=0, le=1)] = DEFAULT_UNSURE_THRESHOLD
+
+
 class EmailRulesConfig(BaseModel, extra="forbid"):
     """Email alert routing rules (no secrets)."""
 
@@ -251,6 +263,7 @@ class Config(BaseModel, extra="forbid"):
     cameras: Annotated[list[CameraConfig], Field(min_length=1)]
     subjects: list[ConfiguredSubject] = Field(default_factory=list)
     detector: DetectorConfig
+    classifier: ClassifierConfig | None = None
     alerts: AlertConfig
     web: WebConfig
     storage: StorageConfig = Field(default_factory=StorageConfig)
@@ -276,6 +289,15 @@ class Config(BaseModel, extra="forbid"):
             msg = f"duplicate camera name(s): {joined}"
             raise ValueError(msg)
         return self
+
+
+def active_unsure_threshold(config: Config) -> float:
+    """Return the threshold at which the UI and the alerts treat a prediction as a named cat.
+
+    A config without a ``[classifier]`` table gets the default. Operator tags then still name cats.
+    """
+    classifier = config.classifier
+    return classifier.unsure_threshold if classifier is not None else DEFAULT_UNSURE_THRESHOLD
 
 
 def _resolve_config_path(config_path: Path | None) -> Path:

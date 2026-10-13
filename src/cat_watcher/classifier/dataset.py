@@ -12,13 +12,14 @@ import hashlib
 import json
 import shutil
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import TypeAdapter
 
-from cat_watcher.classifier.geometry import PAD_FRAC, square_pad_box
+from cat_watcher.classifier.crop import CROP_MAX_WIDTH, CROP_QUALITY, crop_frame, write_crop_jpeg
+from cat_watcher.classifier.geometry import PAD_FRAC
 from cat_watcher.classifier.splitting import RATIOS, SEED, split_by_clip
-from cat_watcher.thumbnails import encode_frame
+from cat_watcher.detector import BOX_CONF
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -28,10 +29,7 @@ if TYPE_CHECKING:
     from cat_watcher.classifier.labels_query import CatFrameRow
 
 DATASET_SUBDIR: str = "classifier/dataset"
-LOCALIZE_CONF: float = 0.10
 MIN_CROPS_PER_CLASS: int = 20
-CROP_MAX_WIDTH: int = 256
-CROP_QUALITY: int = 92
 
 _SPLITS: tuple[str, ...] = ("train", "val", "test")
 _MANIFEST_FILENAME: str = "manifest.json"
@@ -173,7 +171,7 @@ class ExportParams:
     ratios: tuple[float, float, float] = RATIOS
     seed: int = SEED
     pad_frac: float = PAD_FRAC
-    localize_conf: float = LOCALIZE_CONF
+    localize_conf: float = BOX_CONF
     min_crops_per_class: int = MIN_CROPS_PER_CLASS
 
 
@@ -396,9 +394,7 @@ def _localize_one(
     located = localizer(loaded.image)
     if located is None:
         return None, "localization"
-    frame_h, frame_w = cast("tuple[int, int]", loaded.image.shape[:2])
-    box_xyxy = square_pad_box(located.box, frame_w=frame_w, frame_h=frame_h, pad_frac=pad_frac)
-    crop = _crop_to_box(loaded.image, box_xyxy)
+    crop, box_xyxy = crop_frame(loaded.image, located.box, pad_frac=pad_frac)
     return _Candidate(row=row, crop=crop, box_xyxy=box_xyxy, conf=located.conf, source=loaded.source), None
 
 
@@ -411,12 +407,6 @@ def _require_known_class(cat_slug: str, classes: tuple[str, ...]) -> None:
     if cat_slug not in classes:
         msg = f"class {cat_slug!r} is not one of {classes!r}"
         raise ExportError(msg)
-
-
-def _crop_to_box(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
-    """Slice ``image`` to ``box`` (x1, y1, x2, y2), and copy it clear of the source frame."""
-    x1, y1, x2, y2 = box
-    return image[y1:y2, x1:x2].copy()
 
 
 def _check_floor(
@@ -457,7 +447,7 @@ def _write_crops(candidates: list[_Candidate], assignment: dict[int, str], datas
         crop_relpath = f"{split}/{row.cat_slug}/{row.clip_id}_{row.ordinal}.jpg"
         dest = dataset_root / crop_relpath
         dest.parent.mkdir(parents=True, exist_ok=True)
-        encode_frame(candidate.crop, dest, max_width=CROP_MAX_WIDTH, quality=CROP_QUALITY)
+        write_crop_jpeg(candidate.crop, dest)
         records.append(
             CropRecord(
                 clip_id=row.clip_id,

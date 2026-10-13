@@ -22,6 +22,8 @@
 
 default_install_hook_types: [pre-commit]
 fail_fast: false
+# An extracted vendor manual. Agents grep it by line number, so it stays as extracted.
+exclude: ^docs/resources/Amcrest-HTTP_API_V3\.26\.txt$
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

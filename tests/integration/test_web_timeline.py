@@ -1,22 +1,26 @@
 """Integration tests for the cat-watcher timeline routes.
 
 Covers ``GET /`` and ``GET /timeline`` rendering: SVG lanes per camera, range-preset switching via
-the ``range`` query parameter, density bucketing for windows past the 24h threshold (per spec
-§4.7.1), and the storage-offline degradation path (banner + ``onerror`` placeholder).
+the ``range`` query parameter, and the storage-offline degradation path (banner + ``onerror``
+placeholder).
 
 The tests deliberately avoid asserting on layout numerics (lane width, x-coordinates) because those
 are presentation details that the route's contract is silent on; they pin observable HTML contract —
 element classes, marker counts, ``aria-label`` text — instead.
 """
 
+import html
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # pytest evaluates fixture annotations at collection time
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
-from db_helpers import AUTH_HEADER, seed_cat_subject, tag_clip_frame
+import pytest
+from db_helpers import AUTH_HEADER, add_clip, add_clip_frame, seed_cat_subject, tag_clip_frame, tag_frame
 
-from cat_watcher.db import AlertSent, AlertType, Camera, Clip, create_engine
+from cat_watcher.db import AlertSent, AlertType, Camera, Clip, Subject, create_engine, get_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -168,16 +172,13 @@ def test_timeline_route_accepts_range_param(
     assert 'class="timeline-svg"' in response.text
 
 
-def test_timeline_renders_per_clip_markers_under_24h(
+def test_timeline_renders_per_clip_markers_at_6h(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """A 6h window with 10 seeded clips renders 10 distinct per-clip ``<rect class="clip">`` elements.
-
-    Per spec §4.7.1 the 24h threshold gates bucketing; below it, every clip gets its own marker.
-    """
+    """A 6h window with 10 seeded clips renders 10 distinct per-clip ``<rect class="clip">`` elements."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)
@@ -187,7 +188,7 @@ def test_timeline_renders_per_clip_markers_under_24h(
     _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=offsets, reference_now=now_ish)
 
     with alembic_web_test_client(config) as client:
-        response = client.get("/timeline?range=6h", headers=AUTH_HEADER)
+        response = client.get("/timeline?range=6h&lanes=boxes", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     # Per-clip SVG markers carry ``<rect class="clip ...">`` (the leading ``clip`` plus modifier
@@ -195,76 +196,175 @@ def test_timeline_renders_per_clip_markers_under_24h(
     # keeps the count robust against modifier-class additions and against the same ``css_classes``
     # being reused on the thumb-strip ``<li>`` cards.
     assert response.text.count('<rect class="clip ') == 10
-    assert 'class="bucket"' not in response.text
 
 
-def test_timeline_buckets_clips_above_24h_threshold(
+def test_timeline_renders_per_clip_markers_at_3d(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """A 7d window collapses 50 same-hour clips into a single heatmap cell whose ``aria-label`` includes the count.
-
-    The clips are deliberately clustered into one hour so the bucket count (50) is unambiguous in
-    the assertion. Even spreading would still bucket but bin counts of 1 don't prove the count text
-    is wired through to the accessible name.
-    """
+    """A 3d window gives one marker per clip, and the thumb strip shows."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)
     now_ish = datetime.now(UTC)
-    # 50 clips all anchored ~3 days back, spread across 60 minutes — they all fall into the same
-    # per-hour bin so the bucket has count=50.
-    base = timedelta(days=3)
-    offsets = [base + timedelta(seconds=i * 60) for i in range(50)]
+    # The clips share one hour, two days back. A per-hour aggregate merges them into one cell.
+    offsets = [timedelta(days=2) + timedelta(minutes=i) for i in range(5)]
     _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=offsets, reference_now=now_ish)
 
     with alembic_web_test_client(config) as client:
-        response = client.get("/timeline?range=7d", headers=AUTH_HEADER)
+        response = client.get("/timeline?range=3d&lanes=boxes", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert 'class="clip"' not in response.text
-    assert response.text.count('class="bucket ') >= 1
-    # The bucket's aria-label must encode the count for accessibility tools.
-    assert 'aria-label="50 clips' in response.text
+    body = response.text
+    assert body.count('<rect class="clip ') == 5
+    assert "bucket" not in body
+    assert 'class="thumb-strip"' in body
 
 
-def test_bucket_opacity_scales_per_lane_at_7d(
+@pytest.mark.parametrize("range_key", ["7d", "30d", "bogus"])
+def test_timeline_unknown_range_renders_24h_view(
+    range_key: str,
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """At 7d, each bucket rect carries an ``opacity`` attribute scaled to the per-lane max count."""
+    """A range outside ``6h``, ``24h``, and ``3d`` renders the ``24h`` view."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)
-    # Use the route's actual ``now`` reference so seeded clips land in deterministic hour-bins
-    # relative to ``start_window = now - 7d``.
-    now_ish = datetime.now(UTC)
-    # 6 clips bunched into one hour-bin and a single sparse clip 5h back. The 30-minute interior
-    # anchor keeps all six clips strictly inside one hour-bin regardless of sub-second drift between
-    # test seeding and the request's ``datetime.now(UTC)`` reference.
-    bunched = [timedelta(hours=2, minutes=30, seconds=s) for s in range(0, 60, 10)]  # six clips at hour-2
-    sparse = [timedelta(hours=5)]
     _seed_clip_rows(
         db_session_factory,
         internal_root,
         camera_id=cam_id,
-        start_offsets=[*bunched, *sparse],
-        reference_now=now_ish,
+        start_offsets=[timedelta(hours=1)],
+        reference_now=datetime.now(UTC),
     )
 
     with alembic_web_test_client(config) as client:
-        response = client.get("/timeline?range=7d", headers=AUTH_HEADER)
+        response = client.get(f"/timeline?range={range_key}", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
-    # The dense bin (count=6, lane max=6) should carry opacity ~ 0.95 (0.20 + 0.75 * 6/6).
-    # The sparse bin (count=1) should carry opacity ~ 0.325 (0.20 + 0.75 * 1/6).
-    assert 'opacity="0.95"' in body, "expected the densest lane bucket at full opacity"
-    assert 'opacity="0.325"' in body, "expected the sparse bucket at scaled opacity (0.20 + 0.75 * 1/6 = 0.325, rounded to 3 dp)"
+    assert 'aria-label="Activity over the last 24h"' in body
+    assert re.search(r'\?range=24h"[^>]*aria-current="page"', body) is not None
+    assert body.count('class="axis-tick"') == 24
+    assert "range=7d" not in body
+    assert "range=30d" not in body
+
+
+def test_timeline_3d_ticks_show_weekday_and_day_boundaries_show_date(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """At 3d, every second tick has a weekday label, and a midnight line has a day-and-month label."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    _seed_clip_rows(
+        db_session_factory,
+        internal_root,
+        camera_id=cam_id,
+        start_offsets=[timedelta(hours=1)],
+        reference_now=datetime.now(UTC),
+    )
+
+    with alembic_web_test_client(config) as client:
+        body = client.get("/timeline?range=3d", headers=AUTH_HEADER).text
+
+    tick_labels: list[str] = re.findall(r'class="axis-tick-label"[^>]*>([^<]*)</text>', body)
+    assert len(tick_labels) == 6
+    for label in tick_labels:
+        assert re.fullmatch(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d", label), label
+    day_labels: list[str] = re.findall(r'class="axis-day-label"[^>]*>([^<]*)</text>', body)
+    assert day_labels
+    for label in day_labels:
+        assert re.fullmatch(r"\d{1,2} [A-Z][a-z]{2}", label), label
+
+
+def test_box_lane_label_is_camera_display_name(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Each lane label is the camera display name. A camera with no clip still gets a lane."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    cam_id = _seed_camera_row(db_session_factory, internal_root, name="pantry", display_name="Pantry Box")
+    _ = _seed_camera_row(db_session_factory, internal_root, name="hall", display_name="Hall Box")
+    _seed_clip_rows(
+        db_session_factory,
+        internal_root,
+        camera_id=cam_id,
+        start_offsets=[timedelta(hours=1)],
+        reference_now=datetime.now(UTC),
+    )
+
+    with alembic_web_test_client(config) as client:
+        body = client.get("/timeline?range=24h&lanes=boxes", headers=AUTH_HEADER).text
+
+    assert re.findall(r'class="lane-label">([^<]*)</text>', body) == ["Hall Box", "Pantry Box"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("Pantry", 80.0),
+        # 24 characters at 6.6 units each, rounded up, plus 8 units of padding.
+        ("Pantry Litter Box Camera", 167.0),
+    ],
+)
+def test_lane_label_column_fits_the_longest_lane_label(
+    case: tuple[str, float],
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The lane track starts after the longest lane label. A short label keeps the 80-unit minimum."""
+    display_name, expected_track_start = case
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    cam_id = _seed_camera_row(db_session_factory, internal_root, display_name=display_name)
+    _seed_clip_rows(
+        db_session_factory,
+        internal_root,
+        camera_id=cam_id,
+        start_offsets=[timedelta(hours=1)],
+        reference_now=datetime.now(UTC),
+    )
+
+    with alembic_web_test_client(config) as client:
+        body = client.get("/timeline?range=24h&lanes=boxes", headers=AUTH_HEADER).text
+
+    track_starts: list[str] = re.findall(r'<line x1="([^"]+)"[^>]*class="lane-axis"', body)
+    assert {float(x1) for x1 in track_starts} == {expected_track_start}
+
+
+def test_marker_carries_camera_display_name_and_weekday_start(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A marker names its camera and the weekday and time of its start, for the tooltip and the link label."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    cam_id = _seed_camera_row(db_session_factory, internal_root, display_name="Pantry Box")
+    reference_now = datetime.now(UTC).replace(microsecond=0)
+    _seed_clip_rows(db_session_factory, internal_root, camera_id=cam_id, start_offsets=[timedelta(hours=3)], reference_now=reference_now)
+
+    with alembic_web_test_client(config) as client:
+        body = client.get("/timeline?range=24h", headers=AUTH_HEADER).text
+
+    expected_start = (reference_now - timedelta(hours=3)).astimezone(ZoneInfo(config.web.display_timezone)).strftime("%a %H:%M:%S")
+    assert f'data-camera="Pantry Box" data-start="{expected_start}"' in body
+    assert f'aria-label="Pantry Box · {expected_start} · score' in body
 
 
 def test_timeline_renders_offline_banner_when_storage_root_unmounted(
@@ -309,8 +409,9 @@ def test_timeline_header_carries_htmx_attrs_and_banner_aria_live(
     assert response.status_code == 200
     body = response.text
     assert 'class="timeline-header"' in body
-    assert body.count('hx-indicator="#timeline-region"') == 4
-    assert body.count('hx-push-url="true"') == 4
+    # The range links, the view links, and the strip filter links carry the HTMX attributes.
+    assert body.count('hx-indicator="#timeline-region"') == 7
+    assert body.count('hx-push-url="true"') == 7
     assert 'aria-live="polite"' in body
     assert 'class="banner banner-offline"' in body
 
@@ -410,8 +511,7 @@ def test_timeline_renders_time_axis_with_per_range_tick_count(
     cases = [
         ("6h", 12, "tick interval 30 min, 6h window -> 12 ticks"),
         ("24h", 24, "tick interval 1h, 24h window -> 24 ticks"),
-        ("7d", 28, "tick interval 6h, 7d window -> 28 ticks"),
-        ("30d", 30, "tick interval 1d, 30d window -> 30 ticks"),
+        ("3d", 12, "tick interval 6h, 3d window -> 12 ticks"),
     ]
 
     with alembic_web_test_client(config) as client:
@@ -452,13 +552,13 @@ def test_timeline_renders_day_boundary_markers_when_window_crosses_midnight(
     assert response.text.count('class="axis-day-boundary"') == 1
 
 
-def test_thumb_card_renders_display_stamp_in_configured_timezone(
+def test_thumb_card_renders_weekday_and_time_in_configured_timezone(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """At 6h/24h ranges the thumb strip renders one card per clip with HH:MM:SS in display_timezone."""
+    """A thumb card shows the weekday and time of the clip start in display_timezone."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     cam_id = _seed_camera_row(db_session_factory, internal_root)
@@ -479,7 +579,7 @@ def test_thumb_card_renders_display_stamp_in_configured_timezone(
 
     assert response.status_code == 200
     expected_local = (reference_now - timedelta(hours=4)).astimezone(ZoneInfo(config.web.display_timezone))
-    expected_stamp = expected_local.strftime("%H:%M:%S")
+    expected_stamp = expected_local.strftime("%a %H:%M:%S")
     assert f'<span class="thumb-time">{expected_stamp}</span>' in response.text
 
 
@@ -489,7 +589,7 @@ def test_timeline_empty_state_links_to_next_longer_range(
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """With no clips at 24h, the empty state surfaces a 'try 7d' CTA and a /cameras link."""
+    """With no clips at 24h, the empty state offers 3d and a /cameras link."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _ = _seed_camera_row(db_session_factory, internal_root)  # camera but no clips
@@ -501,23 +601,23 @@ def test_timeline_empty_state_links_to_next_longer_range(
     body = response.text
     assert 'class="empty-state' in body, "expected empty-state block"
     assert "No activity in this range" in body
-    assert 'class="empty-cta-next-longer-range"' in body, "expected next-longer-range CTA"
+    assert re.search(r'class="empty-cta-next-longer-range"\s+href="[^"]*\?range=3d"', body), "expected a 3d CTA"
     assert 'class="empty-cta-cameras"' in body, "expected /cameras CTA"
 
 
-def test_timeline_empty_state_omits_next_longer_link_at_30d(
+def test_timeline_empty_state_omits_next_longer_link_at_3d(
     storage_dirs: tuple[Path, Path],
     make_config: Callable[..., Config],
     alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
 ) -> None:
-    """At the longest preset (30d), the empty state hides the next-longer-range CTA."""
+    """At the longest preset (3d), the empty state hides the next-longer-range CTA."""
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _ = _seed_camera_row(db_session_factory, internal_root)
 
     with alembic_web_test_client(config) as client:
-        response = client.get("/timeline?range=30d", headers=AUTH_HEADER)
+        response = client.get("/timeline?range=3d", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
@@ -579,13 +679,21 @@ def test_thumb_card_renders_clip_manual_and_clip_error_state_classes(
         engine.dispose()
 
     with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
-        body = client.get("/?range=24h", headers=AUTH_HEADER).text
+        body = client.get("/?range=24h&clips=all", headers=AUTH_HEADER).text
 
     # Reviewed + cat-tagged frames: both clip-cat and clip-manual modifier classes present.
-    assert "clip-cat" in body, "expected cat-tagged reviewed clip to carry clip-cat class"
+    assert _has_class(body, "clip-cat"), "expected cat-tagged reviewed clip to carry clip-cat class"
     assert "clip-manual" in body, "expected cat-tagged reviewed clip to carry clip-manual class"
     # Detector-error clip: clip-error modifier present on a thumb card.
     assert "clip-error" in body, "expected detector-error clip to carry clip-error class"
+
+
+def _has_class(body: str, name: str) -> bool:
+    """Return whether an element in ``body`` has the class ``name`` as a whole token.
+
+    A substring test is not enough, because ``clip-cat`` is also the start of ``clip-cat-lane``.
+    """
+    return re.search(rf'class="(?:[^"]* )?{re.escape(name)}(?: [^"]*)?"', body) is not None
 
 
 def _engine_for(internal_root: Path) -> Engine:
@@ -621,7 +729,7 @@ def test_clip_manual_badge_absent_for_unreviewed_clip_with_frame_membership(
         engine.dispose()
 
     with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
-        response = client.get("/?range=24h", headers=AUTH_HEADER)
+        response = client.get("/?range=24h&lanes=boxes&clips=all", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     assert "clip-manual" not in response.text, "unreviewed clip must not carry clip-manual badge"
@@ -686,7 +794,7 @@ def test_clip_manual_badge_absent_when_operator_agrees_with_detector(
     with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
         body = client.get("/?range=24h", headers=AUTH_HEADER).text
 
-    assert "clip-cat" in body
+    assert _has_class(body, "clip-cat")
     assert "clip-manual" not in body, "agreement with the detector must not carry clip-manual"
 
 
@@ -709,7 +817,7 @@ def test_effective_has_cat_unreviewed_clip_uses_detector_verdict(
 
     assert response.status_code == 200
     body = response.text
-    assert "clip-cat" in body, "unreviewed clip with has_cat=True must render as cat-positive"
+    assert _has_class(body, "clip-cat"), "unreviewed clip with has_cat=True must render as cat-positive"
     assert "clip-manual" not in body, "unreviewed clip must not carry clip-manual badge"
 
 
@@ -732,9 +840,450 @@ def test_effective_has_cat_reviewed_clip_without_memberships_uses_detector(
         session.add(Clip(**kwargs))
 
     with alembic_web_test_client(config) as client:
-        response = client.get("/?range=24h", headers=AUTH_HEADER)
+        response = client.get("/?range=24h&lanes=boxes&clips=all", headers=AUTH_HEADER)
 
     assert response.status_code == 200
     body = response.text
     assert "clip-no-cat" in body, "reviewed clip with no memberships and has_cat=False must render as no-cat"
     assert "clip-manual" not in body, "clip without cat-tagged frames must not carry clip-manual badge"
+
+
+_TRIPWIRES = ("{_fmt", "{self.", "{cam.", "{cfg.", "NoneType")
+
+
+def _named_clip(engine: Engine, cam_id: int, *, start_ts: datetime, name: str, subject_ids: tuple[int, ...] = ()) -> int:
+    """Insert a cat clip and tag one frame per subject in ``subject_ids``. A tag names the cat with no review."""
+    clip_id = add_clip(engine, cam_id, start_ts=start_ts, name=name)
+    for ordinal, subject_id in enumerate(subject_ids):
+        tag_frame(engine, add_clip_frame(engine, clip_id, ordinal), subject_id)
+    return clip_id
+
+
+def _archived(engine: Engine, subject_id: int) -> int:
+    """Archive the subject and return its id."""
+    with get_session(engine) as session:
+        subject = session.get(Subject, subject_id)
+        assert subject is not None
+        subject.archived_at = datetime.now(UTC) - timedelta(days=30)
+    return subject_id
+
+
+def _lane_blocks(body: str) -> dict[str, str]:
+    """Map each lane label to the markup of its lane. The dict keeps the lane order."""
+    pairs: list[tuple[str, str]] = re.findall(r'<g class="lane"[^>]*>\s*<text[^>]*>([^<]*)</text>(.*?)</g>', body, flags=re.DOTALL)
+    return dict(pairs)
+
+
+def _lane_markers(body: str) -> dict[str, list[int]]:
+    """Map each lane label to the clip ids of its markers. The dict keeps the lane order."""
+    lanes: dict[str, list[int]] = {}
+    for label, block in _lane_blocks(body).items():
+        clip_ids: list[str] = re.findall(r'data-clip-id="(\d+)"', block)
+        lanes[label] = [int(clip_id) for clip_id in clip_ids]
+    return lanes
+
+
+def _strip_clip_ids(body: str) -> list[int]:
+    """Return the clip ids of the strip cards, in page order."""
+    strip = re.search(r'<ul class="thumb-strip".*?</ul>', body, flags=re.DOTALL)
+    if strip is None:
+        return []
+    clip_ids: list[str] = re.findall(r'<a href="[^"]*/clips/(\d+)"', strip.group(0))
+    return [int(clip_id) for clip_id in clip_ids]
+
+
+def _nav_queries(body: str, label: str) -> list[dict[str, list[str]]]:
+    """Return the parsed query of each link in the ``<nav>`` with ``aria-label`` ``label``.
+
+    Each link must send its HTMX request to the same URL as its ``href``.
+    """
+    nav = re.search(rf'<nav[^>]*aria-label="{label}"[^>]*>(.*?)</nav>', body, flags=re.DOTALL)
+    assert nav is not None, label
+    links: list[tuple[str, str]] = re.findall(r'<a\s+href="([^"]+)"\s+hx-get="([^"]+)"', nav.group(1))
+    assert links, label
+    queries: list[dict[str, list[str]]] = []
+    for href, hx_get in links:
+        assert href == hx_get
+        url = urlsplit(html.unescape(href))
+        assert url.path == "/timeline"
+        queries.append(parse_qs(url.query))
+    return queries
+
+
+def _assert_no_tripwire(body: str) -> None:
+    for tripwire in _TRIPWIRES:
+        assert tripwire not in body, tripwire
+
+
+def test_cat_view_lane_order_and_archived_and_unknown_lanes(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The default view gives the active cats, an archived cat with a clip, then "Unknown cat".
+
+    An archived cat with no clip in the window gets no lane.
+    """
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        # Rufus goes in first, so the lane order comes from display_order and not from the row order.
+        _ = seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=3)
+        marcel = seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=2)
+        # The archived cat has the lowest display_order, so its lane after the active cats proves active-first order.
+        old = _archived(engine, seed_cat_subject(engine, slug="old", display_name="Old Cat", display_order=1))
+        _ = _archived(engine, seed_cat_subject(engine, slug="gone", display_name="Gone Cat", display_order=4))
+        expected = {
+            "Marcel": [_named_clip(engine, cam_id, start_ts=now - timedelta(hours=3), name="marcel.mp4", subject_ids=(marcel,))],
+            "Rufus": [],
+            "Old Cat": [_named_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="old.mp4", subject_ids=(old,))],
+            "Unknown cat": [_named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="unknown.mp4")],
+        }
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/", headers=AUTH_HEADER).text
+
+    assert _lane_markers(body) == expected
+    _assert_no_tripwire(body)
+
+
+def test_cat_view_has_no_unknown_lane_without_an_unknown_cat_clip(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The "Unknown cat" lane is absent when every cat clip in the window names a cat."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        marcel = seed_cat_subject(engine)
+        _ = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="marcel.mp4", subject_ids=(marcel,))
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/timeline", headers=AUTH_HEADER).text
+
+    assert list(_lane_markers(body)) == ["Marcel"]
+    assert "Unknown cat" not in body
+
+
+def test_clip_that_names_two_cats_has_a_marker_in_both_lanes(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A clip that names two cats shows in the lane of each cat, and once in the strip."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        marcel = seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=1)
+        rufus = seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=2)
+        both = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="both.mp4", subject_ids=(marcel, rufus))
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/timeline", headers=AUTH_HEADER).text
+
+    assert _lane_markers(body) == {"Marcel": [both], "Rufus": [both]}
+    assert _strip_clip_ids(body) == [both]
+
+
+def test_non_cat_clip_shows_in_the_box_view_only(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A clip that is not a cat clip has no marker in the cat view and has a marker in the box view."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root, display_name="Pantry Box")
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        marcel = seed_cat_subject(engine)
+        cat_clip = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="cat.mp4", subject_ids=(marcel,))
+        no_cat_clip = add_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="empty.mp4", has_cat=False)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        cat_body = client.get("/timeline", headers=AUTH_HEADER).text
+        box_body = client.get("/timeline?lanes=boxes", headers=AUTH_HEADER).text
+
+    assert _lane_markers(cat_body) == {"Marcel": [cat_clip]}
+    assert _lane_markers(box_body) == {"Pantry Box": [cat_clip, no_cat_clip]}
+
+
+def test_cat_lane_markers_carry_the_cat_color(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A marker carries its cat color. A cat with no color renders, and its markers carry no color."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        marcel = seed_cat_subject(engine, slug="marcel", display_name="Marcel", display_order=1, color="#c0ffee")
+        rufus = seed_cat_subject(engine, slug="rufus", display_name="Rufus", display_order=2)
+        _ = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="marcel.mp4", subject_ids=(marcel,))
+        _ = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="rufus.mp4", subject_ids=(rufus,))
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        response = client.get("/timeline", headers=AUTH_HEADER)
+
+    assert response.status_code == 200
+    lane_blocks = _lane_blocks(response.text)
+    assert re.search(r'<rect [^>]*style="--lane-color: #c0ffee;"', lane_blocks["Marcel"])
+    assert "<rect " in lane_blocks["Rufus"]
+    assert "--lane-color" not in lane_blocks["Rufus"]
+    _assert_no_tripwire(response.text)
+
+
+def test_strip_shows_cat_clips_by_default_and_every_clip_with_clips_all(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """The strip is newest first. ``clips=cat`` keeps the cat clips. ``clips=all`` keeps every clip."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        older_cat = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=3), name="older.mp4")
+        no_cat = add_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="empty.mp4", has_cat=False)
+        newer_cat = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="newer.mp4")
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        strips = {
+            query: _strip_clip_ids(client.get(f"/timeline{query}", headers=AUTH_HEADER).text)
+            for query in ("", "?lanes=boxes", "?clips=all")
+        }
+
+    assert strips == {
+        "": [newer_cat, older_cat],
+        "?lanes=boxes": [newer_cat, older_cat],
+        "?clips=all": [newer_cat, no_cat, older_cat],
+    }
+
+
+def test_strip_card_names_its_cats_or_unknown_cat(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A card names the cats of its clip. An unknown-cat clip card says "Unknown cat"."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        marcel = seed_cat_subject(engine)
+        _ = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="marcel.mp4", subject_ids=(marcel,))
+        _ = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="unknown.mp4")
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/timeline", headers=AUTH_HEADER).text
+
+    strip = re.search(r'<ul class="thumb-strip".*?</ul>', body, flags=re.DOTALL)
+    assert strip is not None
+    cards: list[str] = re.findall(r"<li .*?</li>", strip.group(0), flags=re.DOTALL)
+    assert len(cards) == 2
+    assert '<span class="identity-fallback">Unknown cat</span>' in cards[0]
+    assert re.search(r'class="identity-chip identity-chip-operator"[^>]*>Marcel</span>', cards[1])
+    _assert_no_tripwire(body)
+
+
+def test_strip_holds_48_cards_per_page(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """With 49 strip clips, page 1 holds 48 cards and page 2 holds the oldest clip."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    _seed_clip_rows(
+        db_session_factory,
+        internal_root,
+        camera_id=cam_id,
+        start_offsets=[timedelta(minutes=5 * i + 1) for i in range(49)],
+        reference_now=datetime.now(UTC),
+    )
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        first = client.get("/timeline?clips=all", headers=AUTH_HEADER).text
+        second = client.get("/timeline?clips=all&page=2", headers=AUTH_HEADER).text
+        past_end = client.get("/timeline?clips=all&page=9", headers=AUTH_HEADER).text
+
+    assert len(_strip_clip_ids(first)) == 48
+    assert len(_strip_clip_ids(second)) == 1
+    assert _strip_clip_ids(second)[0] not in _strip_clip_ids(first)
+    assert _strip_clip_ids(past_end) == _strip_clip_ids(second)
+    assert "Page 2 of 2" in second
+
+
+def test_every_timeline_link_carries_the_view_state(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """Range, view, filter, and page links keep the other parameters. Only a page link has ``page``.
+
+    A value at its default is left out of the URL. ``range`` is always in the URL.
+    """
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    _seed_clip_rows(
+        db_session_factory,
+        internal_root,
+        camera_id=cam_id,
+        start_offsets=[timedelta(minutes=5 * i + 1) for i in range(49)],
+        reference_now=datetime.now(UTC),
+    )
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        first = client.get("/timeline?range=6h&lanes=boxes&clips=all", headers=AUTH_HEADER).text
+        second = client.get("/timeline?range=6h&lanes=boxes&clips=all&page=2", headers=AUTH_HEADER).text
+
+    state = {"range": ["6h"], "lanes": ["boxes"], "clips": ["all"]}
+    assert _nav_queries(second, "Timeline range") == [{**state, "range": [key]} for key in ("6h", "24h", "3d")]
+    assert _nav_queries(second, "Lanes") == [{"range": ["6h"], "clips": ["all"]}, state]
+    assert _nav_queries(second, "Strip clips") == [{"range": ["6h"], "lanes": ["boxes"]}, state]
+    assert _nav_queries(first, "Strip pages") == [{**state, "page": ["2"]}]
+    assert _nav_queries(second, "Strip pages") == [state]
+    _assert_no_tripwire(first)
+    _assert_no_tripwire(second)
+
+
+def test_unknown_lanes_and_clips_values_snap_to_the_defaults(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """An unknown ``lanes`` or ``clips`` value gives the cat view and the cat-clip strip."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        cat_clip = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="cat.mp4")
+        _ = add_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="empty.mp4", has_cat=False)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/timeline?lanes=bogus&clips=bogus&page=bogus", headers=AUTH_HEADER).text
+
+    assert _lane_markers(body) == {"Unknown cat": [cat_clip]}
+    assert _strip_clip_ids(body) == [cat_clip]
+    assert "bogus" not in body
+
+
+def test_cat_view_empty_state_links_to_the_box_view(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """If the window has clips but no cat clip, the cat view says so and links to the box view."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        _ = seed_cat_subject(engine)
+        _ = add_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="empty.mp4", has_cat=False)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/timeline?range=6h&clips=all", headers=AUTH_HEADER).text
+
+    assert "No cat visited in this range" in body
+    assert 'class="timeline-svg"' not in body
+    link = re.search(r'class="empty-cta-box-view"\s+href="([^"]+)"', body)
+    assert link is not None
+    assert parse_qs(urlsplit(html.unescape(link.group(1))).query) == {"range": ["6h"], "lanes": ["boxes"], "clips": ["all"]}
+    _assert_no_tripwire(body)
+
+
+def test_box_view_with_no_cat_clip_says_so_and_links_to_all_clips(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """If the strip shows cat clips and the window holds none, the strip says so and links to ``clips=all``."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        _ = add_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="empty.mp4", has_cat=False)
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        body = client.get("/timeline?range=6h&lanes=boxes", headers=AUTH_HEADER).text
+        all_body = client.get("/timeline?range=6h&lanes=boxes&clips=all", headers=AUTH_HEADER).text
+
+    assert "No cat clips in this range." in body
+    assert "No cat visited in this range" not in body
+    link = re.search(r'class="empty-cta-all-clips"\s+href="([^"]+)"', body)
+    assert link is not None
+    assert parse_qs(urlsplit(html.unescape(link.group(1))).query) == {"range": ["6h"], "lanes": ["boxes"], "clips": ["all"]}
+    assert "No cat clips in this range." not in all_body
+    _assert_no_tripwire(body)
+
+
+def test_clip_with_a_future_start_shows_in_no_view(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """A cat clip with a start after now (a fast camera clock) is in no lane and no strip, in every view."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root, display_name="Pantry Box")
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        marcel = seed_cat_subject(engine)
+        past = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="past.mp4", subject_ids=(marcel,))
+        _ = _named_clip(engine, cam_id, start_ts=now + timedelta(hours=1), name="future.mp4", subject_ids=(marcel,))
+    finally:
+        engine.dispose()
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        bodies = {query: client.get(f"/timeline{query}", headers=AUTH_HEADER).text for query in ("", "?clips=all", "?lanes=boxes")}
+
+    assert _lane_markers(bodies[""]) == {"Marcel": [past]}
+    assert _lane_markers(bodies["?lanes=boxes"]) == {"Pantry Box": [past]}
+    assert {query: _strip_clip_ids(body) for query, body in bodies.items()} == {"": [past], "?clips=all": [past], "?lanes=boxes": [past]}

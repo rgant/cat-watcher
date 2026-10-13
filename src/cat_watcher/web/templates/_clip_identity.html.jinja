@@ -1,0 +1,8 @@
+{#- Renders the cats a clip names, or its fallback label. Context: `chips` (list of dicts with
+`css_class`, `color`, `label`, `title`) and `fallback_label` (str or None). -#}
+{% for chip in chips %}
+  <span class="{{ chip.css_class }}"
+        {% if chip.color %}style="--chip-color: {{ chip.color }};"{% endif %}
+        title="{{ chip.title }}">{{ chip.label }}</span>
+{% endfor %}
+{% if fallback_label %}<span class="identity-fallback">{{ fallback_label }}</span>{% endif %}

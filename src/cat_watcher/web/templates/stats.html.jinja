@@ -3,10 +3,43 @@
   Stats · Cat Watcher
 {% endblock title %}
 {% block content %}
-  <h1>Activity (last 30 days)</h1>
+  <h1>Activity</h1>
+  {% if cat_rows %}
+    <table id="cat-stats" class="clip-list stats-list">
+      <caption>Cat visits per day, last 7 days</caption>
+      <thead>
+        <tr>
+          <th scope="col">Cat</th>
+          <th scope="col">Last visit</th>
+          {% for label in day_headers %}<th scope="col">{{ label }}</th>{% endfor %}
+          <th scope="col">Total</th>
+          <th scope="col">Mean per day</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in cat_rows %}
+          <tr>
+            <th scope="row">
+              {% with chips=[row.chip], fallback_label=None %}
+                {% include "_clip_identity.html.jinja" %}
+              {% endwith %}
+            </th>
+            <td data-label="Last visit">{{ row.last_visit }}</td>
+            {% for cell in row.day_counts %}
+              <td data-label="{{ cell.label }}" data-day="{{ cell.day }}">{{ cell.count }}</td>
+            {% endfor %}
+            <td data-label="Total">{{ row.total }}</td>
+            <td data-label="Mean per day">{{ "%.1f"|format(row.mean) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No cats to show.</p>
+  {% endif %}
   {% if rows %}
-    <table class="stats-list">
-      <caption class="sr-only">Daily clip counts and cat-positive counts per camera.</caption>
+    <table id="camera-stats" class="stats-list">
+      <caption>Clips per camera per day, last 30 days</caption>
       <thead>
         <tr>
           <th scope="col">Date</th>

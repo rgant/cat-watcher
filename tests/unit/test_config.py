@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from cat_watcher.config import ConfigError, ConfiguredSubject, load_config
+from cat_watcher.config import (
+    DEFAULT_UNSURE_THRESHOLD,
+    ClassifierConfig,
+    Config,
+    ConfigError,
+    ConfiguredSubject,
+    active_unsure_threshold,
+    load_config,
+)
 
 _VALID_TOML = textwrap.dedent("""\
     internal_root = "./data"
@@ -331,6 +339,8 @@ def test_example_config_loads_against_model(tmp_path: Path, monkeypatch: pytest.
     assert cfg.alerts.cadence_seconds == 900
     assert cfg.backup.keep_count == 7
     assert cfg.web.display_timezone == "America/New_York"
+    assert cfg.classifier is not None
+    assert cfg.classifier.unsure_threshold == DEFAULT_UNSURE_THRESHOLD
 
 
 def test_missing_config_file_raises_config_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -422,6 +432,7 @@ def test_env_file_provides_secrets_when_no_environment_overrides(tmp_path: Path,
         "retention",
         "backup",
         "poller",
+        "classifier",
     ],
 )
 def test_unknown_nested_field_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str) -> None:
@@ -738,3 +749,79 @@ def test_subjects_absent_means_empty_list(tmp_path: Path, monkeypatch: pytest.Mo
     cfg = load_config()
 
     assert cfg.subjects == []
+
+
+def _load_with_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: str) -> object:
+    """Load ``_VALID_TOML`` plus the given ``[classifier]`` table body."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_VALID_TOML + f"\n[classifier]\n{table}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+    return load_config().classifier
+
+
+def test_classifier_absent_means_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a ``[classifier]`` table, ``Config.classifier`` is ``None`` and the poller does not classify."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_VALID_TOML)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+    assert load_config().classifier is None
+
+
+def test_classifier_unsure_threshold_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``[classifier]`` table without ``unsure_threshold`` gets 0.70."""
+    classifier = _load_with_classifier(tmp_path, monkeypatch, 'model = "cat-classifier-a.pt"')
+
+    assert classifier == ClassifierConfig(model="cat-classifier-a.pt", unsure_threshold=0.70)
+    assert DEFAULT_UNSURE_THRESHOLD == 0.70
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        pytest.param('model = "' + "m" * 129 + '"', id="model-too-long"),
+        pytest.param('model = "a.pt"\nunsure_threshold = 0.0', id="threshold-zero"),
+        pytest.param('model = "a.pt"\nunsure_threshold = 1.5', id="threshold-above-one"),
+        pytest.param('model = "a.pt"\nbogus_field = 1', id="unknown-key"),
+        pytest.param("unsure_threshold = 0.5", id="model-missing"),
+    ],
+)
+def test_classifier_invalid_table_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: str) -> None:
+    """An invalid ``[classifier]`` table fails as ``ConfigError``."""
+    with pytest.raises(ConfigError, match=r"classifier"):
+        _ = _load_with_classifier(tmp_path, monkeypatch, table)
+
+
+def test_classifier_accepts_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 128-character ``model`` and an ``unsure_threshold`` of 1.0 are both valid."""
+    model = "m" * 128
+    classifier = _load_with_classifier(tmp_path, monkeypatch, f'model = "{model}"\nunsure_threshold = 1.0')
+
+    assert classifier == ClassifierConfig(model=model, unsure_threshold=1.0)
+
+
+def _load_config_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> Config:
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(text)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+    return load_config()
+
+
+def test_active_unsure_threshold_reads_the_classifier_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The active threshold is the ``[classifier]`` value."""
+    cfg = _load_config_text(tmp_path, monkeypatch, _VALID_TOML + '\n[classifier]\nmodel = "a.pt"\nunsure_threshold = 0.55\n')
+
+    assert active_unsure_threshold(cfg) == 0.55
+
+
+def test_active_unsure_threshold_defaults_without_a_classifier_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no ``[classifier]`` table the active threshold is the default."""
+    cfg = _load_config_text(tmp_path, monkeypatch, _VALID_TOML)
+
+    assert active_unsure_threshold(cfg) == DEFAULT_UNSURE_THRESHOLD

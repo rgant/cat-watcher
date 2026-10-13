@@ -57,6 +57,7 @@ from cat_watcher.db import (
 )
 from cat_watcher.detector import Detector, DetectorError
 from cat_watcher.logging_setup import setup_agent_logging
+from cat_watcher.predictions import classify_frames, load_live_classifier
 from cat_watcher.storage import ensure_storage_layout, wait_for_storage
 from cat_watcher.subjects_sync import sync_subjects_at_startup
 from cat_watcher.timefmt import local_stamp
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from cat_watcher.amcrest_client import Recording
     from cat_watcher.config import CameraConfig
     from cat_watcher.detector import ScoredFrame
+    from cat_watcher.predictions import LiveClassifier
 
 
 logger = logging.getLogger(__name__)
@@ -195,6 +197,26 @@ def update_camera_state_failure(  # noqa: PLR0913  # state-update sibling of upd
         cam.poll_status_since = now
     cam.poll_status = status
     cam.poll_error = error
+
+
+def _save_clock_state(session: Session, db_camera: Camera) -> None:
+    """Copy the clock fields from ``db_camera`` to its row.
+
+    ``ensure_db_camera`` returns a detached row, so the fields that ``_sync_camera_clock`` sets
+    are not saved until this copy.
+    """
+    cam = session.get(Camera, db_camera.id)
+    if cam is None:
+        msg = f"camera {db_camera.id!r} not found"
+        raise ValueError(msg)
+    cam.clock_drift_seconds = db_camera.clock_drift_seconds
+    cam.clock_checked_at = db_camera.clock_checked_at
+    cam.clock_correction_streak = db_camera.clock_correction_streak
+    cam.clock_ntp_enabled = db_camera.clock_ntp_enabled
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def upsert_heartbeat(session: Session, *, agent_name: str, now: datetime) -> None:
@@ -324,7 +346,7 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
 
 
 @dataclass(frozen=True)
-class IngestContext:
+class IngestContext:  # pylint: disable=too-many-instance-attributes  # flat per-camera state bag; the rule targets behavior-rich classes, not data containers
     """Per-camera state shared by the poller and ``import_local`` per-clip pipelines."""
 
     engine: Engine
@@ -334,6 +356,7 @@ class IngestContext:
     camera_tz: ZoneInfo
     detector: Detector | None
     now: datetime
+    classifier: LiveClassifier | None = None
 
 
 def write_per_frame_thumbs(
@@ -420,7 +443,8 @@ def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible 
 
     All file IO (clip download, frame encodes, fsync) completes before any DB insert, preserving
     file-before-row ordering per spec §4.4. ``Clip`` and its ``ClipFrame`` rows commit in the same
-    transaction so a crash leaves either both or neither.
+    transaction so a crash leaves either both or neither. With a classifier, the prediction columns of
+    each frame are set before that transaction opens.
     """
     if _clip_already_ingested(ctx, source_filename):
         logger.info("skip duplicate: camera=%s source=%s", ctx.camera_name, source_filename)
@@ -441,6 +465,14 @@ def materialize_and_persist_clip(  # noqa: PLR0913  # 6 args is the irreducible 
         materialize_thumb=materialize_thumb,
         ctx=ctx,
     )
+    # A prediction is optional. ``classify_frames`` never raises, so a model fault cannot stop the clip insert.
+    if ctx.classifier is not None and clip_frames:
+        _ = classify_frames(
+            scored_frames,
+            clip_frames,
+            ctx.classifier,
+            clip_label=f"{ctx.camera_name}/{source_filename}",
+        )
 
     clip = Clip(
         camera_id=ctx.cam_id,
@@ -636,6 +668,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
     args: PollerArgs,
     detector: Detector | None,
     now: datetime,
+    classifier: LiveClassifier | None = None,
 ) -> _CameraTickResult:
     """Run one camera's tick. Returns an outcome the caller applies to camera state.
 
@@ -671,6 +704,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
         camera_tz=camera_tz,
         detector=detector,
         now=now,
+        classifier=classifier,
     )
 
     client = AmcrestClient(cam_cfg, config.camera_secrets, camera_tz=camera_tz)
@@ -876,13 +910,26 @@ def ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
         return cam
 
 
-def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Detector | None, now: datetime) -> None:
+def run_tick(  # noqa: PLR0913  # pylint: disable=too-many-locals  # tick orchestration; each kw-only arg is an independent input, same rationale as _poll_camera
+    *,
+    config: Config,
+    args: PollerArgs,
+    engine: Engine,
+    detector: Detector | None,
+    clock: Callable[[], datetime],
+    classifier: LiveClassifier | None = None,
+) -> None:
     """Execute one full poller tick. Caller is responsible for the PID lock + storage wait.
+
+    ``clock`` returns the current UTC time. Each camera reads it when its own poll starts. The
+    downloads for one camera can take minutes. A later camera that compares its clock to the tick
+    start then sees a correct clock as fast.
 
     ``args.list_only`` is a strict dry-run: no ``Clip`` rows, no camera-state updates, no
     ``AgentStart`` row, no retention sweep, no heartbeat. ``ensure_db_camera`` still runs because
     its create-if-missing is benign init (the row is read for ``last_polled_at`` regardless).
     """
+    now = clock()
     if not args.list_only:
         with get_session(engine) as session:
             session.add(AgentStart(agent_name=_AGENT_NAME, started_at=now))
@@ -893,6 +940,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
         raise PollerError(msg)
 
     for cam_cfg in cameras_to_poll:
+        poll_started_at = clock()
         db_camera = ensure_db_camera(engine, cam_cfg)
         cursor_before = db_camera.last_polled_at
         try:
@@ -903,7 +951,8 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                 engine=engine,
                 args=args,
                 detector=detector,
-                now=now,
+                now=poll_started_at,
+                classifier=classifier,
             )
         except Exception as exc:
             logger.exception("unexpected failure polling camera %s", cam_cfg.name)
@@ -915,7 +964,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                         camera_id=db_camera.id,
                         status=PollStatus.ERROR,
                         error="unexpected exception",
-                        now=now,
+                        now=poll_started_at,
                         advance_cursor=False,
                     )
                 _emit_tick_log_unexpected(cam_cfg=cam_cfg, cursor=cursor_before, exc=exc)
@@ -928,7 +977,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                         session,
                         camera_id=db_camera.id,
                         ingested_clips=outcome.ingested,
-                        now=now,
+                        now=poll_started_at,
                         overlap_minutes=config.poller.overlap_minutes,
                         advance_cursor=not args.truncates_default_window,
                     )
@@ -938,9 +987,10 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                         camera_id=db_camera.id,
                         status=outcome.status_on_failure,
                         error=outcome.error_msg,
-                        now=now,
+                        now=poll_started_at,
                         advance_cursor=False,
                     )
+                _save_clock_state(session, db_camera)
                 cursor_after = (session.get(Camera, db_camera.id) or db_camera).last_polled_at
             if outcome.success and outcome.query.safety_net_triggered and outcome.query.find_file_row_count == 0:
                 _dispatch_poller_empty_after_quiet(
@@ -948,7 +998,7 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
                     engine=engine,
                     db_camera=db_camera,
                     outcome=outcome,
-                    now=now,
+                    now=poll_started_at,
                 )
             _emit_tick_log(cam_cfg=cam_cfg, outcome=outcome, cursor_before=cursor_before, cursor_after=cursor_after)
 
@@ -958,6 +1008,8 @@ def run_tick(*, config: Config, args: PollerArgs, engine: Engine, detector: Dete
         with get_session(engine) as session:
             upsert_heartbeat(session, agent_name=_AGENT_NAME, now=now)
         _check_alerts_stuck(config=config, engine=engine, now=now)
+
+    _emit_classifier_tick_log(classifier)
 
 
 def _check_alerts_stuck(*, config: Config, engine: Engine, now: datetime) -> None:
@@ -1046,6 +1098,24 @@ def _emit_tick_log(
     extras["error_type"] = outcome.error_type
     extras["error_msg"] = outcome.error_msg
     logger.warning("poll_tick_failed", extra=extras)
+
+
+def _emit_classifier_tick_log(classifier: LiveClassifier | None) -> None:
+    """``classifier_tick`` (INFO): frame outcomes, classify time, and load time for the whole tick. No-op without a classifier."""
+    if classifier is None:
+        return
+    totals = classifier.totals
+    logger.info(
+        "classifier_tick",
+        extra={
+            "classifier_version": classifier.version,
+            "classified": totals.classified,
+            "no_box": totals.no_box,
+            "errored": totals.errored,
+            "elapsed_seconds": totals.elapsed_seconds,
+            "load_seconds": classifier.load_seconds,
+        },
+    )
 
 
 def _emit_tick_log_unexpected(*, cam_cfg: CameraConfig, cursor: datetime | None, exc: BaseException) -> None:
@@ -1144,7 +1214,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         confidence_threshold=config.detector.confidence_threshold,
                     )
                 )
-                run_tick(config=config, args=args, engine=engine, detector=detector, now=datetime.now(UTC))
+                classifier = None if args.no_detect or args.list_only else load_live_classifier(config, engine)
+                run_tick(config=config, args=args, engine=engine, detector=detector, clock=_utc_now, classifier=classifier)
             finally:
                 engine.dispose()
     except PollerLockedError:

@@ -45,7 +45,7 @@ def _parse(**params: str) -> ParsedClipsFilter:
 def test_empty_mapping_yields_defaults_and_no_keys_present() -> None:
     """No querystring at all means the default review queue and legacy detail navigation."""
     parsed = parse_clips_filter({}, camera_names=_CAMERAS)
-    assert parsed.clips_filter == ClipsFilter(reviewed="no", camera=None, has_cat=None, day=None)
+    assert parsed.clips_filter == ClipsFilter(reviewed="no", camera=None, has_cat=None, day=None, sort="newest", page=None)
     assert not parsed.ignored
     assert parsed.any_key_present is False
 
@@ -124,6 +124,39 @@ def test_unrecognized_reviewed_snaps_to_the_default_queue_and_is_reported() -> N
     assert parsed.ignored == (IgnoredFilter(param="reviewed", value="bogus"),)
 
 
+@pytest.mark.parametrize("value", ["newest", "oldest"])
+def test_sort_round_trips_each_accepted_value(value: str) -> None:
+    """Every option the Sort select offers survives parsing."""
+    assert _parse(sort=value).clips_filter.sort == value
+
+
+def test_unrecognized_sort_snaps_to_newest_and_is_reported() -> None:
+    """A bad sort behaves like every other control: default plus a notice entry."""
+    parsed = _parse(sort="sideways")
+    assert parsed.clips_filter.sort == "newest"
+    assert parsed.ignored == (IgnoredFilter(param="sort", value="sideways"),)
+
+
+def test_page_parses_to_an_integer() -> None:
+    """A page above 1 is kept as given. The route clamps it to the last page."""
+    assert _parse(page="7").clips_filter.page == 7
+
+
+def test_page_one_is_the_same_state_as_no_page() -> None:
+    """Page 1 and no page show the same rows, so they parse to one form."""
+    parsed = _parse(page="1")
+    assert parsed.clips_filter.page is None
+    assert not parsed.ignored
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-3", "1.5"])
+def test_unusable_page_snaps_to_the_first_page_and_is_reported(raw: str) -> None:
+    """A bad page behaves like every other control: default plus a notice entry."""
+    parsed = _parse(page=raw)
+    assert parsed.clips_filter.page is None
+    assert parsed.ignored == (IgnoredFilter(param="page", value=raw),)
+
+
 def test_ignored_entries_follow_recognized_keys_order_not_insertion_order() -> None:
     """Keys are inserted has_cat-then-camera; the notice must still read camera first."""
     parsed = parse_clips_filter({"has_cat": "maybe", "camera": "nope"}, camera_names=_CAMERAS)
@@ -133,10 +166,10 @@ def test_ignored_entries_follow_recognized_keys_order_not_insertion_order() -> N
     )
 
 
-def test_every_key_invalid_at_once_reports_all_four_in_order() -> None:
+def test_every_key_invalid_at_once_reports_each_key_in_order() -> None:
     """The reported production URL carried several keys; one-at-a-time coverage would miss this."""
     parsed = parse_clips_filter(
-        {"camera": "nope", "has_cat": "maybe", "date_str": "abc", "reviewed": "bogus"},
+        {"page": "0", "sort": "sideways", "camera": "nope", "has_cat": "maybe", "date_str": "abc", "reviewed": "bogus"},
         camera_names=_CAMERAS,
     )
     assert [item.param for item in parsed.ignored] == list(RECOGNIZED_KEYS)
@@ -185,6 +218,12 @@ def test_populated_filter_serializes_every_key() -> None:
     assert build_filter_qs(f) == "reviewed=any&camera=pantry&has_cat=true&date_str=2026-07-02"
 
 
+def test_sort_and_page_serialize_only_away_from_their_defaults() -> None:
+    """``newest`` and the first page are the defaults, so the querystring leaves them out."""
+    assert build_filter_qs(ClipsFilter(sort="newest", page=None)) == "reviewed=no"
+    assert build_filter_qs(ClipsFilter(sort="oldest", page=2)) == "reviewed=no&sort=oldest&page=2"
+
+
 @pytest.mark.parametrize(
     "f",
     [
@@ -192,6 +231,7 @@ def test_populated_filter_serializes_every_key() -> None:
         ClipsFilter(reviewed="yes"),
         ClipsFilter(reviewed="any", camera="pantry", has_cat=False, day=date(2026, 7, 2)),
         ClipsFilter(reviewed="no", has_cat=True),
+        ClipsFilter(reviewed="yes", sort="oldest", page=3),
     ],
 )
 def test_querystring_round_trips_through_the_parser(f: ClipsFilter) -> None:

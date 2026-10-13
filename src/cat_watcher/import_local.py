@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from cat_watcher.config import Config
     from cat_watcher.db import Clip
     from cat_watcher.detector import Detector
+    from cat_watcher.predictions import LiveClassifier
 
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,7 @@ def import_local(  # noqa: PLR0913  # config + identity + IO knobs all need to b
     detector: Detector | None,
     limit: int | None,
     now: datetime,
+    classifier: LiveClassifier | None = None,
 ) -> ImportReport:
     """Walk ``source_dir`` and ingest matching clips for ``camera_name``.
 
@@ -244,6 +246,7 @@ def import_local(  # noqa: PLR0913  # config + identity + IO knobs all need to b
         raise ValueError(msg)
     camera_tz = ZoneInfo(cam_cfg.timezone or config.web.display_timezone)
     db_camera = ensure_db_camera(engine, cam_cfg)
+    # pylint: disable=duplicate-code  # both ingest paths build the same per-camera context
     ctx = IngestContext(
         engine=engine,
         storage_root=config.storage_root,
@@ -252,7 +255,9 @@ def import_local(  # noqa: PLR0913  # config + identity + IO knobs all need to b
         camera_tz=camera_tz,
         detector=detector,
         now=now,
+        classifier=classifier,
     )
+    # pylint: enable=duplicate-code
 
     matched, skipped = _scan_source(source_dir, camera_tz=camera_tz)
     if limit is not None:

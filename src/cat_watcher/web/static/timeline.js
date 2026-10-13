@@ -11,14 +11,10 @@
 
   function describe(target) {
     if (target.classList.contains('clip')) {
+      const camera = target.getAttribute('data-camera') || '';
       const start = target.getAttribute('data-start') || '';
       const score = target.getAttribute('data-score') || '';
-      return start + ' · score ' + score;
-    }
-    if (target.classList.contains('bucket')) {
-      const count = target.getAttribute('data-count') || '0';
-      const cat = target.getAttribute('data-cat-count') || '0';
-      return count + ' clips · ' + cat + ' cat-positive';
+      return camera + ' · ' + start + ' · score ' + score;
     }
     return null;
   }
@@ -41,7 +37,7 @@
   // Gated on hover-capable pointers so touch devices don't get stuck-tooltip behavior.
   if (window.matchMedia('(hover: hover)').matches) {
     document.body.addEventListener('mouseover', function (ev) {
-      const target = ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket');
+      const target = ev.target.closest('.timeline-svg .clip');
       if (target !== null) {
         showTooltip(target, ev.clientX, ev.clientY);
       }
@@ -51,7 +47,7 @@
       if (tooltip.style.display !== 'block') {
         return;
       }
-      const target = ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket');
+      const target = ev.target.closest('.timeline-svg .clip');
       if (target !== null) {
         tooltip.style.left = (ev.clientX + 12) + 'px';
         tooltip.style.top = (ev.clientY + 12) + 'px';
@@ -59,14 +55,14 @@
     });
 
     document.body.addEventListener('mouseout', function (ev) {
-      if (ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket') !== null) {
+      if (ev.target.closest('.timeline-svg .clip') !== null) {
         hideTooltip();
       }
     });
   }
 
   document.body.addEventListener('focusin', function (ev) {
-    const target = ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket');
+    const target = ev.target.closest('.timeline-svg .clip');
     if (target !== null) {
       const rect = target.getBoundingClientRect();
       showTooltip(target, rect.left + rect.width / 2, rect.bottom);
@@ -74,7 +70,7 @@
   });
 
   document.body.addEventListener('focusout', function (ev) {
-    if (ev.target.closest('.timeline-svg .clip, .timeline-svg .bucket') !== null) {
+    if (ev.target.closest('.timeline-svg .clip') !== null) {
       hideTooltip();
     }
   });

@@ -7,17 +7,20 @@ is offline, ``410`` when mounted but the file is gone.
 """
 
 import logging
+import math
 import operator
-from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
+from sqlalchemy.orm import selectinload
 
+from cat_watcher.config import active_unsure_threshold
 from cat_watcher.db import (
     AlertSent,
     Camera,
@@ -29,10 +32,15 @@ from cat_watcher.db import (
     Subject,
     get_session,
 )
+from cat_watcher.identity import query_cat_subjects
 from cat_watcher.labels import is_manual_override
 from cat_watcher.timefmt import local_date, local_stamp
+from cat_watcher.visits import query_cat_clips
 from cat_watcher.web._app_state import get_state
-from cat_watcher.web.clips_routes import clips_router
+from cat_watcher.web.clips_routes import clips_router, identity_chip
+from cat_watcher.web.pagination import PageInfo, page_info, parse_page
+from cat_watcher.web.stats_routes import HISTORY_DAYS
+from cat_watcher.web.time_axis import time_axis_marks
 
 __all__ = [
     "alerts_router",
@@ -42,13 +50,12 @@ __all__ = [
     "media_router",
     "membership_router",
     "review_router",
-    "stats_router",
     "timeline_router",
 ]
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
-    from datetime import date, tzinfo
+    from collections.abc import Callable, Mapping, Sequence
+    from datetime import tzinfo
     from pathlib import Path
     from typing import TypedDict
 
@@ -56,11 +63,18 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from cat_watcher.config import Config
+    from cat_watcher.identity import ClipIdentity
 
     class _CameraRow(TypedDict):
         id: int
-        name: str
         display_name: str
+
+    class _Lane(TypedDict):
+        """One SVG lane. ``key`` is unique in the view. ``label`` is the text at the left of the lane."""
+
+        key: str
+        label: str
+        markers: list[dict[str, object]]
 
     class _ClipLabelInfo(TypedDict):
         effective_has_cat: bool
@@ -76,9 +90,6 @@ _VIDEO_MEDIA_TYPE = "video/mp4"
 # Spec §4.7: ``/cameras`` shows the most recent N alerts per camera; 5 is the same N the design spec
 # calls out, kept here as a constant so the template doesn't have to know it.
 _CAMERA_RECENT_ALERTS_LIMIT = 5
-# Spec §4.7: ``/stats`` and ``/alerts`` cap their windows at 30 days so a long-running deployment
-# doesn't grow into a multi-thousand-row scroll.
-_HISTORY_DAYS = 30
 _NO_CAMERA_PLACEHOLDER = "—"
 
 
@@ -88,21 +99,30 @@ membership_router = APIRouter()
 media_router = APIRouter()
 timeline_router = APIRouter()
 cameras_router = APIRouter()
-stats_router = APIRouter()
 alerts_router = APIRouter()
 
 
 _TIMELINE_RANGES: dict[str, timedelta] = {
     "6h": timedelta(hours=6),
     "24h": timedelta(hours=24),
-    "7d": timedelta(days=7),
-    "30d": timedelta(days=30),
+    "3d": timedelta(days=3),
 }
 _TIMELINE_DEFAULT_RANGE = "24h"
-# Spec §4.7.1: bucketing kicks in for windows wider than 24h to keep marker count below the
-# pixel-per-clip resolution. Hardcoded — operators don't choose, the rendering does.
-_TIMELINE_BUCKET_THRESHOLD = timedelta(hours=24)
-_BUCKET_SECONDS = 3600  # one bin per hour
+#: The ``lanes`` values and the text of their toggle links.
+_LANE_VIEW_LABELS: dict[str, str] = {"cats": "Cats", "boxes": "Boxes"}
+_DEFAULT_LANE_VIEW = "cats"
+#: The ``clips`` values and the text of their toggle links.
+_STRIP_FILTER_LABELS: dict[str, str] = {"cat": "Cat clips", "all": "All clips"}
+_DEFAULT_STRIP_FILTER = "cat"
+_STRIP_PAGE_SIZE = 48
+# A cat lane key holds a subject id, so no cat lane key can be this key.
+_UNKNOWN_CAT_LANE_KEY = "unknown-cat"
+_UNKNOWN_CAT_LABEL = "Unknown cat"
+# SVG viewBox units. ``.lane-label`` in ``style.css`` is a 10-unit monospace font with .06em letter
+# spacing, so one uppercase character takes about 6.6 units. A change to that rule must change this.
+_LANE_LABEL_CHAR_ADVANCE = 6.6
+_LANE_LABEL_PADDING = 8
+_LANE_LABEL_MIN_WIDTH = 80
 
 
 @health_router.get("/health")
@@ -316,163 +336,332 @@ def _storage_root_available(storage_root: Path) -> bool:
 
 
 @timeline_router.get("/")
-async def root(request: Request, range: str = _TIMELINE_DEFAULT_RANGE) -> object:  # noqa: A002  # ``range`` is the public query-param name
+async def root(
+    request: Request,
+    range: str = _TIMELINE_DEFAULT_RANGE,  # noqa: A002  # ``range`` is the public query-param name
+    lanes: str = _DEFAULT_LANE_VIEW,
+    clips: str = _DEFAULT_STRIP_FILTER,
+    page: str | None = None,
+) -> object:
     """Render the activity timeline at the default 24h window (or whatever ``?range=`` overrides to).
 
     Distinct route name from :func:`timeline` so the nav's ``url_for('root')`` has a stable target.
     """
-    return _render_timeline(request, range_key=range)
+    return _render_timeline(request, view=_timeline_view(range_key=range, lanes=lanes, clips=clips), page=page)
 
 
 @timeline_router.get("/timeline")
-async def timeline(request: Request, range: str = _TIMELINE_DEFAULT_RANGE) -> object:  # noqa: A002
-    """Render the activity timeline scoped to ``?range=`` (one of 6h / 24h / 7d / 30d).
+async def timeline(
+    request: Request,
+    range: str = _TIMELINE_DEFAULT_RANGE,  # noqa: A002
+    lanes: str = _DEFAULT_LANE_VIEW,
+    clips: str = _DEFAULT_STRIP_FILTER,
+    page: str | None = None,
+) -> object:
+    """Render the activity timeline scoped to ``?range=`` (one of 6h / 24h / 3d).
 
     Lives at a separate path so HTMX can ``hx-get`` the partial without rewriting the page URL.
     """
-    return _render_timeline(request, range_key=range)
+    return _render_timeline(request, view=_timeline_view(range_key=range, lanes=lanes, clips=clips), page=page)
 
 
-def _render_timeline(request: Request, *, range_key: str) -> object:
+@dataclass(frozen=True, slots=True)
+class _TimelineView:
+    """The view state that every timeline link carries. Each field holds a known value."""
+
+    range_key: str
+    lanes: str
+    clips: str
+
+
+def _timeline_view(*, range_key: str, lanes: str, clips: str) -> _TimelineView:
+    """Give the view state of a request. An unknown value snaps to its default, so an old bookmark still works."""
+    return _TimelineView(
+        range_key=range_key if range_key in _TIMELINE_RANGES else _TIMELINE_DEFAULT_RANGE,
+        lanes=lanes if lanes in _LANE_VIEW_LABELS else _DEFAULT_LANE_VIEW,
+        clips=clips if clips in _STRIP_FILTER_LABELS else _DEFAULT_STRIP_FILTER,
+    )
+
+
+def _timeline_url(view: _TimelineView, *, page: int = 1) -> str:
+    """Build the URL of a timeline link.
+
+    ``range`` is always in the URL. A ``lanes``, ``clips``, or ``page`` value at its default stays
+    out of the URL. A range, view, or filter link has no ``page``, so it opens page 1.
+    """
+    params = {"range": view.range_key}
+    if view.lanes != _DEFAULT_LANE_VIEW:
+        params["lanes"] = view.lanes
+    if view.clips != _DEFAULT_STRIP_FILTER:
+        params["clips"] = view.clips
+    if page > 1:
+        params["page"] = str(page)
+    return f"/timeline?{urlencode(params)}"
+
+
+def _view_links(view: _TimelineView) -> dict[str, list[dict[str, object]]]:
+    """Build the range presets, the view toggle, and the strip filter toggle."""
+    return {
+        "range_links": [
+            {"href": _timeline_url(replace(view, range_key=key)), "label": key, "current": key == view.range_key}
+            for key in _TIMELINE_RANGES
+        ],
+        "lane_links": [
+            {"href": _timeline_url(replace(view, lanes=key)), "label": label, "current": key == view.lanes}
+            for key, label in _LANE_VIEW_LABELS.items()
+        ],
+        "strip_links": [
+            {"href": _timeline_url(replace(view, clips=key)), "label": label, "current": key == view.clips}
+            for key, label in _STRIP_FILTER_LABELS.items()
+        ],
+    }
+
+
+def _render_timeline(request: Request, *, view: _TimelineView, page: str | None) -> object:
     """Build the timeline view-model and dispatch to ``timeline.html.jinja``.
 
-    Density bucketing kicks in when the requested window is wider than
-    :data:`_TIMELINE_BUCKET_THRESHOLD` (spec §4.7.1). Below the threshold we hand the template a
-    flat list of per-clip markers; above it we collapse to per-hour bins keyed by lane.
+    Every range shows one marker per clip.
     """
     state = get_state(request)
-    delta = _TIMELINE_RANGES.get(range_key, _TIMELINE_RANGES[_TIMELINE_DEFAULT_RANGE])
-    if range_key not in _TIMELINE_RANGES:
-        # Snap to the default rather than 400-ing — operators following an old bookmark should still
-        # get a usable page, just at the standard window.
-        range_key = _TIMELINE_DEFAULT_RANGE
-    start_window = datetime.now(UTC) - delta
+    delta = _TIMELINE_RANGES[view.range_key]
+    now = datetime.now(UTC)
+    window = _Window(start=now - delta, end=now, total_seconds=delta.total_seconds())
     display_tz = ZoneInfo(state.config.web.display_timezone)
 
-    camera_rows, clip_markers_by_camera, alert_markers = _load_timeline_data(
+    data = _load_timeline_data(
         engine=state.engine,
-        start_window=start_window,
-        total_seconds=delta.total_seconds(),
+        window=window,
         display_tz=display_tz,
+        unsure_threshold=active_unsure_threshold(state.config),
     )
-
-    use_buckets = delta > _TIMELINE_BUCKET_THRESHOLD
-    lanes, lanes_have_clips, thumb_cards = _build_lanes_view(
-        camera_rows=camera_rows,
-        clip_markers_by_camera=clip_markers_by_camera,
-        total_seconds=delta.total_seconds(),
-        use_buckets=use_buckets,
-    )
+    lanes, strip = _build_lanes_view(view=view, data=data, requested_page=parse_page(page))
+    next_longer_range_key = _next_longer_range(view.range_key)
 
     return state.templates.TemplateResponse(
         request,
         "timeline.html.jinja",
         {
-            "cameras": camera_rows,
             "lanes": lanes,
-            "lanes_have_clips": lanes_have_clips,
-            "next_longer_range_key": _next_longer_range(range_key),
-            "alerts": alert_markers,
-            "thumb_cards": thumb_cards,
-            "time_axis_marks": _time_axis_marks(
-                range_key=range_key,
-                start_window=start_window,
-                total_seconds=delta.total_seconds(),
+            "label_width": _lane_label_width(lanes),
+            "window_has_clips": bool(data.clip_markers),
+            "no_cat_visited": view.lanes == "cats" and not data.identity_by_clip,
+            "box_view_url": _timeline_url(replace(view, lanes="boxes")),
+            "all_clips_url": _timeline_url(replace(view, clips="all")) if view.clips == "cat" else "",
+            "next_longer_range_key": next_longer_range_key,
+            "next_longer_range_url": _timeline_url(replace(view, range_key=next_longer_range_key)) if next_longer_range_key else "",
+            "alerts": data.alert_markers,
+            "thumb_cards": strip.cards,
+            "strip_page": strip.page,
+            "previous_page_url": _timeline_url(view, page=strip.page.number - 1) if strip.page.has_previous else "",
+            "next_page_url": _timeline_url(view, page=strip.page.number + 1) if strip.page.has_next else "",
+            "time_axis_marks": time_axis_marks(
+                range_key=view.range_key,
+                start_window=window.start,
+                total_seconds=window.total_seconds,
                 display_tz=display_tz,
             ),
-            "range_key": range_key,
-            "ranges": list(_TIMELINE_RANGES),
-            "use_buckets": use_buckets,
+            "range_key": view.range_key,
+            **_view_links(view),
             "storage_online": _storage_root_available(state.config.storage_root),
         },
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Window:
+    """The time span of the timeline, from ``start`` to ``end``, with ``end`` exclusive.
+
+    The markers and the cat clips read the same span. A clip with a start after ``end`` comes from
+    a camera clock that is fast. It shows in no view.
+    """
+
+    start: datetime
+    end: datetime
+    total_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _TimelineData:
+    """The rows of one timeline window, projected before the session closes.
+
+    ``identity_by_clip`` holds the cat clips of the window only. A clip id outside it is not a cat clip.
+    """
+
+    camera_rows: list[_CameraRow]
+    cats: list[Subject]
+    clip_markers: list[dict[str, object]]
+    identity_by_clip: dict[int, ClipIdentity]
+    alert_markers: list[dict[str, object]]
+
+
 def _load_timeline_data(
     *,
     engine: Engine,
-    start_window: datetime,
-    total_seconds: float,
+    window: _Window,
     display_tz: ZoneInfo,
-) -> tuple[list[_CameraRow], dict[int, list[dict[str, object]]], list[dict[str, object]]]:
-    """Pull the cameras / clips / alerts in the window and project them into template view-models.
+    unsure_threshold: float,
+) -> _TimelineData:
+    """Pull the cameras, cats, clips, and alerts of the window in one session.
 
-    All session-bound work happens inside one ``get_session`` so the rows are projected to plain
-    dicts before the session closes — the caller never touches a detached ORM instance.
+    The cameras, clips, and alerts become plain dicts before the session closes. The cat subjects
+    stay ORM objects. The session does not expire them, so their columns stay readable.
     """
     with get_session(engine) as session:
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
-        clips = list(session.scalars(select(Clip).where(Clip.start_ts >= start_window).order_by(Clip.start_ts)))
-        summary_by_clip = {
-            summary.clip_id: summary
-            for summary in session.scalars(
-                select(ClipLabelSummary).where(ClipLabelSummary.clip_id.in_([clip.id for clip in clips])),
-            )
-        }
-        alerts = list(session.scalars(select(AlertSent).where(AlertSent.sent_at >= start_window).order_by(AlertSent.sent_at)))
-        camera_rows = [_camera_lane(cam) for cam in cameras]
-        clip_markers_by_camera: dict[int, list[dict[str, object]]] = defaultdict(list)
-        for clip in clips:
-            summary = summary_by_clip[clip.id]
-            clip_markers_by_camera[clip.camera_id].append(
-                _clip_marker(
-                    clip,
-                    label={
-                        "effective_has_cat": summary.effective_has_cat,
-                        "show_manual_badge": is_manual_override(
-                            has_cat=clip.has_cat,
-                            has_manual_cat=summary.has_manual_cat,
-                            reviewed=clip.reviewed_at is not None,
-                        ),
-                    },
-                    start_window=start_window,
-                    total_seconds=total_seconds,
-                    display_tz=display_tz,
-                ),
-            )
-        alert_markers = [_alert_marker(alert, start_window=start_window, total_seconds=total_seconds) for alert in alerts]
-    return camera_rows, clip_markers_by_camera, alert_markers
+        cats = query_cat_subjects(session)
+        clip_markers = _query_clip_markers(session, cameras=cameras, window=window, display_tz=display_tz)
+        cat_clips = query_cat_clips(session, since=window.start, until=window.end, unsure_threshold=unsure_threshold, cats=cats)
+        alerts = session.scalars(select(AlertSent).where(AlertSent.sent_at >= window.start).order_by(AlertSent.sent_at))
+        return _TimelineData(
+            camera_rows=[_camera_lane(cam) for cam in cameras],
+            cats=cats,
+            clip_markers=clip_markers,
+            identity_by_clip={cat_clip.clip_id: cat_clip.identity for cat_clip in cat_clips},
+            alert_markers=[_alert_marker(alert, start_window=window.start, total_seconds=window.total_seconds) for alert in alerts],
+        )
 
 
-def _build_lanes_view(
+def _query_clip_markers(
+    session: Session,
     *,
-    camera_rows: list[_CameraRow],
-    clip_markers_by_camera: dict[int, list[dict[str, object]]],
-    total_seconds: float,
-    use_buckets: bool,
-) -> tuple[dict[int, list[dict[str, object]]], bool, list[dict[str, object]]]:
-    """Project per-camera clip markers into the SVG lanes view-model + flat newest-first thumb_cards.
+    cameras: Sequence[Camera],
+    window: _Window,
+    display_tz: ZoneInfo,
+) -> list[dict[str, object]]:
+    """Give one marker per clip of the window, in ``start_ts`` order.
 
-    The thumb-card list is sorted by ``start_ts`` DESC and interleaved across cameras so the strip
-    reads top-left to most-recent regardless of which camera produced it. Each card carries the
-    camera's display_name precomputed so the template iterates a single sequence.
+    Each marker names its camera, so a lane of any kind can show it.
     """
-    if use_buckets:
-        lanes: dict[int, list[dict[str, object]]] = {
-            cam_row["id"]: _bucket_markers(
-                clip_markers_by_camera.get(cam_row["id"], []),
-                total_seconds=total_seconds,
-            )
-            for cam_row in camera_rows
-        }
-    else:
-        lanes = {cam_row["id"]: clip_markers_by_camera.get(cam_row["id"], []) for cam_row in camera_rows}
-    lanes_have_clips = any(lanes.get(cam_row["id"]) for cam_row in camera_rows)
-    camera_display_by_id = {cam_row["id"]: cam_row["display_name"] for cam_row in camera_rows}
-    thumb_cards = sorted(
-        [
-            {**marker, "camera_display_name": camera_display_by_id[cam_id]}
-            for cam_id, markers in clip_markers_by_camera.items()
-            for marker in markers
-        ],
-        key=operator.itemgetter("start_ts"),
-        reverse=True,
+    clips = list(
+        session.scalars(select(Clip).where(Clip.start_ts >= window.start, Clip.start_ts < window.end).order_by(Clip.start_ts)),
     )
-    return lanes, lanes_have_clips, thumb_cards
+    summary_by_clip = {
+        summary.clip_id: summary
+        for summary in session.scalars(select(ClipLabelSummary).where(ClipLabelSummary.clip_id.in_([clip.id for clip in clips])))
+    }
+    camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
+    return [
+        {
+            **_clip_marker(
+                clip,
+                label={
+                    "effective_has_cat": summary_by_clip[clip.id].effective_has_cat,
+                    "show_manual_badge": is_manual_override(
+                        has_cat=clip.has_cat,
+                        has_manual_cat=summary_by_clip[clip.id].has_manual_cat,
+                        reviewed=clip.reviewed_at is not None,
+                    ),
+                },
+                start_window=window.start,
+                total_seconds=window.total_seconds,
+                display_tz=display_tz,
+            ),
+            "camera_id": clip.camera_id,
+            "camera_display_name": camera_display_by_id[clip.camera_id],
+        }
+        for clip in clips
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _StripPage:
+    """The thumb cards of one strip page, newest first, and the page they are."""
+
+    cards: list[dict[str, object]]
+    page: PageInfo
+
+
+def _build_lanes_view(*, view: _TimelineView, data: _TimelineData, requested_page: int | None) -> tuple[list[_Lane], _StripPage]:
+    """Project the clip markers into the SVG lanes of ``view`` and one page of thumb cards.
+
+    The strip does not depend on ``view.lanes``. The thumb cards interleave the cameras, so the
+    strip reads from the newest clip whatever camera produced it.
+    """
+    if view.lanes == "cats":
+        lanes = _cat_lanes(cats=data.cats, clip_markers=data.clip_markers, identity_by_clip=data.identity_by_clip)
+    else:
+        lanes = _box_lanes(camera_rows=data.camera_rows, clip_markers=data.clip_markers)
+    newest_first = sorted(data.clip_markers, key=operator.itemgetter("start_ts"), reverse=True)
+    if view.clips == "cat":
+        newest_first = [marker for marker in newest_first if marker["id"] in data.identity_by_clip]
+    info = page_info(requested=requested_page, total=len(newest_first), page_size=_STRIP_PAGE_SIZE)
+    cats_by_slug = {cat.slug: cat for cat in data.cats}
+    cards = [
+        _thumb_card(marker, identity=data.identity_by_clip.get(_marker_id(marker)), cats_by_slug=cats_by_slug)
+        for marker in newest_first[info.offset : info.offset + info.limit]
+    ]
+    return lanes, _StripPage(cards=cards, page=info)
+
+
+def _thumb_card(marker: dict[str, object], *, identity: ClipIdentity | None, cats_by_slug: Mapping[str, Subject]) -> dict[str, object]:
+    """Copy ``marker`` into a thumb card that names the cats of its clip.
+
+    ``identity`` is ``None`` for a clip that is not a cat clip. Such a card names no cat.
+    """
+    if identity is None:
+        return {**marker, "identity_chips": [], "identity_fallback_label": None}
+    if not identity.cats:
+        return {**marker, "identity_chips": [], "identity_fallback_label": _UNKNOWN_CAT_LABEL}
+    return {**marker, "identity_chips": [identity_chip(named, cats_by_slug) for named in identity.cats], "identity_fallback_label": None}
+
+
+def _marker_id(marker: dict[str, object]) -> int:
+    return cast("int", marker["id"])
+
+
+def _cat_lanes(
+    *,
+    cats: Sequence[Subject],
+    clip_markers: list[dict[str, object]],
+    identity_by_clip: Mapping[int, ClipIdentity],
+) -> list[_Lane]:
+    """Give one lane per cat, then an "Unknown cat" lane.
+
+    Each active cat gets a lane, in ``cats`` order. An archived cat gets a lane only if it has a clip
+    in the window. The "Unknown cat" lane shows only if a cat clip in the window names no cat. A
+    clip shows in the lane of each cat that it names. A clip that is not a cat clip shows in no lane.
+    """
+    slugs_by_clip = {clip_id: {named.slug for named in identity.cats} for clip_id, identity in identity_by_clip.items()}
+    cat_markers = [marker for marker in clip_markers if marker["id"] in slugs_by_clip]
+    lanes: list[_Lane] = []
+    for cat in cats:
+        markers = [_cat_lane_marker(marker, color=cat.color) for marker in cat_markers if cat.slug in slugs_by_clip[_marker_id(marker)]]
+        if markers or cat.archived_at is None:
+            lanes.append({"key": f"cat-{cat.id}", "label": cat.display_name, "markers": markers})
+    unknown = [_cat_lane_marker(marker, color=None) for marker in cat_markers if not slugs_by_clip[_marker_id(marker)]]
+    if unknown:
+        lanes.append({"key": _UNKNOWN_CAT_LANE_KEY, "label": _UNKNOWN_CAT_LABEL, "markers": unknown})
+    return lanes
+
+
+def _cat_lane_marker(marker: dict[str, object], *, color: str | None) -> dict[str, object]:
+    """Copy ``marker`` for one cat lane, because one clip can show in more than one lane.
+
+    The copy fills with ``color``. An empty ``lane_color`` lets the CSS fill with the text color.
+    """
+    return {**marker, "css_classes": f"{marker['css_classes']} clip-cat-lane", "lane_color": color or ""}
+
+
+def _box_lanes(*, camera_rows: list[_CameraRow], clip_markers: list[dict[str, object]]) -> list[_Lane]:
+    """Give one lane per camera, in ``camera_rows`` order. A camera with no clip gets an empty lane."""
+    return [
+        {
+            "key": f"camera-{cam_row['id']}",
+            "label": cam_row["display_name"],
+            "markers": [marker for marker in clip_markers if marker["camera_id"] == cam_row["id"]],
+        }
+        for cam_row in camera_rows
+    ]
+
+
+def _lane_label_width(lanes: list[_Lane]) -> int:
+    """Give the width of the lane-label column, so the longest label ends before the track starts."""
+    longest = max((len(lane["label"]) for lane in lanes), default=0)
+    return max(_LANE_LABEL_MIN_WIDTH, math.ceil(longest * _LANE_LABEL_CHAR_ADVANCE) + _LANE_LABEL_PADDING)
 
 
 def _camera_lane(cam: Camera) -> _CameraRow:
-    return {"id": cam.id, "name": cam.name, "display_name": cam.display_name}
+    return {"id": cam.id, "display_name": cam.display_name}
 
 
 def _clip_marker(
@@ -485,9 +674,8 @@ def _clip_marker(
 ) -> dict[str, object]:
     """Project a Clip into the SVG-and-card view-model with a precomputed local-time stamp.
 
-    ``css_classes`` and ``display_stamp`` are precomputed (rather than templated as conditionals or
-    filter chains) so djlint's HTML reformatter can't insert newlines into the class attribute, and
-    so Jinja stays free of timezone arithmetic.
+    The route builds ``css_classes`` and ``display_start``, not the template. Then djlint cannot put
+    a line break in the class attribute. Jinja also does no time zone arithmetic.
 
     ``label`` carries ``effective_has_cat`` from the ``clip_label_summary`` view and
     ``show_manual_badge`` (see :func:`cat_watcher.labels.is_manual_override`) — the badge fires only
@@ -510,7 +698,6 @@ def _clip_marker(
         "manual_label": show_manual_badge,
         "analysis_error": bool(clip.analysis_error),
         "css_classes": " ".join(classes),
-        "display_stamp": clip.start_ts.astimezone(display_tz).strftime("%H:%M:%S"),
         "display_start": clip.start_ts.astimezone(display_tz).strftime("%a %H:%M:%S"),
         # Fractional positions in [0, 1]; the template multiplies by the lane's pixel width.
         "x_frac": max(0.0, min(1.0, offset_seconds / total_seconds)),
@@ -528,160 +715,10 @@ def _alert_marker(alert: AlertSent, *, start_window: datetime, total_seconds: fl
     }
 
 
-def _bucket_markers(markers: list[dict[str, object]], *, total_seconds: float) -> list[dict[str, object]]:
-    """Collapse per-clip markers into per-hour bins with precomputed opacity and fill-class.
-
-    Each output dict carries: ``bin_index``, ``x_frac``, ``w_frac``, ``count``, ``cat_count``,
-    ``opacity`` (0.20-0.95 scaled to this *lane's* max count so a quiet camera doesn't get washed
-    out by a busy one), and ``fill_class`` (``bucket-cat`` or ``bucket-no-cat``).
-    """
-    buckets: dict[int, dict[str, int]] = defaultdict(lambda: {"count": 0, "cat_count": 0})
-    bucket_w_frac = _BUCKET_SECONDS / total_seconds
-    for marker in markers:
-        x_frac = cast("float", marker["x_frac"])
-        bin_index = int(x_frac * total_seconds // _BUCKET_SECONDS)
-        bucket = buckets[bin_index]
-        bucket["count"] += 1
-        if marker["has_cat"]:
-            bucket["cat_count"] += 1
-    if not buckets:
-        return []
-    lane_max = max(b["count"] for b in buckets.values())
-    return [
-        {
-            "bin_index": bin_index,
-            "x_frac": (bin_index * _BUCKET_SECONDS) / total_seconds,
-            "w_frac": bucket_w_frac,
-            "count": stats["count"],
-            "cat_count": stats["cat_count"],
-            "opacity": round(0.20 + 0.75 * (stats["count"] / lane_max), 3),
-            "fill_class": "bucket-cat" if stats["cat_count"] > 0 else "bucket-no-cat",
-        }
-        for bin_index, stats in sorted(buckets.items())
-    ]
-
-
-def _format_tick_label_hour_minute(dt_local: datetime) -> str:
-    return dt_local.strftime("%H:%M")
-
-
-def _format_tick_label_weekday_hour(dt_local: datetime) -> str:
-    """At 7d: ``Mon 14:00`` so a label survives a date crossing without a separate marker."""
-    return dt_local.strftime("%a %H:%M")
-
-
-def _format_tick_label_day_month(dt_local: datetime) -> str:
-    """At 30d: ``5 May`` — no clock component needed when ticks are 24h apart."""
-    return dt_local.strftime("%-d %b")
-
-
-@dataclass(frozen=True, slots=True)
-class _TickConfig:
-    """Per-range tick cadence + labelling rule for the time-axis row."""
-
-    seconds: int  # spacing between adjacent ticks
-    label_every: int  # n-th tick gets a text label
-    formatter: Callable[[datetime], str]
-
-
-_TICK_CONFIG: dict[str, _TickConfig] = {
-    "6h": _TickConfig(seconds=30 * 60, label_every=2, formatter=_format_tick_label_hour_minute),
-    "24h": _TickConfig(seconds=60 * 60, label_every=1, formatter=_format_tick_label_hour_minute),
-    "7d": _TickConfig(seconds=6 * 60 * 60, label_every=2, formatter=_format_tick_label_weekday_hour),
-    "30d": _TickConfig(seconds=24 * 60 * 60, label_every=1, formatter=_format_tick_label_day_month),
-}
-
-
-def _format_day_label(dt_local: datetime, *, range_key: str, end_local: datetime) -> str | None:
-    """Choose the label that sits next to a midnight day-boundary marker, by range.
-
-    ``None`` means render the boundary line with no label (6h windows are too short to need a date
-    prompt). ``today``/``yesterday`` is used at 24h so the operator can read the boundary without
-    parsing dates. 7d and 30d get a full ``5 May`` style date.
-    """
-    if range_key == "6h":
-        return None
-    if range_key == "24h":
-        return "today" if dt_local.date() == end_local.date() else "yesterday"
-    return dt_local.strftime("%-d %b")
-
-
-def _tick_marks(
-    *,
-    range_key: str,
-    start_window: datetime,
-    total_seconds: float,
-    display_tz: ZoneInfo,
-) -> list[dict[str, object]]:
-    """Build the per-range tick row: every nth tick gets a label, the rest are unlabeled."""
-    tick_config = _TICK_CONFIG[range_key]
-    n_ticks = int(total_seconds // tick_config.seconds)
-    marks: list[dict[str, object]] = []
-    for i in range(1, n_ticks + 1):
-        offset = i * tick_config.seconds
-        tick_dt_local = (start_window + timedelta(seconds=offset)).astimezone(display_tz)
-        label = tick_config.formatter(tick_dt_local) if i % tick_config.label_every == 0 else None
-        marks.append({"x_frac": offset / total_seconds, "label": label, "kind": "tick"})
-    return marks
-
-
-def _day_boundary_marks(
-    *,
-    range_key: str,
-    start_window: datetime,
-    total_seconds: float,
-    display_tz: ZoneInfo,
-) -> list[dict[str, object]]:
-    """Build the per-midnight day-boundary marks in ``display_tz`` for the window.
-
-    Iteration is in *calendar-day* space: ``date + timedelta(days=1)`` always advances exactly one
-    calendar day, and ``datetime.combine`` re-resolves the UTC offset for each midnight. Adding
-    ``timedelta(days=1)`` to a tz-aware ``datetime`` instead would carry the start-of-window's
-    offset across DST transitions and place the boundary an hour off (or on the wrong date).
-    """
-    start_local = start_window.astimezone(display_tz)
-    end_local = (start_window + timedelta(seconds=total_seconds)).astimezone(display_tz)
-    marks: list[dict[str, object]] = []
-    day = start_local.date() + timedelta(days=1)
-    while day <= end_local.date():
-        cursor = datetime.combine(day, datetime.min.time(), tzinfo=display_tz)
-        offset = (cursor - start_local).total_seconds()
-        if 0 < offset < total_seconds:
-            marks.append(
-                {
-                    "x_frac": offset / total_seconds,
-                    "label": _format_day_label(cursor, range_key=range_key, end_local=end_local),
-                    "kind": "day",
-                },
-            )
-        day += timedelta(days=1)
-    return marks
-
-
-def _time_axis_marks(
-    *,
-    range_key: str,
-    start_window: datetime,
-    total_seconds: float,
-    display_tz: ZoneInfo,
-) -> list[dict[str, object]]:
-    """Build the SVG time-axis view-model: tick rows, day boundaries, and a 'now' marker.
-
-    Each output dict carries ``x_frac`` ([0, 1] left fraction), an optional ``label`` (string or
-    ``None``), and a ``kind`` discriminator: ``"tick"``, ``"day"``, or ``"now"``. The template
-    consumes the list in order and picks the SVG element type per kind.
-    """
-    return [
-        *_tick_marks(range_key=range_key, start_window=start_window, total_seconds=total_seconds, display_tz=display_tz),
-        *_day_boundary_marks(range_key=range_key, start_window=start_window, total_seconds=total_seconds, display_tz=display_tz),
-        {"x_frac": 1.0, "label": None, "kind": "now"},
-    ]
-
-
 def _next_longer_range(range_key: str) -> str | None:
     """Return the next preset wider than ``range_key`` in :data:`_TIMELINE_RANGES`, or ``None``.
 
-    Used by the empty-state CTA: at 6h -> 24h, at 24h -> 7d, at 7d -> 30d, at 30d -> ``None``.
+    Used by the empty-state CTA: at 6h -> 24h, at 24h -> 3d, at 3d -> ``None``.
     """
     keys = list(_TIMELINE_RANGES)
     if range_key not in keys:
@@ -714,7 +751,7 @@ async def cameras_page(request: Request) -> object:
                     .limit(_CAMERA_RECENT_ALERTS_LIMIT),
                 ),
             )
-            recent_by_camera[cam.id] = [_alert_summary(a, camera_display_name=cam.display_name) for a in recent_alerts]
+            recent_by_camera[cam.id] = [_alert_summary(a, source_display=cam.display_name) for a in recent_alerts]
         camera_rows = [_camera_row(cam, recent_alerts=recent_by_camera[cam.id]) for cam in cameras]
 
     return state.templates.TemplateResponse(
@@ -724,116 +761,32 @@ async def cameras_page(request: Request) -> object:
     )
 
 
-def bucket_clips_by_local_day(
-    rows: Iterable[tuple[int, datetime, bool]],
-    *,
-    tz: tzinfo,
-) -> dict[tuple[int, date], tuple[int, int]]:
-    """Aggregate ``(camera_id, start_ts, effective_has_cat)`` into per-``(camera, local day)`` counts.
-
-    Returns ``{(camera_id, local_date): (total, cat_total)}``.
-
-    Bucketing happens here rather than in SQL because SQLite ships no timezone database, so
-    ``func.date(start_ts)`` can only produce UTC days and a fixed hour offset is wrong on either
-    side of a DST transition. Pure so both transitions are testable: through the route they are
-    reachable only during a 30-day window in autumn or spring.
-    """
-    buckets: dict[tuple[int, date], tuple[int, int]] = {}
-    for camera_id, start_ts, effective_has_cat in rows:
-        key = (camera_id, start_ts.astimezone(tz).date())
-        total, cat_total = buckets.get(key, (0, 0))
-        buckets[key] = (total + 1, cat_total + (1 if effective_has_cat else 0))
-    return buckets
-
-
-@stats_router.get("/stats")
-async def stats_page(request: Request) -> object:
-    """Render the 30-day daily clip aggregation (spec §4.7).
-
-    Groups by ``(camera_id, local day of start_ts)`` and computes total clips + cat-positive clips
-    per bucket, so the Date column names the same day the ``/clips`` Start column does. Cat-positive
-    reads ``effective_has_cat`` from the ``clip_label_summary`` view.
-    """
-    state = get_state(request)
-    cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
-    display_tz = ZoneInfo(state.config.web.display_timezone)
-
-    with get_session(state.engine) as session:
-        cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
-        camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
-        rows = session.execute(
-            select(Clip.camera_id, Clip.start_ts, ClipLabelSummary.effective_has_cat)
-            .join(ClipLabelSummary, ClipLabelSummary.clip_id == Clip.id)
-            .where(Clip.start_ts >= cutoff),
-        ).all()
-
-    buckets = bucket_clips_by_local_day(_stat_inputs(rows), tz=display_tz)
-    stat_rows = [
-        _stat_row(camera_id, day, total, cat_total, camera_display_by_id=camera_display_by_id)
-        for (camera_id, day), (total, cat_total) in sorted(buckets.items(), key=_stat_sort_key)
-    ]
-    return state.templates.TemplateResponse(request, "stats.html.jinja", {"rows": stat_rows})
-
-
 @alerts_router.get("/alerts")
 async def alerts_page(request: Request) -> object:
     """Render the last 30 days of dispatched alerts (spec §4.7).
 
-    Sorted newest-first. Camera-scoped alerts (``camera_id`` set) render the camera's display name;
-    non-camera alerts (``WEB_DOWN``, ``DISK_LOW``, etc.) render :data:`_NO_CAMERA_PLACEHOLDER` so
-    operators can scan the column for "which subsystem fired this" without losing the row to a blank
-    cell.
+    Sorted newest-first. The ``Source`` column shows the cat of a per-cat alert, the camera of a
+    camera alert, or :data:`_NO_CAMERA_PLACEHOLDER` for any other alert (``WEB_DOWN``, ``DISK_LOW``).
+    The placeholder keeps the column scannable. One query loads the cats of every row.
     """
     state = get_state(request)
-    cutoff = datetime.now(UTC) - timedelta(days=_HISTORY_DAYS)
+    cutoff = datetime.now(UTC) - timedelta(days=HISTORY_DAYS)
 
     with get_session(state.engine) as session:
         cameras = list(session.scalars(select(Camera)))
         camera_display_by_id = {cam.id: cam.display_name for cam in cameras}
         alerts = list(
             session.scalars(
-                select(AlertSent).where(AlertSent.sent_at >= cutoff).order_by(desc(AlertSent.sent_at)),
+                select(AlertSent).options(selectinload(AlertSent.cat)).where(AlertSent.sent_at >= cutoff).order_by(desc(AlertSent.sent_at)),
             ),
         )
-        alert_rows = [
-            _alert_summary(
-                alert,
-                camera_display_name=camera_display_by_id.get(alert.camera_id) if alert.camera_id is not None else None,
-            )
-            for alert in alerts
-        ]
+        alert_rows = [_alert_summary(alert, source_display=_alert_source(alert, camera_display_by_id)) for alert in alerts]
 
     return state.templates.TemplateResponse(
         request,
         "alerts.html.jinja",
         {"alerts": alert_rows},
     )
-
-
-def _stat_inputs(rows: Iterable[object]) -> list[tuple[int, datetime, bool]]:
-    """Convert stats query Rows into plain tuples for :func:`bucket_clips_by_local_day`.
-
-    Destructured positionally via ``cast`` + tuple-unpack because SQLAlchemy types Row column
-    accessors as ``Any``, and per-element access would blossom into ``reportAny`` warnings.
-    """
-    return [cast("tuple[int, datetime, bool]", tuple(cast("Sequence[object]", row))) for row in rows]
-
-
-def _stat_sort_key(item: tuple[tuple[int, date], tuple[int, int]]) -> tuple[int, int]:
-    """Order stats rows newest day first, then camera_id ascending."""
-    (camera_id, day), _counts = item
-    return (-day.toordinal(), camera_id)
-
-
-def _stat_row(camera_id: int, day: date, total: int, cat_total: int, *, camera_display_by_id: dict[int, str]) -> dict[str, object]:
-    """Project one aggregated bucket into a flat dict the template can render."""
-    return {
-        "camera_id": camera_id,
-        "camera_display_name": camera_display_by_id.get(camera_id, ""),
-        "date": day,
-        "total": total,
-        "cat_total": cat_total,
-    }
 
 
 def _camera_row(cam: Camera, *, recent_alerts: list[dict[str, object]]) -> dict[str, object]:
@@ -858,17 +811,25 @@ def _camera_row(cam: Camera, *, recent_alerts: list[dict[str, object]]) -> dict[
     }
 
 
-def _alert_summary(alert: AlertSent, *, camera_display_name: str | None) -> dict[str, object]:
+def _alert_source(alert: AlertSent, camera_display_by_id: Mapping[int, str]) -> str | None:
+    """Return the cat display name of a per-cat alert, else the camera display name, else ``None``."""
+    if alert.cat is not None:
+        return alert.cat.display_name
+    if alert.camera_id is not None:
+        return camera_display_by_id.get(alert.camera_id)
+    return None
+
+
+def _alert_summary(alert: AlertSent, *, source_display: str | None) -> dict[str, object]:
     """Project an AlertSent row into a flat dict the alerts/cameras templates can render.
 
-    ``camera_display`` collapses the ``camera_id is None`` and ``camera_id is set but its row was
-    deleted from config`` cases into the same em-dash placeholder — both correspond to "no live
-    camera attached", which is what the operator cares about.
+    ``source`` collapses "no source" and "a camera row that is gone" into the same em-dash
+    placeholder. Both mean "no live camera or cat attached".
     """
     return {
         "sent_at": alert.sent_at,
         "alert_type": alert.alert_type.value,
-        "camera_display": camera_display_name or _NO_CAMERA_PLACEHOLDER,
+        "source": source_display or _NO_CAMERA_PLACEHOLDER,
         "subject": alert.subject,
         "email_ok": alert.email_ok,
         "macos_ok": alert.macos_ok,

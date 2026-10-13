@@ -9,28 +9,25 @@ frame yields ``cat_slug=None`` and ``unsure=True``, and the run moves to the nex
 Every frame is scored because one clip can hold two cats at different times. A clip scored from a
 single frame reports one cat and hides the other.
 
-The crop pipeline matches :func:`cat_watcher.classifier.dataset.export_dataset` exactly: the same
-:func:`~cat_watcher.classifier.geometry.square_pad_box`, and the same ``CROP_MAX_WIDTH`` and
-``CROP_QUALITY`` through :func:`~cat_watcher.thumbnails.encode_frame`. A crop that differs from
-the training crop makes its prediction meaningless.
+The crop pipeline is :func:`~cat_watcher.classifier.crop.crop_frame` and
+:func:`~cat_watcher.classifier.crop.write_crop_jpeg`, the same as
+:func:`cat_watcher.classifier.dataset.export_dataset`. A crop that differs from the training crop
+makes its prediction meaningless.
 """
 
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from cat_watcher.classifier.dataset import CROP_MAX_WIDTH, CROP_QUALITY
-from cat_watcher.classifier.geometry import PAD_FRAC, square_pad_box
+from cat_watcher.classifier.crop import crop_frame, write_crop_jpeg
+from cat_watcher.classifier.geometry import PAD_FRAC
 from cat_watcher.classifier.labels_query import CatFrameRow
-from cat_watcher.thumbnails import encode_frame
 from cat_watcher.timefmt import local_stamp
 
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
     from zoneinfo import ZoneInfo
-
-    import numpy as np
 
     from cat_watcher.classifier.benchmark import PredictFn
     from cat_watcher.classifier.dataset import ExportSources
@@ -164,12 +161,10 @@ def _predict_one(
     if located is None:
         return _miss_prediction(candidate)
 
-    frame_h, frame_w = cast("tuple[int, int]", loaded.image.shape[:2])
-    box_xyxy = square_pad_box(located.box, frame_w=frame_w, frame_h=frame_h, pad_frac=options.pad_frac)
-    crop = _crop_to_box(loaded.image, box_xyxy)
+    crop, _padded_box = crop_frame(loaded.image, located.box, pad_frac=options.pad_frac)
     crop_relpath = f"{candidate.clip_id}_{candidate.ordinal}.jpg"
     crop_path = options.crops_dir / crop_relpath
-    _encode_crop(crop, crop_path)
+    write_crop_jpeg(crop, crop_path)
 
     cat_slug, confidence = predict(crop_path)
     return FramePrediction(
@@ -206,17 +201,6 @@ def _miss_prediction(candidate: ClipFrameCandidate) -> FramePrediction:
         unsure=True,
         thumb_relpath=candidate.frame_thumb_path,
     )
-
-
-def _crop_to_box(image: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
-    """Slice ``image`` to ``box`` (x1, y1, x2, y2), and copy it clear of the source frame."""
-    x1, y1, x2, y2 = box
-    return image[y1:y2, x1:x2].copy()
-
-
-def _encode_crop(crop: np.ndarray, dest: Path) -> None:
-    """Write ``crop`` as a JPEG at ``dest``, at the same width and quality the export uses."""
-    encode_frame(crop, dest, max_width=CROP_MAX_WIDTH, quality=CROP_QUALITY)
 
 
 def render_rows(verdicts: list[ClipVerdict], *, tz: ZoneInfo) -> str:

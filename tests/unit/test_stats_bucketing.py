@@ -1,4 +1,4 @@
-"""Unit tests for :func:`cat_watcher.web.routes.bucket_clips_by_local_day`.
+"""Unit tests for :func:`cat_watcher.web.stats_routes.bucket_clips_by_local_day`.
 
 The DST cases live here rather than in the route tests because through HTTP they are reachable only
 during a 30-day window in spring or autumn.
@@ -7,7 +7,7 @@ during a 30-day window in spring or autumn.
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
-from cat_watcher.web.routes import bucket_clips_by_local_day
+from cat_watcher.web.stats_routes import bucket_clips_by_local_day
 
 _EASTERN = ZoneInfo("America/New_York")
 

@@ -5,10 +5,11 @@ that need these helpers import directly from ``db_helpers``.
 """
 
 import base64
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from cat_watcher.db import (
     CLIP_LABEL_SUMMARY_VIEW_SQL,
@@ -24,7 +25,7 @@ from cat_watcher.db import (
 from cat_watcher.detector import ScoredFrame
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -36,6 +37,21 @@ if TYPE_CHECKING:
 AUTH_HEADER = {"Authorization": f"Basic {base64.b64encode(b'admin:pw').decode()}"}
 DEFAULT_START_TS = datetime(2026, 5, 1, 6, 47, 4, tzinfo=UTC)
 ROUTES_LOGGER = "cat_watcher.web.routes"
+
+
+@contextmanager
+def recorded_statements(engine: Engine) -> Generator[list[str]]:
+    """Yield a list that collects the SQL text of every statement that ``engine`` runs in the block."""
+    statements: list[str] = []
+
+    def _on_execute(**kw: object) -> None:
+        statements.append(str(kw["statement"]))
+
+    event.listen(engine, "before_cursor_execute", _on_execute, named=True)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", _on_execute)
 
 
 def apply_clip_label_summary_view(engine: Engine) -> None:
@@ -161,10 +177,17 @@ def seed_cat_subject(
     slug: str = "marcel",
     display_name: str = "Marcel",
     display_order: int = 1,
+    color: str | None = None,
 ) -> int:
     """Insert a cat ``Subject`` row and return its id."""
     with get_session(engine) as session:
-        subj = Subject(slug=slug, display_name=display_name, kind="cat", display_order=display_order)
+        subj = Subject(
+            slug=slug,
+            display_name=display_name,
+            kind="cat",
+            display_order=display_order,
+            color=color,
+        )
         session.add(subj)
         session.flush()
         return subj.id

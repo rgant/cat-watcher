@@ -9,6 +9,7 @@ import hashlib
 import shutil
 import subprocess
 from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations are evaluated by collectors
+from typing import cast
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -16,7 +17,16 @@ import pytest
 from ultralytics import YOLO  # type: ignore[attr-defined]  # ultralytics lazily loads models
 from ultralytics.engine.results import Boxes, Results
 
-from cat_watcher.detector import DetectionResult, Detector, DetectorError, ScoredFrame
+from cat_watcher.detector import (
+    BOX_CONF,
+    PIPELINE_REVISION,
+    DetectionResult,
+    Detector,
+    DetectorError,
+    ScoredFrame,
+    to_yolo_input,
+    weights_version,
+)
 
 _COCO_CAT = 15
 _COCO_DOG = 16
@@ -171,7 +181,7 @@ def test_detect_counts_only_matching_frames(synthetic_clip_path: Path) -> None:
 
 
 def test_from_weights_computes_version_from_filename_and_sha256(tmp_path: Path) -> None:
-    """``Detector.from_weights`` builds the version string ``<filename>@<sha256-of-bytes>``."""
+    """``Detector.from_weights`` builds the version string ``<filename>@<sha256-of-bytes>+p<PIPELINE_REVISION>``."""
     fake_weights = tmp_path / "yolo11n.pt"
     fake_bytes = b"not real model bytes, but enough to hash"
     _ = fake_weights.write_bytes(fake_bytes)
@@ -191,7 +201,7 @@ def test_from_weights_computes_version_from_filename_and_sha256(tmp_path: Path) 
             confidence_threshold=_DEFAULT_THRESHOLD,
         )
 
-    assert detector.version == f"yolo11n.pt@{expected_sha}"
+    assert detector.version == f"yolo11n.pt@{expected_sha}+p{PIPELINE_REVISION}"
 
 
 def test_from_weights_missing_file_raises(tmp_path: Path) -> None:
@@ -386,3 +396,94 @@ def test_detect_samples_frames_at_distinct_timestamps(synthetic_clip_path: Path,
 
     assert len(ffmpeg_timestamps) == 3
     assert len(set(ffmpeg_timestamps)) == 3, f"expected 3 distinct timestamps, got {ffmpeg_timestamps}"
+
+
+_ULTRALYTICS_DEFAULT_CONF = 0.25
+
+
+def _recording_model(*, confidence: float) -> MagicMock:
+    """Build a fake YOLO model. It drops hits below ``conf``, or below 0.25 when the call has no ``conf``."""
+
+    def fake_call(_frame: np.ndarray, *, conf: float | None = None, **_kwargs: object) -> list[MagicMock]:
+        floor = _ULTRALYTICS_DEFAULT_CONF if conf is None else conf
+        if confidence < floor:
+            return _fake_results(cls_ids=[], confidences=[], boxes=[])
+        return _fake_results(cls_ids=[_COCO_CAT], confidences=[confidence], boxes=[[1.0, 2.0, 3.0, 4.0]])
+
+    return MagicMock(spec=YOLO, side_effect=fake_call)
+
+
+def _fake_detector(model: MagicMock, *, confidence_threshold: float = _DEFAULT_THRESHOLD) -> Detector:
+    return Detector(
+        model=model,
+        version="test-detector@deadbeef",
+        frames_to_sample=2,
+        confidence_threshold=confidence_threshold,
+    )
+
+
+def _frames_given(model: MagicMock) -> list[np.ndarray]:
+    return [cast("np.ndarray", call.args[0]) for call in model.call_args_list]
+
+
+def test_box_conf_is_the_shared_floor() -> None:
+    """The box confidence floor is 0.10."""
+    assert BOX_CONF == 0.10
+
+
+def test_to_yolo_input_returns_a_contiguous_bgr_copy() -> None:
+    """Channel 0 of the result is channel 2 of the RGB input. The input stays unchanged."""
+    rgb = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+    original = rgb.copy()
+
+    bgr = to_yolo_input(rgb)
+
+    assert np.array_equal(bgr[..., 0], rgb[..., 2])
+    assert np.array_equal(bgr[..., 1], rgb[..., 1])
+    assert np.array_equal(bgr[..., 2], rgb[..., 0])
+    assert bgr.flags["C_CONTIGUOUS"]
+    assert not np.shares_memory(bgr, rgb)
+    assert np.array_equal(rgb, original)
+
+
+def test_detect_gives_the_model_bgr_frames(synthetic_clip_path: Path) -> None:
+    """The model gets channel 0 equal to channel 2 of the decoded frame. ``ScoredFrame.frame`` stays RGB."""
+    model = _recording_model(confidence=0.9)
+
+    result = _fake_detector(model).detect(synthetic_clip_path)
+
+    frames = _frames_given(model)
+    assert len(frames) == len(result.scored_frames) == 2
+    for given, scored in zip(frames, result.scored_frames, strict=True):
+        assert np.array_equal(given[..., 0], scored.frame[..., 2])
+        assert np.array_equal(given[..., 2], scored.frame[..., 0])
+    assert any(not np.array_equal(sf.frame[..., 0], sf.frame[..., 2]) for sf in result.scored_frames)
+
+
+def test_detect_passes_the_box_floor_to_the_model(synthetic_clip_path: Path) -> None:
+    """Every model call carries ``conf=BOX_CONF``."""
+    model = _recording_model(confidence=0.9)
+
+    _ = _fake_detector(model).detect(synthetic_clip_path)
+
+    assert [call.kwargs.get("conf") for call in model.call_args_list] == [BOX_CONF, BOX_CONF]
+
+
+def test_detect_keeps_a_sub_threshold_box_without_counting_it(synthetic_clip_path: Path) -> None:
+    """A 0.20 cat stores its box and score. It does not count in ``frames_with_cat``."""
+    model = _recording_model(confidence=0.20)
+
+    result = _fake_detector(model, confidence_threshold=0.35).detect(synthetic_clip_path)
+
+    assert result.frames_with_cat == 0
+    assert result.has_cat is False
+    assert all(sf.score == 0.20 for sf in result.scored_frames)
+    assert all(sf.box == (1.0, 2.0, 3.0, 4.0) for sf in result.scored_frames)
+
+
+def test_weights_version_is_name_at_sha256(tmp_path: Path) -> None:
+    """``weights_version`` returns ``<name>@<64 hex>``."""
+    weights = tmp_path / "w.pt"
+    _ = weights.write_bytes(b"abc")
+
+    assert weights_version(weights) == f"w.pt@{hashlib.sha256(b'abc').hexdigest()}"

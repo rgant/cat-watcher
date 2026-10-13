@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 LOCAL_STAMP_FORMAT = "%Y-%m-%d %H:%M:%S %Z"
 LOCAL_DATE_FORMAT = "%Y-%m-%d"
+_SECONDS_PER_MINUTE = 60
+_MINUTES_PER_HOUR = 60
 
 
 def local_stamp(value: datetime, *, tz: tzinfo) -> str:
@@ -28,6 +30,19 @@ def local_stamp(value: datetime, *, tz: tzinfo) -> str:
 def local_date(value: datetime, *, tz: tzinfo) -> str:
     """Render ``value``'s calendar day in ``tz`` as ``2026-07-02``."""
     return _in_zone(value, tz).strftime(LOCAL_DATE_FORMAT)
+
+
+def ago(dt: datetime, now: datetime) -> str:
+    """Render ``now - dt`` as ``45s ago`` / ``12m ago`` / ``14h 18m ago`` per spec §4.14 examples."""
+    delta = now - dt
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < _SECONDS_PER_MINUTE:
+        return f"{seconds}s ago"
+    minutes_total = seconds // _SECONDS_PER_MINUTE
+    if minutes_total < _MINUTES_PER_HOUR:
+        return f"{minutes_total}m ago"
+    hours, minutes = divmod(minutes_total, _MINUTES_PER_HOUR)
+    return f"{hours}h {minutes}m ago"
 
 
 def _in_zone(value: datetime, tz: tzinfo) -> datetime:

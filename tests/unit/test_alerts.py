@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from db_helpers import seed_cat_subject, stamp_reviewed_at, tag_clip_frame
+from db_helpers import add_clip, seed_cat_subject, tag_clip_frame
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from cat_watcher.alert_templates import AlertContent
@@ -25,10 +26,10 @@ from cat_watcher.alerts import (
     dispatch_alert,
     evaluate_backup_stale,
     evaluate_camera_clock,
-    evaluate_frequency,
+    evaluate_cat_frequency,
+    evaluate_cat_inactivity,
     evaluate_heartbeat_watchdog,
     evaluate_inactivity,
-    evaluate_inactivity_no_cats_global,
     evaluate_storage,
     evaluate_web_flapping,
     run_alerts_tick,
@@ -41,9 +42,11 @@ from cat_watcher.db import (
     Camera,
     Heartbeat,
     PollStatus,
+    Subject,
     get_session,
 )
 from cat_watcher.notifier import EmailResult, NotifResult
+from cat_watcher.visits import Visit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -125,9 +128,8 @@ def test_inactivity_fires_when_no_clips_for_inactivity_window(db_engine: Engine,
 def test_inactivity_per_camera_ignores_stale_last_cat_seen_at(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
     """A stale ``last_cat_seen_at`` alone does NOT fire per-camera INACTIVITY.
 
-    The per-camera evaluator only handles unreachable + no-clips; a cat using only one box today
-    must not alert on the other box. The fleet-wide no-cats branch lives in
-    :func:`evaluate_inactivity_no_cats_global`.
+    The per-camera evaluator only handles unreachable + no-clips. A cat that uses only one box today
+    must not alert on the other box. Cat absence is a per-cat rule.
     """
     cam_id = seed_camera(
         db_engine,
@@ -169,348 +171,298 @@ def test_inactivity_does_not_fire_within_threshold(db_engine: Engine, seed_camer
     assert cand is None
 
 
-def test_inactivity_global_no_cats_fires_when_max_last_cat_seen_at_stale(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """Two cameras with both ``last_cat_seen_at`` older than the threshold → global candidate fires."""
-    _ = seed_camera(db_engine, name="pantry", display_name="Pantry", last_cat_seen_at=_NOW - timedelta(hours=14))
-    _ = seed_camera(
-        db_engine,
-        name="bathroom",
-        display_name="Bathroom",
-        host="cam2.example.com",
-        last_cat_seen_at=_NOW - timedelta(hours=13),
-    )
-
-    with get_session(db_engine) as session:
-        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is not None
-    assert cand.alert_type == AlertType.INACTIVITY
-    assert cand.camera_id is None
-    assert "no cats seen on any camera" in cand.content.body
-    # The renderer identifies the most-recent camera (Bathroom at -13h, more recent than Pantry at -14h).
-    assert "(Bathroom)" in cand.content.body
-
-
-def test_inactivity_global_no_cats_does_not_fire_when_one_camera_recent(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """Any camera with a recent ``last_cat_seen_at`` keeps the fleet-wide branch silent."""
-    _ = seed_camera(db_engine, name="pantry", display_name="Pantry", last_cat_seen_at=_NOW - timedelta(hours=1))
-    _ = seed_camera(
-        db_engine,
-        name="bathroom",
-        display_name="Bathroom",
-        host="cam2.example.com",
-        last_cat_seen_at=_NOW - timedelta(hours=13),
-    )
-
-    with get_session(db_engine) as session:
-        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is None
-
-
-def test_inactivity_global_no_cats_does_not_fire_without_baseline(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """No camera has ever seen a cat (fresh install before backfill) → no fire."""
-    _ = seed_camera(db_engine, name="pantry", display_name="Pantry")
-    _ = seed_camera(db_engine, name="bathroom", display_name="Bathroom", host="cam2.example.com")
-
-    with get_session(db_engine) as session:
-        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is None
-
-
-def test_inactivity_global_no_cats_single_camera_still_fires(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """Single-camera deployments keep the same semantics: stale cat sightings fire the global branch."""
-    _ = seed_camera(db_engine, last_cat_seen_at=_NOW - timedelta(hours=13))
-
-    with get_session(db_engine) as session:
-        cand = evaluate_inactivity_no_cats_global(session, inactivity_hours=12, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is not None
-    assert cand.camera_id is None
-
-
-def test_inactivity_no_cats_does_not_fire_for_silent_camera_when_other_camera_active(
+def test_tick_with_no_cat_visits_gives_no_fleet_wide_inactivity(
     db_engine: Engine,
     cfg: Config,
     seed_camera: Callable[..., int],
 ) -> None:
-    """Two cameras: cat used box A in the last hour but skipped box B today.
-
-    Cats don't use both litter boxes every day, so a stale ``last_cat_seen_at`` on the silent camera
-    must not fire INACTIVITY when the other camera saw a cat within the threshold. The
-    ``no cats seen`` check is fleet-wide, not per-camera.
-    """
-    active_cam = seed_camera(
-        db_engine,
-        name="pantry",
-        display_name="Pantry",
-        last_polled_at=_NOW - timedelta(minutes=2),
-        last_clip_at=_NOW - timedelta(hours=1),
-        last_cat_seen_at=_NOW - timedelta(hours=1),
-    )
-    silent_cam = seed_camera(
-        db_engine,
-        name="bathroom",
-        display_name="Bathroom",
-        host="cam2.example.com",
-        last_polled_at=_NOW - timedelta(minutes=2),
-        last_clip_at=_NOW - timedelta(hours=1),
-        last_cat_seen_at=_NOW - timedelta(hours=13),
-    )
+    """Cameras that saw no cat for longer than ``inactivity_hours`` fire no INACTIVITY without a named cat."""
+    for name, host in (("pantry", "cam.example.com"), ("bathroom", "cam2.example.com")):
+        _ = seed_camera(
+            db_engine,
+            name=name,
+            display_name=name.title(),
+            host=host,
+            last_polled_at=_NOW - timedelta(minutes=2),
+            last_clip_at=_NOW - timedelta(hours=1),
+            last_cat_seen_at=_NOW - timedelta(hours=20),
+        )
 
     run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
 
     with get_session(db_engine) as session:
         rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.INACTIVITY).all()
-    assert rows == [], (
-        f"INACTIVITY must not fire when any camera saw a cat within the threshold; "
-        f"got {[(r.camera_id, r.subject) for r in rows]} (active_cam={active_cam}, silent_cam={silent_cam})"
+    assert rows == []
+
+
+# --- per-cat INACTIVITY + FREQUENCY ----------------------------------------------------------------
+
+
+_MARCEL = Subject(id=7, slug="marcel", display_name="Marcel", kind="cat", display_order=1)
+_CAMERA_NAMES = {1: "Pantry", 2: "Bathroom"}
+
+
+def _visit(start: datetime, *, camera_id: int = 1, clip_ids: tuple[int, ...] = (1,)) -> Visit:
+    return Visit(slug="marcel", camera_id=camera_id, start_ts=start, end_ts=start + timedelta(seconds=2), clip_ids=clip_ids)
+
+
+def _seed_cat_clip(engine: Engine, cam_id: int, start: datetime, *, cat_id: int | None) -> int:
+    """Seed a detector cat clip. With ``cat_id``, an operator tag names that cat. Without it, the clip is an unknown-cat clip."""
+    clip_id = add_clip(engine, cam_id, start_ts=start, name=f"{cam_id}-{start.isoformat()}.mp4")
+    if cat_id is not None:
+        tag_clip_frame(engine, clip_id=clip_id, subject_id=cat_id)
+    return clip_id
+
+
+def _cat_alerts(engine: Engine, alert_type: AlertType) -> list[AlertSent]:
+    with get_session(engine) as session:
+        return session.query(AlertSent).filter(AlertSent.alert_type == alert_type, AlertSent.subject_id.is_not(None)).all()
+
+
+def _with_frequency(base: Config, *, threshold: int) -> Config:
+    return base.model_copy(update={"alerts": base.alerts.model_copy(update={"frequency_threshold_count": threshold})})
+
+
+def test_cat_inactivity_fires_for_last_visit_older_than_threshold() -> None:
+    """A last visit that starts more than ``inactivity_hours`` ago fires a per-cat candidate."""
+    cand = evaluate_cat_inactivity(
+        cat=_MARCEL,
+        last_visit=_visit(_NOW - timedelta(hours=14), camera_id=2),
+        inactivity_hours=12,
+        camera_name_by_id=_CAMERA_NAMES,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
     )
 
+    assert cand is not None
+    assert cand.alert_type == AlertType.INACTIVITY
+    assert cand.camera_id is None
+    assert cand.subject_id == _MARCEL.id
+    assert "Marcel" in cand.content.subject
+    assert "(Bathroom)" in cand.content.body
 
-# --- FREQUENCY -----------------------------------------------------------------------------------
+
+def test_cat_inactivity_does_not_fire_for_visit_inside_threshold() -> None:
+    """A last visit inside ``inactivity_hours`` fires nothing."""
+    cand = evaluate_cat_inactivity(
+        cat=_MARCEL,
+        last_visit=_visit(_NOW - timedelta(hours=11)),
+        inactivity_hours=12,
+        camera_name_by_id=_CAMERA_NAMES,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
+    )
+
+    assert cand is None
 
 
-def test_frequency_fires_when_threshold_reached(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., int],
-) -> None:
-    """``count(cat_positive) >= threshold`` in the window → ``FREQUENCY`` candidate with subject + body."""
-    cam_id = seed_camera(db_engine)
-    for i in range(10):
-        _ = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 5), has_cat=True)
+def test_cat_inactivity_does_not_fire_without_last_visit() -> None:
+    """A cat with no visit in the retention window fires nothing."""
+    cand = evaluate_cat_inactivity(
+        cat=_MARCEL,
+        last_visit=None,
+        inactivity_hours=12,
+        camera_name_by_id=_CAMERA_NAMES,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
+    )
 
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+    assert cand is None
+
+
+def test_cat_frequency_counts_visits_over_all_cameras() -> None:
+    """Visits on two cameras add up. The candidate names Pantry and Bathroom."""
+    visits = [_visit(_NOW - timedelta(hours=3), camera_id=1), _visit(_NOW - timedelta(hours=2), camera_id=2, clip_ids=(2,))]
+
+    cand = evaluate_cat_frequency(
+        cat=_MARCEL,
+        visits=visits,
+        window_hours=6,
+        threshold=2,
+        camera_name_by_id=_CAMERA_NAMES,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
+    )
 
     assert cand is not None
     assert cand.alert_type == AlertType.FREQUENCY
-    assert "(10 in 6h)" in cand.content.subject
+    assert cand.camera_id is None
+    assert cand.subject_id == _MARCEL.id
+    assert "Pantry, Bathroom" in cand.content.body
 
 
-def test_frequency_does_not_fire_below_threshold(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., int],
-) -> None:
-    """``count < threshold`` → no fire."""
-    cam_id = seed_camera(db_engine)
-    for i in range(7):
-        _ = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 5), has_cat=True)
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
+def test_cat_frequency_ignores_visits_that_start_before_the_window() -> None:
+    """A visit that starts before ``window_hours`` does not count."""
+    visits = [_visit(_NOW - timedelta(hours=7)), _visit(_NOW - timedelta(hours=2), clip_ids=(2,))]
+
+    cand = evaluate_cat_frequency(
+        cat=_MARCEL,
+        visits=visits,
+        window_hours=6,
+        threshold=2,
+        camera_name_by_id=_CAMERA_NAMES,
+        public_url=_URL,
+        tz_name=_TZ,
+        now=_NOW,
+    )
+
     assert cand is None
 
 
-def test_frequency_excludes_reviewed_clips_with_no_cat_membership(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., int],
-) -> None:
-    """Reviewed clips with ``has_cat=True`` but no cat memberships do NOT count (FP correction).
+def test_tick_fires_cat_inactivity_for_stale_cat_only(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
+    """Only the cat whose last visit is older than ``inactivity_hours`` gets an alert.
 
-    5 of the 8 detector-positive clips were reviewed and cleared (no cat tags); remaining 3
-    are unreviewed (detector verdict = cat).  Only the 3 unreviewed clips count, keeping the
-    total below the threshold of 8.
+    The config has no ``[classifier]`` table. The operator tags still name the cats.
     """
+    assert cfg.classifier is None
     cam_id = seed_camera(db_engine)
-    for i in range(8):
-        reviewed_at = _NOW - timedelta(minutes=30) if i < 5 else None
-        clip_id = seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=True,
-        )
-        stamp_reviewed_at(db_engine, clip_id, reviewed_at)
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-    assert cand is None
+    marcel = seed_cat_subject(db_engine)
+    rufus = seed_cat_subject(db_engine, slug="rufus", display_name="Rufus", display_order=2)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=14), cat_id=marcel)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=1), cat_id=rufus)
+
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
+
+    rows = _cat_alerts(db_engine, AlertType.INACTIVITY)
+    assert [(r.subject_id, r.camera_id) for r in rows] == [(marcel, None)]
 
 
-def test_frequency_includes_reviewed_clips_with_cat_membership(
+def test_tick_unknown_cat_clip_does_not_reset_cat_inactivity(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
+    """A cat clip that names no cat, after the last visit of a cat, does not stop its alert."""
+    cam_id = seed_camera(db_engine)
+    marcel = seed_cat_subject(db_engine)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=14), cat_id=marcel)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=1), cat_id=None)
+
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
+
+    assert [r.subject_id for r in _cat_alerts(db_engine, AlertType.INACTIVITY)] == [marcel]
+
+
+def test_tick_reviewed_tag_on_missed_clip_resets_cat_inactivity(
     db_engine: Engine,
+    cfg: Config,
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., int],
 ) -> None:
-    """Reviewed clips with ``has_cat=False`` but cat membership DOES count (FN correction)."""
+    """A reviewed cat tag on a clip that the detector missed is a visit, so the cat fires no INACTIVITY."""
     cam_id = seed_camera(db_engine)
-    subj_id = seed_cat_subject(db_engine)
-    for i in range(8):
-        clip_id = seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=False,
-        )
-        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=_NOW - timedelta(minutes=30))
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-    assert cand is not None
-    assert "(8 in 6h)" in cand.content.subject
+    marcel = seed_cat_subject(db_engine)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=14), cat_id=marcel)
+    missed = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1), has_cat=False)
+    tag_clip_frame(db_engine, clip_id=missed, subject_id=marcel, reviewed_at=_NOW - timedelta(minutes=30))
+
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
+
+    assert _cat_alerts(db_engine, AlertType.INACTIVITY) == []
 
 
-# --- FREQUENCY parity tests: effective_has_cat cross-product ------------------------------------
-
-
-def test_frequency_effective_has_cat_unreviewed_detector_true(
+def test_tick_unreviewed_tag_on_missed_clip_keeps_cat_inactivity(
     db_engine: Engine,
+    cfg: Config,
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., int],
 ) -> None:
-    """Unreviewed clip, detector says cat → counts toward threshold (effective_has_cat = detector)."""
+    """Without the review mark, a cat tag on a missed clip is not a visit, so the cat still fires INACTIVITY."""
     cam_id = seed_camera(db_engine)
-    for i in range(8):
-        _ = seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=True,
-        )
+    marcel = seed_cat_subject(db_engine)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=14), cat_id=marcel)
+    missed = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1), has_cat=False)
+    tag_clip_frame(db_engine, clip_id=missed, subject_id=marcel)
+
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
+
+    assert [r.subject_id for r in _cat_alerts(db_engine, AlertType.INACTIVITY)] == [marcel]
+
+
+@pytest.mark.parametrize(("visit_count", "fires"), [(3, True), (2, False)])
+def test_tick_cat_frequency_fires_at_threshold_over_two_cameras(
+    db_engine: Engine,
+    cfg: Config,
+    seed_camera: Callable[..., int],
+    visit_count: int,
+    *,
+    fires: bool,
+) -> None:
+    """FREQUENCY fires at ``frequency_threshold_count`` visits over two cameras, and not at one fewer."""
+    cams = [seed_camera(db_engine), seed_camera(db_engine, name="bathroom", display_name="Bathroom", host="cam2.example.com")]
+    marcel = seed_cat_subject(db_engine)
+    for i in range(visit_count):
+        _ = _seed_cat_clip(db_engine, cams[i % 2], _NOW - timedelta(hours=1, minutes=10 * i), cat_id=marcel)
+
+    run_alerts_tick(config=_with_frequency(cfg, threshold=3), engine=db_engine, now=_NOW)
+
+    rows = _cat_alerts(db_engine, AlertType.FREQUENCY)
+    assert [(r.subject_id, r.camera_id) for r in rows] == ([(marcel, None)] if fires else [])
+
+
+def test_tick_cat_frequency_counts_a_visit_of_two_clips_once(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
+    """Two clips less than 2 minutes apart are one visit, so two such pairs miss a threshold of 3."""
+    cam_id = seed_camera(db_engine)
+    marcel = seed_cat_subject(db_engine)
+    for start in (_NOW - timedelta(hours=2), _NOW - timedelta(hours=1)):
+        _ = _seed_cat_clip(db_engine, cam_id, start, cat_id=marcel)
+        _ = _seed_cat_clip(db_engine, cam_id, start + timedelta(seconds=30), cat_id=marcel)
+
+    run_alerts_tick(config=_with_frequency(cfg, threshold=3), engine=db_engine, now=_NOW)
+
+    assert _cat_alerts(db_engine, AlertType.FREQUENCY) == []
+
+
+def test_tick_archived_cat_gets_no_alert(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
+    """Archived cats with tagged clips get no alert. If the cats are active, Marcel fires FREQUENCY and Rufus fires INACTIVITY."""
+    cam_id = seed_camera(db_engine)
+    marcel = seed_cat_subject(db_engine)
+    rufus = seed_cat_subject(db_engine, slug="rufus", display_name="Rufus", display_order=2)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=1), cat_id=marcel)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=14), cat_id=rufus)
+    with get_session(db_engine) as session:
+        for subject in session.scalars(select(Subject)):
+            subject.archived_at = _NOW - timedelta(days=1)
+
+    run_alerts_tick(config=_with_frequency(cfg, threshold=1), engine=db_engine, now=_NOW)
 
     with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is not None, "unreviewed detector-cat clips must count toward threshold"
-    assert "(8 in 6h)" in cand.content.subject
+        assert session.query(AlertSent).filter(AlertSent.subject_id.is_not(None)).all() == []
 
 
-def test_frequency_false_positive_correction_reviewed_no_memberships(
+def test_tick_cat_alert_keeps_cool_down_when_cat_changes_cameras(
     db_engine: Engine,
+    cfg: Config,
+    seed_camera: Callable[..., int],
+) -> None:
+    """A per-cat INACTIVITY alert stays in cool-down after the last visit moves to a second camera."""
+    pantry = seed_camera(db_engine)
+    bathroom = seed_camera(db_engine, name="bathroom", display_name="Bathroom", host="cam2.example.com")
+    marcel = seed_cat_subject(db_engine)
+    _ = _seed_cat_clip(db_engine, pantry, _NOW - timedelta(hours=14), cat_id=marcel)
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
+
+    _ = _seed_cat_clip(db_engine, bathroom, _NOW - timedelta(hours=13), cat_id=marcel)
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW + timedelta(hours=1))
+
+    assert [r.sent_at for r in _cat_alerts(db_engine, AlertType.INACTIVITY)] == [_NOW]
+
+
+def test_tick_many_cat_clips_on_one_camera_give_no_camera_frequency(
+    db_engine: Engine,
+    cfg: Config,
     seed_camera: Callable[..., int],
     seed_clip: Callable[..., int],
 ) -> None:
-    """FP correction: detector says cat, clip reviewed, no cat memberships → does NOT count.
+    """Many cat clips that name no cat fire no FREQUENCY alert of any kind."""
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=2), last_clip_at=_NOW - timedelta(minutes=5))
+    for i in range(20):
+        _ = seed_clip(db_engine, camera_id=cam_id, start_ts=_NOW - timedelta(hours=1, minutes=i * 3), has_cat=True)
 
-    This is the false-positive correction loop: a reviewer confirms no cat was present by
-    leaving the clip with no cat-subject tags. The alert engine must not fire even though
-    ``has_cat=True``.
-    """
-    cam_id = seed_camera(db_engine)
-    for i in range(8):
-        clip_id = seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=True,
-        )
-        stamp_reviewed_at(db_engine, clip_id, _NOW - timedelta(minutes=30))
+    run_alerts_tick(config=cfg, engine=db_engine, now=_NOW)
 
     with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is None, "reviewed clips with no cat memberships must not count (FP correction)"
-
-
-def test_frequency_false_negative_correction_reviewed_with_cat_membership(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., int],
-) -> None:
-    """FN correction: detector says no cat, clip reviewed, cat membership present → DOES count.
-
-    This is the false-negative correction loop: a reviewer tags a cat subject on the clip.
-    The alert engine must now count these clips even though ``has_cat=False``.
-    """
-    cam_id = seed_camera(db_engine)
-    subj_id = seed_cat_subject(db_engine)
-    clip_ids = [
-        seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=False,
-        )
-        for i in range(8)
-    ]
-    for clip_id in clip_ids:
-        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=_NOW - timedelta(minutes=30))
-
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is not None, "reviewed clips tagged with cat subject must count toward threshold (FN correction)"
-    assert "(8 in 6h)" in cand.content.subject
-
-
-def test_frequency_unreviewed_with_cat_membership_uses_detector(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., int],
-) -> None:
-    """Unreviewed clip with cat membership tags → detector verdict still governs (clip not reviewed).
-
-    Tagging subjects before review does not flip ``effective_has_cat``; the flip only takes
-    effect once ``reviewed_at`` is set.
-    """
-    cam_id = seed_camera(db_engine)
-    subj_id = seed_cat_subject(db_engine)
-    clip_ids = [
-        seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=False,
-        )
-        for i in range(8)
-    ]
-    for clip_id in clip_ids:
-        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id)
-
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is None, "unreviewed clips use detector verdict regardless of subject tags"
-
-
-def test_frequency_reviewed_with_cat_membership_fires(
-    db_engine: Engine,
-    seed_camera: Callable[..., int],
-    seed_clip: Callable[..., int],
-) -> None:
-    """Reviewed clip, detector says cat, cat membership present → still counts.
-
-    Both detector and manual label agree; the alert engine must fire as expected.
-    """
-    cam_id = seed_camera(db_engine)
-    subj_id = seed_cat_subject(db_engine)
-    clip_ids = [
-        seed_clip(
-            db_engine,
-            camera_id=cam_id,
-            start_ts=_NOW - timedelta(hours=1, minutes=i * 5),
-            has_cat=True,
-        )
-        for i in range(8)
-    ]
-    for clip_id in clip_ids:
-        tag_clip_frame(db_engine, clip_id=clip_id, subject_id=subj_id, reviewed_at=_NOW - timedelta(minutes=30))
-
-    with get_session(db_engine) as session:
-        cam = session.get(Camera, cam_id)
-        assert cam is not None
-        cand = evaluate_frequency(session, cam, window_hours=6, threshold=8, public_url=_URL, tz_name=_TZ, now=_NOW)
-
-    assert cand is not None, "reviewed+tagged clips must count"
-    assert "(8 in 6h)" in cand.content.subject
+        assert session.query(AlertSent).filter(AlertSent.alert_type == AlertType.FREQUENCY).all() == []
 
 
 # --- watchdog rules ------------------------------------------------------------------------------
@@ -1077,6 +1029,64 @@ def test_dispatch_alert_camera_keyed_cooldown_does_not_cross_cameras(
         rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.INACTIVITY).all()
     assert len(rows) == 2
     assert {r.camera_id for r in rows} == {cam1, cam2}
+
+
+def test_dispatch_alert_per_cat_cooldown_blocks_same_cat_only(db_engine: Engine, cfg: Config) -> None:
+    """A per-cat alert blocks a repeat for that cat and lets another cat's alert through."""
+    marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
+    rufus = seed_cat_subject(db_engine, slug="rufus", display_name="Rufus", display_order=2)
+    schedule = [(marcel, 0), (marcel, 10), (rufus, 20)]
+    for subject_id, minutes in schedule:
+        with get_session(db_engine) as session:
+            dispatch_alert(
+                AlertType.INACTIVITY,
+                camera_id=None,
+                subject_id=subject_id,
+                content=_TRIVIAL_CONTENT,
+                env=_dispatch_env(cfg, session, now=_NOW + timedelta(minutes=minutes)),
+            )
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).order_by(AlertSent.id).all()
+        assert [r.subject_id for r in rows] == [marcel, rufus]
+        assert rows[0].cat is not None
+        assert rows[0].cat.slug == "marcel"
+
+
+def test_dispatch_alert_cat_cooldown_is_separate_from_camera_cooldown(db_engine: Engine, cfg: Config) -> None:
+    """A per-cat row does not block the NULL-subject alert of the same type, and the reverse."""
+    marcel = seed_cat_subject(db_engine)
+    for subject_id, minutes in [(marcel, 0), (None, 5), (None, 10)]:
+        with get_session(db_engine) as session:
+            dispatch_alert(
+                AlertType.INACTIVITY,
+                camera_id=None,
+                subject_id=subject_id,
+                content=_TRIVIAL_CONTENT,
+                env=_dispatch_env(cfg, session, now=_NOW + timedelta(minutes=minutes)),
+            )
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).order_by(AlertSent.id).all()
+    assert [r.subject_id for r in rows] == [marcel, None]
+
+
+def test_dispatch_alert_null_subject_keeps_cooldown(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
+    """A camera alert without a subject still suppresses its repeat (NULL matches NULL)."""
+    cam_id = seed_camera(db_engine)
+    for minutes in (0, 10):
+        with get_session(db_engine) as session:
+            dispatch_alert(
+                AlertType.INACTIVITY,
+                camera_id=cam_id,
+                content=_TRIVIAL_CONTENT,
+                env=_dispatch_env(cfg, session, now=_NOW + timedelta(minutes=minutes)),
+            )
+
+    with get_session(db_engine) as session:
+        rows = session.query(AlertSent).all()
+    assert len(rows) == 1
+    assert rows[0].subject_id is None
 
 
 # --- run_alerts_tick end-to-end ------------------------------------------------------------------

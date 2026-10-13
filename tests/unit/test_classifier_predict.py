@@ -22,7 +22,8 @@ from PIL import Image
 from sqlalchemy import func, select
 
 from cat_watcher.classifier.cli import run
-from cat_watcher.classifier.dataset import CROP_MAX_WIDTH, CROP_QUALITY, ExportSources, LoadedFrame, LocalizedBox
+from cat_watcher.classifier.crop import CROP_MAX_WIDTH, CROP_QUALITY
+from cat_watcher.classifier.dataset import ExportSources, LoadedFrame, LocalizedBox
 from cat_watcher.classifier.geometry import PAD_FRAC, square_pad_box
 from cat_watcher.classifier.labels_query import CatFrameRow, ClipFrameCandidate, query_untagged_cat_clip_frames
 from cat_watcher.classifier.predict import ClipVerdict, FramePrediction, PredictOptions, predict_clips, render_rows

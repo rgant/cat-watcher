@@ -11,17 +11,16 @@ from pathlib import Path
 import pytest
 
 from cat_watcher.alert_templates import (
-    INACTIVITY_BRANCH_NO_CATS,
     INACTIVITY_BRANCH_NO_CLIPS,
     AlertContent,
     inactivity_branch_unreachable,
     render_backup_stale,
     render_camera_clock,
+    render_cat_frequency,
+    render_cat_inactivity,
     render_disk_low,
-    render_frequency,
     render_heartbeat_watchdog,
     render_inactivity,
-    render_inactivity_no_cats_global,
     render_poller_empty_after_quiet,
     render_storage_unavailable,
     render_web_flapping,
@@ -63,24 +62,6 @@ def test_inactivity_no_clips_branch_renders_full_body() -> None:
     assert content.macos_summary == "Pantry Litter Box Camera: no clips received"
 
 
-def test_inactivity_no_cats_branch_uses_correct_label() -> None:
-    """Branch label is the static ``no cats seen`` constant (not synthesized)."""
-    content = render_inactivity(
-        camera_display_name="Pantry",
-        branch=INACTIVITY_BRANCH_NO_CATS,
-        last_polled_at=_NOW - timedelta(minutes=1),
-        last_clip_at=_NOW - timedelta(minutes=30),
-        last_cat_seen_at=_NOW - timedelta(hours=13),
-        poll_status=PollStatus.OK,
-        public_url=_PUBLIC_URL,
-        tz_name=_TZ_NY,
-        now=_NOW,
-    )
-
-    assert "Branch:         no cats seen\n" in content.body
-    assert content.macos_summary == "Pantry: no cats seen"
-
-
 def test_inactivity_unreachable_branch_includes_since_timestamp() -> None:
     """``inactivity_branch_unreachable`` embeds the unreachable-since absolute timestamp."""
     since = datetime(2026, 5, 1, 13, 30, 0, tzinfo=UTC)  # 09:30:00 EDT
@@ -104,51 +85,58 @@ def test_inactivity_unreachable_branch_includes_since_timestamp() -> None:
     assert "Poll status:    unreachable\n" in content.body
 
 
-def test_inactivity_no_cats_global_renders_full_body() -> None:
-    """Fleet-wide no-cats branch identifies the most-recent camera and the threshold."""
-    last_cat = datetime(2026, 5, 1, 1, 24, 0, tzinfo=UTC)  # 21:24:00 (prev day) EDT — 12h 18m ago
+def test_cat_inactivity_renders_full_body() -> None:
+    """The per-cat INACTIVITY body names the cat, the start and camera of the last visit, and the hours since."""
+    last_visit = datetime(2026, 5, 1, 1, 24, 0, tzinfo=UTC)  # 21:24:00 (prev day) EDT, 12h 18m ago
 
-    content = render_inactivity_no_cats_global(
-        last_cat_seen_at=last_cat,
-        last_cat_seen_camera_name="Pantry Litter Box Camera",
+    content = render_cat_inactivity(
+        cat_display_name="Marcel",
+        last_visit_start=last_visit,
+        last_visit_camera_name="Pantry Litter Box Camera",
         inactivity_hours=12,
         public_url=_PUBLIC_URL,
         tz_name=_TZ_NY,
         now=_NOW,
     )
 
-    assert content.subject == "[cat-watcher] INACTIVITY: no cats seen on any camera"
+    assert content.subject == "[cat-watcher] INACTIVITY: Marcel"
     assert content.body == (
-        "Branch:         no cats seen on any camera\n"
-        "Last cat seen:  2026-04-30 21:24:00 EDT (-04:00) — 12h 18m ago (Pantry Litter Box Camera)\n"
+        "Cat:            Marcel\n"
+        "Last visit:     2026-04-30 21:24:00 EDT (-04:00) — 12h 18m ago (Pantry Litter Box Camera)\n"
         "Threshold:      12h\n"
         f"Web UI:         {_PUBLIC_URL}\n"
     )
-    assert content.macos_summary == "no cats seen on any camera in 12h 18m"
+    assert content.macos_summary == "Marcel: no visit in 12h 18m"
 
 
-def test_frequency_renders_count_and_window_in_subject() -> None:
-    """Subject embeds ``({count} in {window_hours}h)`` per spec §4.14."""
+def test_cat_frequency_renders_full_body() -> None:
+    """The per-cat FREQUENCY body names the cat, the count, the window, the first and latest starts, and the cameras."""
     first = datetime(2026, 5, 1, 8, 45, 0, tzinfo=UTC)  # 04:45 EDT
     latest = datetime(2026, 5, 1, 13, 58, 11, tzinfo=UTC)  # 09:58:11 EDT
 
-    content = render_frequency(
-        camera_display_name="Pantry Litter Box Camera",
-        count=12,
+    content = render_cat_frequency(
+        cat_display_name="Marcel",
+        count=9,
         window_hours=6,
         threshold=8,
-        first_in_window=first,
-        latest_in_window=latest,
+        first_visit_start=first,
+        latest_visit_start=latest,
+        camera_names=("Pantry", "Bathroom"),
         public_url=_PUBLIC_URL,
         tz_name=_TZ_NY,
     )
 
-    assert content.subject == "[cat-watcher] FREQUENCY: Pantry Litter Box Camera (12 in 6h)"
-    assert "Cat-positive clips in last 6h:   12\n" in content.body
-    assert "Threshold:                       8\n" in content.body
-    assert "First in window:                 2026-05-01 04:45:00 EDT (-04:00)\n" in content.body
-    assert "Latest:                          2026-05-01 09:58:11 EDT (-04:00)\n" in content.body
-    assert content.macos_summary.startswith("Pantry Litter Box Camera: 12 cat-positive clips in 6h")
+    assert content.subject == "[cat-watcher] FREQUENCY: Marcel (9 visits in 6h)"
+    assert content.body == (
+        "Cat:                 Marcel\n"
+        "Visits in last 6h:   9\n"
+        "Threshold:           8\n"
+        "First visit:         2026-05-01 04:45:00 EDT (-04:00)\n"
+        "Latest visit:        2026-05-01 09:58:11 EDT (-04:00)\n"
+        "Cameras:             Pantry, Bathroom\n"
+        f"Web UI:              {_PUBLIC_URL}\n"
+    )
+    assert content.macos_summary == "Marcel: 9 visits in 6h (threshold 8)"
 
 
 @pytest.mark.parametrize(
@@ -346,7 +334,7 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
     [
         render_inactivity(
             camera_display_name="A" * 200,
-            branch=INACTIVITY_BRANCH_NO_CATS,
+            branch=INACTIVITY_BRANCH_NO_CLIPS,
             last_polled_at=_NOW,
             last_clip_at=_NOW,
             last_cat_seen_at=_NOW,
@@ -355,21 +343,23 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
             tz_name=_TZ_NY,
             now=_NOW,
         ),
-        render_inactivity_no_cats_global(
-            last_cat_seen_at=_NOW - timedelta(hours=14, minutes=18),
-            last_cat_seen_camera_name="C" * 200,
+        render_cat_inactivity(
+            cat_display_name="C" * 200,
+            last_visit_start=_NOW - timedelta(hours=14, minutes=18),
+            last_visit_camera_name="Pantry",
             inactivity_hours=12,
             public_url=_PUBLIC_URL,
             tz_name=_TZ_NY,
             now=_NOW,
         ),
-        render_frequency(
-            camera_display_name="B" * 200,
+        render_cat_frequency(
+            cat_display_name="B" * 200,
             count=99,
             window_hours=6,
             threshold=8,
-            first_in_window=_NOW,
-            latest_in_window=_NOW,
+            first_visit_start=_NOW,
+            latest_visit_start=_NOW,
+            camera_names=("Pantry",),
             public_url=_PUBLIC_URL,
             tz_name=_TZ_NY,
         ),
@@ -423,8 +413,8 @@ def test_backup_stale_reports_hours_since_mtime() -> None:
     ],
     ids=[
         "inactivity",
-        "inactivity_no_cats_global",
-        "frequency",
+        "cat_inactivity",
+        "cat_frequency",
         "heartbeat",
         "poller_empty_after_quiet",
         "web_flapping",
@@ -439,7 +429,7 @@ def test_macos_summary_never_exceeds_cap(content: AlertContent) -> None:
 
 
 def test_relative_ago_buckets_seconds_minutes_hours() -> None:
-    """``_ago`` rolls into ``s ago`` / ``m ago`` / ``h Xm ago`` at 60s and 60m boundaries."""
+    """``ago`` rolls into ``s ago`` / ``m ago`` / ``h Xm ago`` at 60s and 60m boundaries."""
     cases: list[tuple[timedelta, str]] = [
         (timedelta(seconds=0), "0s ago"),
         (timedelta(seconds=45), "45s ago"),
@@ -466,10 +456,10 @@ def test_relative_ago_buckets_seconds_minutes_hours() -> None:
 
 def test_macos_summary_truncation_appends_visible_ellipsis() -> None:
     """An over-cap summary lands at exactly 120 chars and ends with ``…`` so the cut is visible."""
-    long_name = "P" * 200  # well over the 120-char cap once "Pantry: no cats seen" prefix is implied
+    long_name = "P" * 200  # well over the 120-char cap once the ": no clips received" suffix is added
     content = render_inactivity(
         camera_display_name=long_name,
-        branch=INACTIVITY_BRANCH_NO_CATS,
+        branch=INACTIVITY_BRANCH_NO_CLIPS,
         last_polled_at=_NOW,
         last_clip_at=_NOW,
         last_cat_seen_at=_NOW,

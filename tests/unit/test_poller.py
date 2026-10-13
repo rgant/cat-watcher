@@ -11,13 +11,14 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003  # runtime: pytest fixture annotations are evaluated by collectors
-from typing import TYPE_CHECKING, Self, final
+from typing import TYPE_CHECKING, Self, final, override
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 from db_helpers import scored_frames_with_boxes, tag_clip_frame
-from tz_helpers import pinned_tz
+from sqlalchemy import select
+from tz_helpers import frozen_clock, pinned_tz
 
 from cat_watcher.amcrest_client import CameraUnreachableError, NtpConfig, Recording
 from cat_watcher.config import EmailRulesConfig, MacOsRulesConfig
@@ -740,7 +741,7 @@ def test_run_tick_raises_when_camera_filter_does_not_match_config(
     args = PollerArgs(camera="not-a-real-camera")
 
     with pytest.raises(PollerError, match="not-a-real-camera"):
-        run_tick(config=config, args=args, engine=db_engine, detector=None, now=_NOW)
+        run_tick(config=config, args=args, engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
 
 # --- _check_alerts_stuck ------------------------------------------------------------------------
@@ -1066,6 +1067,82 @@ def test_clock_correction_records_camera_ntp_state(
     assert cam.clock_ntp_enabled is True
 
 
+@final
+@dataclass
+class _HostClock:
+    """A host clock that a test moves forward."""
+
+    current: datetime
+
+    def __call__(self) -> datetime:
+        return self.current
+
+
+@final
+class _CorrectCameraClient(_StubAmcrestClient):
+    """A camera whose clock matches the host clock. Each poll takes ``poll_time`` of host time."""
+
+    def __init__(self, host: _HostClock, poll_time: timedelta) -> None:
+        super().__init__()
+        self.host = host
+        self.poll_time = poll_time
+
+    @override
+    def iter_recordings(self, *, since: datetime, until: datetime) -> list[Recording]:
+        self.host.current += self.poll_time
+        return super().iter_recordings(since=since, until=until)
+
+    @override
+    def get_camera_time(self) -> datetime:
+        return self.host.current
+
+
+def test_correct_camera_clock_after_a_slow_camera_is_not_written(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later camera compares its clock to the time its own poll starts, not to the tick start."""
+    base = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    second = base.cameras[0].model_copy(update={"name": "office", "display_name": "Office"})
+    config = base.model_copy(update={"cameras": [base.cameras[0], second]})
+    host = _HostClock(_NOW)
+    stub = _CorrectCameraClient(host, poll_time=timedelta(minutes=10))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=host)
+
+    assert not stub.set_time_calls
+    with get_session(db_engine) as session:
+        drifts = {cam.name: cam.clock_drift_seconds for cam in session.scalars(select(Camera))}
+    assert drifts == {"pantry": 0.0, "office": 0.0}
+
+
+def test_tick_saves_clock_streak_for_the_camera_clock_alert(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each tick saves the clock fields, so a clock that will not hold builds the streak."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5))
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-7200.0, write_holds=False, ntp_enabled=True))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW + timedelta(minutes=5)))
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.clock_correction_streak == 2
+        assert cam.clock_checked_at == _NOW + timedelta(minutes=5)
+        assert cam.clock_ntp_enabled is True
+
+
 def test_safety_net_not_triggered_at_exact_threshold(
     db_engine: Engine,
     seed_camera: Callable[..., int],
@@ -1238,7 +1315,7 @@ def test_safety_net_no_alert_when_find_file_returns_rows(
     stub = _StubAmcrestClient(recordings=(existing,))
     monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
 
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
     with get_session(db_engine) as session:
         rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.POLLER_EMPTY_AFTER_QUIET).all()
@@ -1260,8 +1337,8 @@ def test_safety_net_fires_alert_when_find_file_returns_zero_rows_and_honors_cool
     stub = _StubAmcrestClient()
     monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
 
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW + timedelta(minutes=5))
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW + timedelta(minutes=5)))
 
     with get_session(db_engine) as session:
         rows = session.query(AlertSent).filter(AlertSent.alert_type == AlertType.POLLER_EMPTY_AFTER_QUIET).all()
@@ -1287,7 +1364,7 @@ def test_run_tick_preserves_cursor_on_camera_unreachable(
     stub = _StubAmcrestClient(raises=(CameraUnreachableError("connect refused"),))
     monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
 
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -1317,7 +1394,7 @@ def test_run_tick_preserves_cursor_on_unexpected_exception(
     stub = _StubAmcrestClient(raises=(RuntimeError("boom"),))
     monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
 
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
@@ -1349,13 +1426,13 @@ def test_run_tick_advances_cursor_on_successful_recovery_after_failure(
     stub = _StubAmcrestClient(raises=(CameraUnreachableError("transient"),))
     monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
 
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=t1)
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(t1))
     with get_session(db_engine) as session:
         cam = session.get(Camera, cam_id)
         assert cam is not None
         assert cam.last_polled_at == t0  # unchanged after failed tick
 
-    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=t2)
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(t2))
 
     expected_cursor = t2 - timedelta(minutes=config.poller.overlap_minutes)
     with get_session(db_engine) as session:
@@ -1408,7 +1485,7 @@ def test_run_tick_emits_poll_tick_info_on_success(
 
     logging.getLogger("cat_watcher.poller").disabled = False
     with caplog.at_level(logging.INFO, logger="cat_watcher.poller"):
-        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
     records = [r for r in caplog.records if r.message == "poll_tick"]
     assert len(records) == 1
@@ -1441,7 +1518,7 @@ def test_run_tick_emits_poll_tick_failed_warning_on_typed_amcrest_failure(
 
     logging.getLogger("cat_watcher.poller").disabled = False
     with caplog.at_level(logging.WARNING, logger="cat_watcher.poller"):
-        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
     records = [r for r in caplog.records if r.message == "poll_tick_failed"]
     assert len(records) == 1
@@ -1475,7 +1552,7 @@ def test_run_tick_emits_poll_tick_failed_warning_on_unexpected_exception(
 
     logging.getLogger("cat_watcher.poller").disabled = False
     with caplog.at_level(logging.WARNING, logger="cat_watcher.poller"):
-        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, now=_NOW)
+        run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
 
     records = [r for r in caplog.records if r.message == "poll_tick_failed"]
     assert len(records) == 1
