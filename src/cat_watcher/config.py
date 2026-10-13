@@ -14,12 +14,13 @@ Loaded once at startup; ``ConfigError`` exits the process.
 """
 
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -241,6 +242,10 @@ class PollerConfig(BaseModel, extra="forbid"):
         return self
 
 
+#: A ``#rgb`` or ``#rrggbb`` hex color, or a CSS color keyword such as ``darkorange``.
+_SUBJECT_COLOR = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})|[a-zA-Z]+")
+
+
 class ConfiguredSubject(BaseModel, extra="forbid"):
     """One ``[[subjects]]`` entry from ``config.toml``; synced to the DB at every agent startup."""
 
@@ -250,6 +255,19 @@ class ConfiguredSubject(BaseModel, extra="forbid"):
     display_order: int
     description: str | None = None
     color: str | None = None
+
+    @field_validator("color")
+    @classmethod
+    def _validate_color(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """Accept only a hex color or a CSS color keyword.
+
+        The templates put the color into an inline ``style`` attribute. Autoescape does not stop a
+        ``;`` that adds a CSS declaration, so this check is the guard.
+        """
+        if value is None or _SUBJECT_COLOR.fullmatch(value):
+            return value
+        msg = f"invalid color {value!r} for subject {info.data.get('slug')!r}: use #rgb, #rrggbb, or a CSS color keyword"
+        raise ValueError(msg)
 
 
 class Config(BaseModel, extra="forbid"):

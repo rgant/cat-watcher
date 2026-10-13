@@ -15,6 +15,7 @@ from db_helpers import (
 
 from cat_watcher.db import ClipFrame, Subject, get_session
 from cat_watcher.identity import (
+    BoxState,
     ClipIdentity,
     FrameIdentity,
     NamedCat,
@@ -32,25 +33,41 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 THRESHOLD = 0.70
+DETECTOR_THRESHOLD = 0.35
 T0 = datetime(2026, 5, 1, 6, 0, 0, tzinfo=UTC)
 
 
-def _model(*, version: str | None, slug: str | None, confidence: float | None) -> FrameIdentity:
+def _model(
+    *,
+    version: str | None,
+    slug: str | None,
+    confidence: float | None,
+    box: BoxState = "absent",
+) -> FrameIdentity:
     return model_result(
         classifier_version=version,
         predicted_slug=slug,
         confidence=confidence,
         unsure_threshold=THRESHOLD,
+        box=box,
     )
 
 
-def _predict(engine: Engine, frame_id: int, *, subject_id: int | None, confidence: float | None) -> None:
+def _predict(
+    engine: Engine,
+    frame_id: int,
+    *,
+    subject_id: int | None,
+    confidence: float | None,
+    box: list[float] | None = None,
+) -> None:
     with get_session(engine) as session:
         frame = session.get(ClipFrame, frame_id)
         assert frame is not None
         frame.classifier_version = "v1"
         frame.predicted_subject_id = subject_id
         frame.prediction_confidence = confidence
+        frame.bbox_xyxy = box
 
 
 def test_rule_1_cat_tag_wins_over_review_and_model() -> None:
@@ -79,6 +96,20 @@ def test_rule_4_no_predicted_subject_is_no_box() -> None:
     result = _model(version="v1", slug=None, confidence=None)
     assert result.kind == "no_box"
     assert not result.slugs
+
+
+def test_box_below_detector_threshold_is_no_box_before_any_prediction() -> None:
+    """A box below the detector threshold counts as no box, whatever the classifier stored."""
+    confident = _model(version="v1", slug="marcel", confidence=0.95, box="below_threshold")
+    unclassified = _model(version=None, slug=None, confidence=None, box="below_threshold")
+    assert confident == FrameIdentity(kind="no_box", slugs=(), confidence=None)
+    assert unclassified.kind == "no_box"
+
+
+def test_box_without_prediction_is_not_classified() -> None:
+    """A version on a frame with a box and no prediction means the classifier failed on that box."""
+    result = _model(version="v1", slug=None, confidence=None, box="present")
+    assert result == FrameIdentity(kind="not_classified", slugs=(), confidence=None)
 
 
 def test_rule_5_low_confidence_is_unsure() -> None:
@@ -175,7 +206,13 @@ def test_query_names_both_cats_from_model(db_engine: Engine, seed_camera: Callab
     _predict(db_engine, f1, subject_id=marcel, confidence=0.9)
     _predict(db_engine, f2, subject_id=rufus, confidence=0.8)
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert result[clip] == ClipIdentity(
         cats=(NamedCat("marcel", "model"), NamedCat("rufus", "model")),
         fallback=None,
@@ -188,7 +225,13 @@ def test_query_unsure_frame_beats_no_box_frame(db_engine: Engine, seed_camera: C
     _predict(db_engine, f1, subject_id=marcel, confidence=0.3)
     _predict(db_engine, f2, subject_id=None, confidence=None)
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert result[clip] == ClipIdentity(cats=(), fallback="unsure")
 
 
@@ -199,7 +242,13 @@ def test_query_event_tag_on_unreviewed_clip_falls_to_model(db_engine: Engine, se
     _predict(db_engine, f1, subject_id=marcel, confidence=0.9)
     tag_frame(db_engine, f1, event_id)
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert result[clip].cats == (NamedCat("marcel", "model"),)
 
 
@@ -211,7 +260,13 @@ def test_query_event_tag_on_reviewed_clip_is_no_cat(db_engine: Engine, seed_came
     tag_frame(db_engine, f1, event_id)
     stamp_reviewed_at(db_engine, clip, T0 + timedelta(hours=1))
     with get_session(db_engine) as session:
-        identity, frames = query_clip_detail(session, clip, unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        identity, frames = query_clip_detail(
+            session,
+            clip,
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert identity == ClipIdentity(cats=(), fallback=None)
     assert frames[f1].kind == "model_cat"
     assert frames[f2].kind == "not_classified"
@@ -224,7 +279,13 @@ def test_query_cat_tag_names_cat_with_operator_source(db_engine: Engine, seed_ca
     _predict(db_engine, f2, subject_id=rufus, confidence=0.9)
     tag_frame(db_engine, f1, marcel)
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert result[clip].cats == (NamedCat("marcel", "operator"), NamedCat("rufus", "model"))
 
 
@@ -237,7 +298,13 @@ def test_query_archived_cat_tag_still_names_cat(db_engine: Engine, seed_camera: 
         assert subject is not None
         subject.archived_at = T0
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert result[clip].cats == (NamedCat("marcel", "operator"),)
     assert rufus != marcel
 
@@ -252,7 +319,13 @@ def test_query_orders_active_cats_before_archived(db_engine: Engine, seed_camera
         assert subject is not None
         subject.archived_at = T0
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert [cat.slug for cat in result[clip].cats] == ["rufus", "marcel"]
 
 
@@ -261,7 +334,13 @@ def test_query_clip_without_frames_is_not_classified(db_engine: Engine, seed_cam
     cam = seed_camera(db_engine)
     clip = add_clip(db_engine, cam, start_ts=T0, name="empty.mp4")
     with get_session(db_engine) as session:
-        result = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        result = query_clip_identities(
+            session,
+            [clip],
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert result[clip] == ClipIdentity(cats=(), fallback="not_classified")
 
 
@@ -271,7 +350,13 @@ def test_query_clip_detail_maps_each_frame_to_its_model_result(db_engine: Engine
     _predict(db_engine, f1, subject_id=marcel, confidence=0.9)
     tag_frame(db_engine, f1, rufus)
     with get_session(db_engine) as session:
-        identity, frames = query_clip_detail(session, clip, unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        identity, frames = query_clip_detail(
+            session,
+            clip,
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     assert identity.cats == (NamedCat("rufus", "operator"),)
     assert frames == {
         f1: FrameIdentity(kind="model_cat", slugs=("marcel",), confidence=0.9),
@@ -279,9 +364,53 @@ def test_query_clip_detail_maps_each_frame_to_its_model_result(db_engine: Engine
     }
 
 
+def test_query_low_score_frame_names_no_cat_but_detail_keeps_its_prediction(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+    """A frame below the detector threshold names no cat in the clip, and the detail map still shows its prediction."""
+    clip, marcel, _rufus, f1, f2 = _seed_two_cat_clip(db_engine, seed_camera)
+    with get_session(db_engine) as session:
+        low = session.get(ClipFrame, f1)
+        assert low is not None
+        low.score = DETECTOR_THRESHOLD - 0.01
+    _predict(db_engine, f1, subject_id=marcel, confidence=0.95, box=[1.0, 2.0, 3.0, 4.0])
+    _predict(db_engine, f2, subject_id=None, confidence=None)
+    with get_session(db_engine) as session:
+        cats = query_cat_subjects(session)
+        identities = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, confidence_threshold=DETECTOR_THRESHOLD, cats=cats)
+        identity, frames = query_clip_detail(session, clip, unsure_threshold=THRESHOLD, confidence_threshold=DETECTOR_THRESHOLD, cats=cats)
+        lowered = query_clip_identities(session, [clip], unsure_threshold=THRESHOLD, confidence_threshold=0.10, cats=cats)
+    assert identities[clip] == ClipIdentity(cats=(), fallback="no_box")
+    assert identity == identities[clip]
+    assert frames[f1] == FrameIdentity(kind="model_cat", slugs=("marcel",), confidence=0.95)
+    assert lowered[clip].cats == (NamedCat("marcel", "model"),)
+
+
+def test_query_failed_frame_with_box_is_not_classified(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+    """A frame with a box, the version, and no prediction makes the clip not classified, not no box."""
+    clip, _marcel, _rufus, f1, f2 = _seed_two_cat_clip(db_engine, seed_camera)
+    _predict(db_engine, f1, subject_id=None, confidence=None, box=[1.0, 2.0, 3.0, 4.0])
+    _predict(db_engine, f2, subject_id=None, confidence=None)
+    with get_session(db_engine) as session:
+        identity, frames = query_clip_detail(
+            session,
+            clip,
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
+    assert identity == ClipIdentity(cats=(), fallback="not_classified")
+    assert frames[f1].kind == "not_classified"
+    assert frames[f2].kind == "no_box"
+
+
 def _count_statements(engine: Engine, clip_ids: list[int]) -> int:
     with recorded_statements(engine) as statements, get_session(engine) as session:
-        _ = query_clip_identities(session, clip_ids, unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        _ = query_clip_identities(
+            session,
+            clip_ids,
+            unsure_threshold=THRESHOLD,
+            confidence_threshold=DETECTOR_THRESHOLD,
+            cats=query_cat_subjects(session),
+        )
     return len(statements)
 
 

@@ -33,7 +33,7 @@ from cat_watcher.__main__ import (
     _ReanalyzeRun,
     _run_reanalyze,
 )
-from cat_watcher.config import Config, ConfiguredSubject  # runtime: make_config callable annotation
+from cat_watcher.config import ClassifierConfig, Config, ConfiguredSubject  # runtime: make_config callable annotation
 from cat_watcher.db import Clip, ClipFrame, ClipFrameSubject, Subject, create_engine, get_session
 from cat_watcher.detector import Detector, ScoredFrame
 from cat_watcher.poller import DetectionFields
@@ -775,6 +775,78 @@ def test_reanalyze_predictions_exits_failure_when_a_frame_errors(tmp_path: Path,
     classifier = _classifier(_seed_rufus(config), predict=_failing_predict)
 
     assert _run_predictions(config, classifier, _boxed_frames(0, 1)) == _EXIT_GENERIC_FAILURE
+
+
+def test_reanalyze_predictions_limit_reaches_newer_clip_after_a_failed_one(tmp_path: Path, make_config: Callable[..., Config]) -> None:
+    """A clip that fails each run does not take the ``--limit`` budget of the next run."""
+    config = config_with_dirs(tmp_path, make_config)
+    init_schema(config.internal_root)
+    cam_id = seed_camera(config)
+    older, newer = (
+        seed_clip(
+            config,
+            camera_id=cam_id,
+            start_ts=_CLIP_START + timedelta(minutes=offset),
+            file_path=f"clips/pantry/{name}.mp4",
+            analysis_error=None,
+            detector_version=_DETECTOR_VERSION,
+        )
+        for offset, name in ((0, "older"), (1, "newer"))
+    )
+    for name in ("older", "newer"):
+        _ = _ensure_clip_file(config, f"clips/pantry/{name}.mp4")
+    _seed_frames_with_version(config, older, version=None, ordinals=(0,))
+    _seed_frames_with_version(config, newer, version=None, ordinals=(0,))
+    subject_id = _seed_rufus(config)
+    seen: list[str] = []
+
+    def detect(path: Path) -> _DetectResult:
+        seen.append(path.stem)
+        return _detection_fields(has_cat=True), _boxed_frames(0)
+
+    def predict(image_path: Path) -> tuple[str, float]:
+        if seen[-1] == "older":
+            return _failing_predict(image_path)
+        return _fixed_predict(image_path)
+
+    classifier = _classifier(subject_id, predict=predict)
+    assert _reanalyze_with(config, detect, classifier=classifier, predictions=True, limit=1) == _EXIT_GENERIC_FAILURE
+    assert _reanalyze_with(config, detect, classifier=classifier, predictions=True, limit=1) == 0
+    assert seen == ["older", "newer"]
+    assert _read_predictions(config, older) == [(None, None, _CLASSIFIER_VERSION)]
+    assert _read_predictions(config, newer) == [(subject_id, 0.91, _CLASSIFIER_VERSION)]
+
+
+@pytest.mark.parametrize("flags", [{"all": False}, {"all": True}], ids=["default", "all"])
+def test_reanalyze_with_classifier_configured_but_not_loaded_exits_missing_dependency(
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    capsys: pytest.CaptureFixture[str],
+    flags: dict[str, bool],
+) -> None:
+    """A ``[classifier]`` table without a loaded checkpoint stops every mode before a stored prediction is erased."""
+    config = config_with_dirs(tmp_path, make_config).model_copy(update={"classifier": ClassifierConfig(model="cats.pt")})
+    init_schema(config.internal_root)
+    _ = _ensure_clip_file(config)
+    clip_id = seed_clip(config, camera_id=seed_camera(config), analysis_error="decode failed")
+    subject_id = _seed_rufus(config)
+    _seed_frames_with_version(config, clip_id, version=_CLASSIFIER_VERSION, ordinals=(0,))
+    engine = create_engine(f"sqlite:///{config.internal_root / 'cat_watcher.sqlite'}")
+    try:
+        with get_session(engine) as session:
+            frame = session.scalars(select(ClipFrame).where(ClipFrame.clip_id == clip_id)).one()
+            frame.predicted_subject_id = subject_id
+            frame.prediction_confidence = 0.91
+    finally:
+        engine.dispose()
+
+    exit_code = _reanalyze_with(config, _returning(_detection_fields(has_cat=True), _boxed_frames(0)), classifier=None, **flags)
+
+    assert exit_code == _EXIT_MISSING_DEPENDENCY
+    captured = capsys.readouterr()
+    assert "[classifier].model" in captured.err
+    assert not any(t in captured.err + captured.out for t in _TRIPWIRES)
+    assert _read_predictions(config, clip_id) == [(subject_id, 0.91, _CLASSIFIER_VERSION)]
 
 
 def test_reanalyze_predictions_cannot_combine_with_all() -> None:

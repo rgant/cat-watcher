@@ -199,6 +199,10 @@ def update_camera_state_failure(  # noqa: PLR0913  # state-update sibling of upd
     cam.poll_error = error
 
 
+# Derived from the model, so a new ``clock_*`` column is saved without an edit here.
+_CLOCK_COLUMNS: tuple[str, ...] = tuple(col.key for col in Camera.__table__.columns if col.key.startswith("clock_"))
+
+
 def _save_clock_state(session: Session, db_camera: Camera) -> None:
     """Copy the clock fields from ``db_camera`` to its row.
 
@@ -209,10 +213,8 @@ def _save_clock_state(session: Session, db_camera: Camera) -> None:
     if cam is None:
         msg = f"camera {db_camera.id!r} not found"
         raise ValueError(msg)
-    cam.clock_drift_seconds = db_camera.clock_drift_seconds
-    cam.clock_checked_at = db_camera.clock_checked_at
-    cam.clock_correction_streak = db_camera.clock_correction_streak
-    cam.clock_ntp_enabled = db_camera.clock_ntp_enabled
+    for column in _CLOCK_COLUMNS:
+        setattr(cam, column, getattr(db_camera, column))
 
 
 def _utc_now() -> datetime:
@@ -346,7 +348,7 @@ def detection_fields_for(detector: Detector | None, clip_full: Path) -> Detectio
 
 
 @dataclass(frozen=True)
-class IngestContext:  # pylint: disable=too-many-instance-attributes  # flat per-camera state bag; the rule targets behavior-rich classes, not data containers
+class IngestContext:  # pylint: disable=too-many-instance-attributes  # flat per-camera state bag. The rule targets behavior-rich classes, not data containers
     """Per-camera state shared by the poller and ``import_local`` per-clip pipelines."""
 
     engine: Engine
@@ -602,12 +604,16 @@ def _sync_camera_clock(
     *,
     threshold_seconds: int,
     now: datetime,
+    read_only: bool = False,
 ) -> timedelta | None:
     """Measure the camera clock, correct it past ``threshold_seconds``, and record what happened.
 
     Returns the size of a correction that verifiably held, which the caller uses to widen this
     tick's query window. Returns ``None`` when no correction was needed, when the camera would not
     answer, or when the write did not take.
+
+    ``read_only`` measures the drift and logs it, but never writes the camera clock. ``--list-only``
+    uses it, because that mode changes no state.
 
     Never raises. A camera that cannot be clock-checked is still worth polling, so every failure
     here is logged and swallowed — the same contract clip-level failures follow.
@@ -627,6 +633,10 @@ def _sync_camera_clock(
     db_camera.clock_checked_at = now
     if abs(drift) <= timedelta(seconds=threshold_seconds):
         db_camera.clock_correction_streak = 0
+        return None
+
+    if read_only:
+        logger.warning("camera %s clock is off by %+.1fs, not corrected in read-only mode", db_camera.name, drift.total_seconds())
         return None
 
     db_camera.clock_correction_streak += 1
@@ -732,6 +742,7 @@ def _poll_camera(  # noqa: PLR0913  # pylint: disable=too-many-locals  # orchest
                 db_camera,
                 threshold_seconds=config.poller.clock_drift_threshold_seconds,
                 now=now,
+                read_only=args.list_only,
             )
             if correction is not None:
                 # Recordings already on the camera keep the stamps they were written with, so they
@@ -910,7 +921,7 @@ def ensure_db_camera(engine: Engine, cam_cfg: CameraConfig) -> Camera:
         return cam
 
 
-def run_tick(  # noqa: PLR0913  # pylint: disable=too-many-locals  # tick orchestration; each kw-only arg is an independent input, same rationale as _poll_camera
+def run_tick(  # noqa: PLR0913  # pylint: disable=too-many-locals  # tick orchestration. Each kw-only arg is an independent input, same rationale as _poll_camera
     *,
     config: Config,
     args: PollerArgs,
@@ -967,6 +978,7 @@ def run_tick(  # noqa: PLR0913  # pylint: disable=too-many-locals  # tick orches
                         now=poll_started_at,
                         advance_cursor=False,
                     )
+                    _save_clock_state(session, db_camera)
                 _emit_tick_log_unexpected(cam_cfg=cam_cfg, cursor=cursor_before, exc=exc)
             continue
         _print_camera_summary(cam_cfg=cam_cfg, outcome=outcome, list_only=args.list_only)
@@ -1006,8 +1018,8 @@ def run_tick(  # noqa: PLR0913  # pylint: disable=too-many-locals  # tick orches
         report = retention.sweep(engine=engine, storage_root=config.storage_root, retention=config.retention, now=now)
         _print_retention_summary(report)
         with get_session(engine) as session:
-            upsert_heartbeat(session, agent_name=_AGENT_NAME, now=now)
-        _check_alerts_stuck(config=config, engine=engine, now=now)
+            upsert_heartbeat(session, agent_name=_AGENT_NAME, now=clock())
+        _check_alerts_stuck(config=config, engine=engine, now=clock())
 
     _emit_classifier_tick_log(classifier)
 

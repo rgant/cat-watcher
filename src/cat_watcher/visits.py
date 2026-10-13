@@ -1,7 +1,7 @@
 """Group cat clips into visits.
 
-A visit is a run of clips of one named cat on one camera. A clip joins the visit of the previous
-clip if its start is less than ``VISIT_GAP`` after the end of that clip. The rule lives here and
+A visit is a run of clips of one named cat on one camera. A clip joins the open visit if its start
+is less than ``VISIT_GAP`` after the latest end of a clip in that visit. The rule lives here and
 nowhere else. The stats and the alerts call these functions.
 
 A visit belongs to a window only if its first clip starts in the window. A clip in the window can
@@ -20,7 +20,7 @@ from cat_watcher.db import Clip, ClipLabelSummary
 from cat_watcher.identity import query_clip_identities
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
     from sqlalchemy import ColumnElement
@@ -35,10 +35,10 @@ __all__ = (
     "CatClip",
     "Visit",
     "group_visits",
-    "last_visits_for",
-    "query_cat_clips",
-    "query_last_visits",
+    "last_visits_in_retention",
     "query_visits",
+    "visits_for",
+    "visits_since",
 )
 
 VISIT_GAP = timedelta(minutes=2)
@@ -49,7 +49,7 @@ _ONE_TICK = timedelta(microseconds=1)
 
 @dataclass(frozen=True)
 class Visit:
-    """One cat on one camera, from the start of its first clip to the end of its last clip."""
+    """One cat on one camera, from the start of its first clip to the latest end of its clips."""
 
     slug: str
     camera_id: int
@@ -69,44 +69,25 @@ class CatClip:
     identity: ClipIdentity
 
 
-def query_cat_clips(
-    session: Session,
-    *,
-    since: datetime,
-    until: datetime,
-    unsure_threshold: float,
-    cats: Sequence[Subject],
-) -> list[CatClip]:
-    """Return every cat clip with ``since <= start_ts < until``, oldest first, with its identity.
-
-    ``cats`` comes from :func:`cat_watcher.identity.query_cat_subjects`.
-    The number of queries is fixed.
-    """
-    return _read_cat_clips(session, (Clip.start_ts >= since, Clip.start_ts < until), unsure_threshold=unsure_threshold, cats=cats)
-
-
-def query_visits(
-    session: Session,
-    *,
-    since: datetime,
-    until: datetime,
-    unsure_threshold: float,
-    cats: Sequence[Subject],
-) -> dict[str, list[Visit]]:
+def query_visits(session: Session, config: Config, *, since: datetime, until: datetime, cats: Sequence[Subject]) -> dict[str, list[Visit]]:
     """Map each named cat to its visits that start in ``since <= start_ts < until``, oldest first.
 
     The read includes a clip that ends less than ``VISIT_GAP`` before ``since``. Thus a clip in the
-    window that continues an earlier visit joins that visit, and the visit drops out.
-    The number of queries is fixed.
+    window that continues an earlier visit joins that visit, and the visit drops out. The identity
+    thresholds come from ``config``. The number of queries is fixed.
     """
-    clips = _read_cat_clips(
-        session,
-        (Clip.end_ts >= since - VISIT_GAP, Clip.start_ts < until),
-        unsure_threshold=unsure_threshold,
-        cats=cats,
-    )
+    clips = _read_cat_clips(session, config, (Clip.end_ts >= since - VISIT_GAP, Clip.start_ts < until), cats=cats)
+    return visits_since(group_visits(clips), since)
+
+
+def visits_since(visits_by_slug: Mapping[str, Sequence[Visit]], since: datetime) -> dict[str, list[Visit]]:
+    """Keep the visits that start at or after ``since``, and drop a cat that has none left.
+
+    This is the window rule of every visit window. If ``visits_by_slug`` comes from a read that
+    starts at or before ``since``, the result equals a read that starts at ``since``.
+    """
     in_window: dict[str, list[Visit]] = {}
-    for slug, visits in group_visits(clips).items():
+    for slug, visits in visits_by_slug.items():
         kept = [visit for visit in visits if visit.start_ts >= since]
         if kept:
             in_window[slug] = kept
@@ -115,9 +96,9 @@ def query_visits(
 
 def _read_cat_clips(
     session: Session,
+    config: Config,
     window: tuple[ColumnElement[bool], ...],
     *,
-    unsure_threshold: float,
     cats: Sequence[Subject],
 ) -> list[CatClip]:
     """Return the cat clips that match every condition in ``window``, oldest first, with identities."""
@@ -127,7 +108,13 @@ def _read_cat_clips(
         .where(ClipLabelSummary.effective_has_cat, *window)
         .order_by(Clip.start_ts, Clip.id),
     ).all()
-    identities = query_clip_identities(session, [row[0] for row in rows], unsure_threshold=unsure_threshold, cats=cats)
+    identities = query_clip_identities(
+        session,
+        [row[0] for row in rows],
+        unsure_threshold=active_unsure_threshold(config),
+        confidence_threshold=config.detector.confidence_threshold,
+        cats=cats,
+    )
     return [
         CatClip(clip_id=clip_id, camera_id=camera_id, start_ts=start_ts, end_ts=end_ts, identity=identities[clip_id])
         for clip_id, camera_id, start_ts, end_ts in rows
@@ -150,56 +137,50 @@ def group_visits(clips: Sequence[CatClip]) -> dict[str, list[Visit]]:
 
 
 def _split_run(slug: str, camera_id: int, run: Sequence[CatClip]) -> list[Visit]:
-    """Split the oldest-first clips of one cat on one camera at each gap of ``VISIT_GAP`` or more."""
-    groups: list[list[CatClip]] = []
+    """Split the oldest-first clips of one cat on one camera at each gap of ``VISIT_GAP`` or more.
+
+    The gap starts at the latest end in the visit so far, not at the end of the previous clip. A
+    short clip inside a long clip thus cannot split the visit. This also makes a split depend only
+    on the clips that end less than ``VISIT_GAP`` before it, which :func:`query_visits` reads.
+    """
+    groups: list[tuple[list[CatClip], datetime]] = []
     for clip in run:
-        if groups and clip.start_ts - groups[-1][-1].end_ts < VISIT_GAP:
-            groups[-1].append(clip)
+        if groups and clip.start_ts - groups[-1][1] < VISIT_GAP:
+            members, end = groups[-1]
+            members.append(clip)
+            groups[-1] = (members, max(end, clip.end_ts))
         else:
-            groups.append([clip])
+            groups.append(([clip], clip.end_ts))
     return [
         Visit(
             slug=slug,
             camera_id=camera_id,
-            start_ts=group[0].start_ts,
-            end_ts=group[-1].end_ts,
-            clip_ids=tuple(clip.clip_id for clip in group),
+            start_ts=members[0].start_ts,
+            end_ts=end,
+            clip_ids=tuple(clip.clip_id for clip in members),
         )
-        for group in groups
+        for members, end in groups
     ]
 
 
-def query_last_visits(
-    session: Session,
-    *,
-    now: datetime,
-    retention_days: int,
-    unsure_threshold: float,
-    cats: Sequence[Subject],
-) -> dict[str, Visit]:
+def visits_for(session: Session, config: Config, *, now: datetime, since: datetime, cats: Sequence[Subject]) -> dict[str, list[Visit]]:
+    """Map each cat to its visits from the earlier of ``since`` and the retention start, through ``now``.
+
+    One read serves the last visit and a window that starts at ``since``. Pass the result to
+    :func:`last_visits_in_retention` and to :func:`visits_since`. ``now`` is in the read, so a clip
+    that starts at ``now`` counts.
+    """
+    return query_visits(session, config, since=min(since, _retention_start(config, now)), until=now + _ONE_TICK, cats=cats)
+
+
+def last_visits_in_retention(visits_by_slug: Mapping[str, Sequence[Visit]], config: Config, *, now: datetime) -> dict[str, Visit]:
     """Map each cat with a visit in the retention window to its newest visit.
 
-    The number of queries is fixed.
+    ``visits_by_slug`` comes from :func:`visits_for`. The stats and the INACTIVITY rule call this,
+    so both use the same last visit.
     """
-    visits = query_visits(
-        session,
-        since=now - timedelta(days=retention_days),
-        until=now + _ONE_TICK,
-        unsure_threshold=unsure_threshold,
-        cats=cats,
-    )
-    return {slug: found[-1] for slug, found in visits.items()}
+    return {slug: found[-1] for slug, found in visits_since(visits_by_slug, _retention_start(config, now)).items()}
 
 
-def last_visits_for(session: Session, config: Config, *, now: datetime, cats: Sequence[Subject]) -> dict[str, Visit]:
-    """Map each cat to its last visit, with the retention window and the active threshold of ``config``.
-
-    The stats and the INACTIVITY rule call this, so both use the same last visit.
-    """
-    return query_last_visits(
-        session,
-        now=now,
-        retention_days=config.retention.clip_days,
-        unsure_threshold=active_unsure_threshold(config),
-        cats=cats,
-    )
+def _retention_start(config: Config, now: datetime) -> datetime:
+    return now - timedelta(days=config.retention.clip_days)

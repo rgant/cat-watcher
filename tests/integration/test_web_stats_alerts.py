@@ -1207,3 +1207,28 @@ def test_stats_per_cat_rows_read_a_fixed_number_of_queries(
 
     assert len(rows) == 4
     assert len(large) == len(small)
+
+
+def test_stats_per_cat_rows_read_the_visit_clips_once(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+) -> None:
+    """One read of the cat clips serves the 7-day counts and the last visit."""
+    internal_root, storage_root = storage_dirs
+    config = make_config(internal_root, storage_root)
+    now = datetime(2026, 10, 12, 20, 0, tzinfo=UTC)
+    today = now.astimezone(_DISPLAY_TZ).date()
+    engine = _stats_engine(internal_root)
+    try:
+        cam_id = _seed_pantry(engine)
+        cat_id = seed_cat_subject(engine)
+        _ = _add_cat_clip(engine, cam_id, cat_id, _local_noon(today) - timedelta(days=10))
+        _ = _add_cat_clip(engine, cam_id, cat_id, _local_noon(today) - timedelta(days=1))
+        with get_session(engine) as session, recorded_statements(engine) as statements:
+            rows = _cat_stat_rows(session, config=config, now=now, camera_display_by_id={})
+    finally:
+        engine.dispose()
+
+    assert len([statement for statement in statements if "clips.end_ts >=" in statement]) == 1
+    assert _counts(rows[0]) == [0, 0, 0, 0, 0, 1, 0]
+    assert (today - timedelta(days=1)).isoformat() in str(rows[0]["last_visit"])

@@ -43,6 +43,7 @@ from cat_watcher.poller import (
     _parse_iso_datetime,
     _poll_camera,
     _resolve_window,
+    _save_clock_state,
     detection_fields_for,
     extract_thumbnail,
     pid_lock,
@@ -1141,6 +1142,139 @@ def test_tick_saves_clock_streak_for_the_camera_clock_alert(
         assert cam.clock_correction_streak == 2
         assert cam.clock_checked_at == _NOW + timedelta(minutes=5)
         assert cam.clock_ntp_enabled is True
+
+
+def test_list_only_never_writes_the_camera_clock(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--list-only`` changes no state, so a drifted camera clock stays as it is."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    last_polled = _NOW - timedelta(minutes=5)
+    _ = seed_camera(db_engine, last_polled_at=last_polled)
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-7200.0))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(list_only=True), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
+
+    assert not stub.set_time_calls
+    assert stub.clock.drift_seconds == -7200.0
+    assert stub.calls == [(last_polled, _NOW)]
+
+
+def test_list_only_tick_leaves_clock_fields_in_the_db_untouched(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``--list-only`` run neither writes the camera clock nor saves clock fields."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5), clock_correction_streak=2)
+    stub = _StubAmcrestClient(clock=_StubClock(drift_seconds=-7200.0))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(list_only=True), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
+
+    assert not stub.set_time_calls
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.clock_correction_streak == 2
+        assert cam.clock_checked_at is None
+
+
+def test_tick_saves_clock_streak_when_the_poll_raises(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poll that fails after the clock sync still saves the streak, so ``CAMERA_CLOCK`` can fire."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    cam_id = seed_camera(db_engine, last_polled_at=_NOW - timedelta(minutes=5), clock_correction_streak=2)
+    stub = _StubAmcrestClient(
+        raises=(OSError("disk full"),),
+        clock=_StubClock(drift_seconds=-7200.0, write_holds=False, ntp_enabled=True),
+    )
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=frozen_clock(_NOW))
+
+    with get_session(db_engine) as session:
+        cam = session.get(Camera, cam_id)
+        assert cam is not None
+        assert cam.poll_status == PollStatus.ERROR
+        assert cam.clock_correction_streak == 3
+        assert cam.clock_checked_at == _NOW
+        assert cam.clock_ntp_enabled is True
+
+
+def test_save_clock_state_covers_every_clock_column(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+    """A new ``clock_*`` column on ``Camera`` must reach the DB, so ``_save_clock_state`` cannot skip it."""
+    cam_id = seed_camera(db_engine)
+    clock_columns = {col.key: col.type.python_type for col in Camera.__table__.columns if col.key.startswith("clock_")}
+    changed: dict[type, object] = {bool: True, int: 7, float: 1.5, datetime: _NOW}
+    with get_session(db_engine) as session:
+        detached = session.get(Camera, cam_id)
+        assert detached is not None
+        session.expunge(detached)
+    for name, python_type in clock_columns.items():
+        setattr(detached, name, changed[python_type])
+
+    with get_session(db_engine) as session:
+        _save_clock_state(session, detached)
+
+    with get_session(db_engine) as session:
+        saved = session.get(Camera, cam_id)
+        assert saved is not None
+        for name in clock_columns:
+            assert getattr(saved, name) == getattr(detached, name), name
+
+
+def test_tick_writes_heartbeat_at_the_time_of_the_write(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tick that outlasts the stuck threshold must not write a heartbeat that is already stale."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    host = _HostClock(_NOW)
+    stub = _CorrectCameraClient(host, poll_time=timedelta(hours=2))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=host)
+
+    with get_session(db_engine) as session:
+        heartbeat = session.get(Heartbeat, "poller")
+        assert heartbeat is not None
+        assert heartbeat.last_seen_at == _NOW + timedelta(hours=2)
+
+
+def test_tick_judges_alerts_heartbeat_against_the_time_of_the_check(
+    db_engine: Engine,
+    tmp_path: Path,
+    make_config: Callable[..., Config],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An alerts heartbeat that went stale during a long tick still fires ``ALERTS_STUCK``."""
+    config = _disabled_alerts_config(make_config, tmp_path, tmp_path)
+    with get_session(db_engine) as session:
+        session.add(Heartbeat(agent_name="alerts", last_seen_at=_NOW - timedelta(minutes=5)))
+    host = _HostClock(_NOW)
+    stub = _CorrectCameraClient(host, poll_time=timedelta(hours=2))
+    monkeypatch.setattr("cat_watcher.poller.AmcrestClient", stub)
+
+    run_tick(config=config, args=PollerArgs(), engine=db_engine, detector=None, clock=host)
+
+    with get_session(db_engine) as session:
+        assert session.query(AlertSent).filter(AlertSent.alert_type == AlertType.ALERTS_STUCK).count() == 1
 
 
 def test_safety_net_not_triggered_at_exact_threshold(

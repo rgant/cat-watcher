@@ -1360,7 +1360,7 @@ def test_poller_ingests_clip_when_predict_raises(
     synthetic_clip_path: Path,
     make_config: Callable[[Path, Path], Config],
 ) -> None:
-    """A failing model fails neither the clip nor the camera tick. Boxed frames stay unclassified."""
+    """A failing model fails neither the clip nor the camera tick. Boxed frames get no prediction."""
     scored = scored_frames_with_boxes(np.zeros((180, 320, 3), dtype=np.uint8))
     db_path, _, classifier = _tick_with_classifier(
         config=make_config(*storage_dirs),
@@ -1375,7 +1375,8 @@ def test_poller_ingests_clip_when_predict_raises(
     try:
         with get_session(engine) as session:
             clip = session.query(Clip).one()
-            assert [f.classifier_version for f in clip.frames] == [None, _CLASSIFIER_VERSION, None]
+            assert [f.classifier_version for f in clip.frames] == [_CLASSIFIER_VERSION] * 3
+            assert [f.predicted_subject_id for f in clip.frames] == [None] * 3
             camera = session.query(Camera).one()
             assert camera.poll_status == PollStatus.OK
     finally:

@@ -30,6 +30,7 @@ from sqlalchemy.engine import Engine
 
 from cat_watcher.db import Camera, Clip, ClipFrame, Subject, create_engine, get_session
 from cat_watcher.identity import ClipIdentity
+from cat_watcher.web import clips_routes
 from cat_watcher.web.clips_routes import _identity_fields
 
 if TYPE_CHECKING:
@@ -1484,6 +1485,57 @@ def test_clips_list_progress_indicator_respects_camera_filter(
 
     assert response.status_code == 200
     assert "1 / 1 reviewed" in response.text
+
+
+@pytest.fixture
+def all_but_newest_reviewed(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> Config:
+    """Seed clips one hour apart on one camera, mark all but the newest reviewed, and return the config."""
+    internal_root, storage_root = storage_dirs
+    _ = _seed_camera_and_clip(db_session_factory, internal_root=internal_root, storage_root=storage_root)
+    for index in range(2):
+        start_ts = DEFAULT_START_TS + timedelta(hours=index + 1)
+        _seed_extra_clip(db_session_factory, internal_root, source_filename=f"extra{index}.mp4", start_ts=start_ts, has_cat=True)
+    engine = _clips_engine_for(internal_root)
+    try:
+        with get_session(engine) as session:
+            clip_ids = list(session.scalars(select(Clip.id).order_by(Clip.start_ts.desc()).offset(1)))
+        for clip_id in clip_ids:
+            stamp_reviewed_at(engine, clip_id, datetime(2026, 5, 2, 12, 0, 0, tzinfo=UTC))
+    finally:
+        engine.dispose()
+    return make_config(internal_root, storage_root)
+
+
+@pytest.mark.parametrize(("reviewed", "page_count"), [("any", 3), ("yes", 2), ("no", 1)])
+def test_clips_list_sizes_the_pages_from_the_two_progress_counts(
+    all_but_newest_reviewed: Config,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    monkeypatch: pytest.MonkeyPatch,
+    reviewed: str,
+    page_count: int,
+) -> None:
+    """The list runs the two progress COUNT statements and no third one, and the page count matches the filter."""
+    monkeypatch.setattr(clips_routes, "_CLIPS_PAGE_SIZE", 1)
+    counts: list[str] = []
+
+    def _record(_conn: object, _cursor: object, statement: str, *_rest: object) -> None:
+        if "count(" in statement.lower():
+            counts.append(statement)
+
+    with alembic_web_test_client(all_but_newest_reviewed) as client:
+        event.listen(Engine, "before_cursor_execute", _record)
+        try:
+            response = client.get(f"/clips?reviewed={reviewed}", headers=AUTH_HEADER)
+        finally:
+            event.remove(Engine, "before_cursor_execute", _record)
+
+    assert response.status_code == 200
+    assert f"Clips, page 1 of {page_count}." in response.text
+    assert len(counts) == 2
 
 
 def test_clips_list_empty_state_when_no_matching_clips(

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from db_helpers import add_clip, seed_cat_subject, tag_clip_frame
+from db_helpers import add_clip, recorded_statements, seed_cat_subject, tag_clip_frame
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
@@ -285,7 +285,6 @@ def test_cat_frequency_counts_visits_over_all_cameras() -> None:
         camera_name_by_id=_CAMERA_NAMES,
         public_url=_URL,
         tz_name=_TZ,
-        now=_NOW,
     )
 
     assert cand is not None
@@ -295,8 +294,8 @@ def test_cat_frequency_counts_visits_over_all_cameras() -> None:
     assert "Pantry, Bathroom" in cand.content.body
 
 
-def test_cat_frequency_ignores_visits_that_start_before_the_window() -> None:
-    """A visit that starts before ``window_hours`` does not count."""
+def test_cat_frequency_counts_every_visit_it_gets() -> None:
+    """The caller owns the window. A visit that starts before ``window_hours`` still counts."""
     visits = [_visit(_NOW - timedelta(hours=7)), _visit(_NOW - timedelta(hours=2), clip_ids=(2,))]
 
     cand = evaluate_cat_frequency(
@@ -307,10 +306,9 @@ def test_cat_frequency_ignores_visits_that_start_before_the_window() -> None:
         camera_name_by_id=_CAMERA_NAMES,
         public_url=_URL,
         tz_name=_TZ,
-        now=_NOW,
     )
 
-    assert cand is None
+    assert cand is not None
 
 
 def test_tick_fires_cat_inactivity_for_stale_cat_only(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
@@ -329,6 +327,21 @@ def test_tick_fires_cat_inactivity_for_stale_cat_only(db_engine: Engine, cfg: Co
 
     rows = _cat_alerts(db_engine, AlertType.INACTIVITY)
     assert [(r.subject_id, r.camera_id) for r in rows] == [(marcel, None)]
+
+
+def test_tick_reads_the_visit_clips_once(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:
+    """One read of the cat clips serves the INACTIVITY rule and the FREQUENCY rule of every cat."""
+    cam_id = seed_camera(db_engine)
+    marcel = seed_cat_subject(db_engine)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=14), cat_id=marcel)
+    _ = _seed_cat_clip(db_engine, cam_id, _NOW - timedelta(hours=1), cat_id=marcel)
+
+    with recorded_statements(db_engine) as statements:
+        run_alerts_tick(config=_with_frequency(cfg, threshold=1), engine=db_engine, now=_NOW)
+
+    assert len([statement for statement in statements if "clips.end_ts >=" in statement]) == 1
+    assert [r.subject_id for r in _cat_alerts(db_engine, AlertType.FREQUENCY)] == [marcel]
+    assert not _cat_alerts(db_engine, AlertType.INACTIVITY)
 
 
 def test_tick_unknown_cat_clip_does_not_reset_cat_inactivity(db_engine: Engine, cfg: Config, seed_camera: Callable[..., int]) -> None:

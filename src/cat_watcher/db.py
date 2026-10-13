@@ -272,7 +272,8 @@ class ClipFrame(Base):
     # and "no box" then has two forms.
     bbox_xyxy: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     # A prediction is disposable, so a subject delete clears it. ``classifier_version`` is NULL when
-    # the frame is not classified. A set version with no subject means "no cat box found".
+    # the frame is not classified. A set version with no subject means "no cat box found". If
+    # ``bbox_xyxy`` is also set, the classifier failed on the box.
     predicted_subject_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("subjects.id", name="fk_clip_frames_predicted_subject_id_subjects", ondelete="SET NULL"),

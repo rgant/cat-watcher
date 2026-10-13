@@ -47,7 +47,7 @@ from cat_watcher.alert_templates import (
     render_storage_unavailable,
     render_web_flapping,
 )
-from cat_watcher.config import active_unsure_threshold, load_config
+from cat_watcher.config import load_config
 from cat_watcher.db import (
     AgentStart,
     AlertSent,
@@ -63,7 +63,7 @@ from cat_watcher.logging_setup import setup_agent_logging
 from cat_watcher.notifier import EmailResult, NotifResult, send_email, send_macos_notification
 from cat_watcher.storage import ensure_storage_layout, storage_available
 from cat_watcher.subjects_sync import sync_subjects_at_startup
-from cat_watcher.visits import last_visits_for, query_visits
+from cat_watcher.visits import last_visits_in_retention, visits_for, visits_since
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -314,7 +314,7 @@ def evaluate_cat_inactivity(  # noqa: PLR0913  # rule reads one last visit again
     return AlertCandidate(alert_type=AlertType.INACTIVITY, camera_id=None, subject_id=cat.id, content=content)
 
 
-def evaluate_cat_frequency(  # noqa: PLR0913  # rule counts visits against a window + threshold, names their cameras, formats with tz + clock
+def evaluate_cat_frequency(  # noqa: PLR0913  # rule counts visits against a window + threshold, names their cameras, formats with tz
     *,
     cat: Subject,
     visits: Sequence[Visit],
@@ -323,21 +323,23 @@ def evaluate_cat_frequency(  # noqa: PLR0913  # rule counts visits against a win
     camera_name_by_id: Mapping[int, str],
     public_url: str,
     tz_name: str,
-    now: datetime,
 ) -> AlertCandidate | None:
-    """Evaluate the per-cat ``FREQUENCY`` rule: the visits of ``cat`` that start in the window, over all cameras."""
-    cutoff = now - timedelta(hours=window_hours)
-    in_window = sorted((visit for visit in visits if visit.start_ts >= cutoff), key=lambda visit: visit.start_ts)
-    if len(in_window) < threshold:
+    """Evaluate the per-cat ``FREQUENCY`` rule: the visits of ``cat`` in the window, over all cameras.
+
+    ``visits`` must hold only the visits of the window, oldest first, as
+    :func:`cat_watcher.visits.visits_since` gives them. This rule counts every visit it gets.
+    ``window_hours`` only goes into the message.
+    """
+    if len(visits) < threshold:
         return None
-    camera_ids = dict.fromkeys(visit.camera_id for visit in in_window)
+    camera_ids = dict.fromkeys(visit.camera_id for visit in visits)
     content = render_cat_frequency(
         cat_display_name=cat.display_name,
-        count=len(in_window),
+        count=len(visits),
         window_hours=window_hours,
         threshold=threshold,
-        first_visit_start=in_window[0].start_ts,
-        latest_visit_start=in_window[-1].start_ts,
+        first_visit_start=visits[0].start_ts,
+        latest_visit_start=visits[-1].start_ts,
         camera_names=[camera_name_by_id[camera_id] for camera_id in camera_ids],
         public_url=public_url,
         tz_name=tz_name,
@@ -636,14 +638,10 @@ def _cat_candidates(
     The number of queries is fixed, independent of the cat count and the clip count.
     """
     cats = query_cat_subjects(session)
-    last_visits = last_visits_for(session, config, now=now, cats=cats)
-    window_visits = query_visits(
-        session,
-        since=now - timedelta(hours=config.alerts.frequency_window_hours),
-        until=now,
-        unsure_threshold=active_unsure_threshold(config),
-        cats=cats,
-    )
+    window_start = now - timedelta(hours=config.alerts.frequency_window_hours)
+    visits = visits_for(session, config, now=now, since=window_start, cats=cats)
+    last_visits = last_visits_in_retention(visits, config, now=now)
+    window_visits = visits_since(visits, window_start)
     for cat in cats:
         if cat.archived_at is not None:
             continue
@@ -666,7 +664,6 @@ def _cat_candidates(
             camera_name_by_id=camera_name_by_id,
             public_url=config.web.public_url,
             tz_name=config.web.display_timezone,
-            now=now,
         )
         if fc is not None:
             yield fc

@@ -73,17 +73,27 @@ def _before(clip: Clip) -> ColumnElement[bool]:
     return tuple_(Clip.start_ts, Clip.id) < tuple_(clip.start_ts, clip.id)
 
 
-def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: ClipsFilter, filter_qs: str, *, display_tz: tzinfo) -> tuple[str, str]:
-    """Return ``(prev_url, next_url)`` scoped to filter ``f``, in the list order of ``f.sort``.
+class _NavUrls(NamedTuple):
+    """The prev, next, and back links of the detail page. An empty string selects the legacy links."""
+
+    prev_url: str
+    next_url: str
+    back_url: str
+
+
+def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: ClipsFilter, *, display_tz: tzinfo) -> _NavUrls:
+    """Return the nav links scoped to filter ``f``, in the list order of ``f.sort``.
 
     ``prev_url`` points to the row above ``clip`` in the list and ``next_url`` to the row below. So
-    under ``newest`` prev is the newer neighbor, and under ``oldest`` it is the older neighbor.
+    under ``newest`` prev is the newer neighbor, and under ``oldest`` it is the older neighbor. The
+    neighbor links carry no ``page``, because a neighbor can be on a different page.
 
-    When no neighboring clip satisfies the filter, the URL falls back to ``/clips?{filter_qs}`` so
-    the keyboard handler's click returns the operator to the queue index.
+    ``back_url`` opens the list page that holds ``clip``, from :func:`_back_url`. When no neighbor
+    satisfies the filter, the prev or next URL is ``back_url``, so the keyboard handler's click
+    returns the operator to the queue index.
     """
     base: Select[int] = apply_clip_filters(select(Clip.id), f, display_tz=display_tz)
-    fallback = f"/clips?{filter_qs}"
+    nav_qs = build_filter_qs(replace(f, page=None))
 
     newer_stmt = base.where(_after(clip)).order_by(*_list_order("oldest")).limit(1)
     older_stmt = base.where(_before(clip)).order_by(*_list_order("newest")).limit(1)
@@ -92,24 +102,37 @@ def _build_filtered_nav_urls(engine: Engine, clip: Clip, f: ClipsFilter, filter_
     with get_session(engine) as session:
         prev_id = session.scalar(prev_stmt)
         next_id = session.scalar(next_stmt)
+        back_url = _back_url(session, clip, f, display_tz=display_tz)
 
-    return (
-        f"/clips/{prev_id}?{filter_qs}" if prev_id is not None else fallback,
-        f"/clips/{next_id}?{filter_qs}" if next_id is not None else fallback,
+    return _NavUrls(
+        prev_url=f"/clips/{prev_id}?{nav_qs}" if prev_id is not None else back_url,
+        next_url=f"/clips/{next_id}?{nav_qs}" if next_id is not None else back_url,
+        back_url=back_url,
     )
 
 
-def _resolve_nav_urls(engine: Engine, clip: Clip, parsed: ParsedClipsFilter, *, display_tz: tzinfo) -> tuple[str, str]:
-    """Return ``(prev_url, next_url)`` for the detail-page nav, scoped to the request filter if present.
+def _back_url(session: Session, clip: Clip, f: ClipsFilter, *, display_tz: tzinfo) -> str:
+    """Return the URL of the list page that holds ``clip`` under filter ``f``.
 
-    Falls back to empty strings when the querystring carries no recognized filter key — the template
-    then renders the legacy ``url_for``-based links using ``prev_clip_id`` / ``next_clip_id`` from
-    the data object.
+    One COUNT of the filtered rows above ``clip`` in the list order gives the page. If ``clip`` does
+    not match ``f``, the count still gives its place in the list order. That page holds its
+    neighbors. The list route clamps a page past the end, so this needs no total.
+    """
+    above_clip = _after(clip) if f.sort == "newest" else _before(clip)
+    rows_above = session.scalar(_count_stmt(f, display_tz=display_tz).where(above_clip)) or 0
+    return _page_url(f, rows_above // _CLIPS_PAGE_SIZE + 1)
+
+
+def _resolve_nav_urls(engine: Engine, clip: Clip, parsed: ParsedClipsFilter, *, display_tz: tzinfo) -> _NavUrls:
+    """Return the detail-page nav links of the request filter.
+
+    If the querystring has no recognized filter key, the prev and next links are empty and the back
+    link is ``/clips``. The template then renders the legacy ``url_for``-based links from
+    ``prev_clip_id`` / ``next_clip_id`` of the data object.
     """
     if not parsed.any_key_present:
-        return "", ""
-    filter_qs = build_filter_qs(parsed.clips_filter)
-    return _build_filtered_nav_urls(engine, clip, parsed.clips_filter, filter_qs, display_tz=display_tz)
+        return _NavUrls(prev_url="", next_url="", back_url="/clips")
+    return _build_filtered_nav_urls(engine, clip, parsed.clips_filter, display_tz=display_tz)
 
 
 def _button_title(subj: Subject) -> str:
@@ -269,6 +292,7 @@ async def list_clips(request: Request) -> object:
         parsed.clips_filter,
         display_tz=display_tz,
         unsure_threshold=unsure_threshold,
+        confidence_threshold=state.config.detector.confidence_threshold,
     )
     info = clips_page.page
     return state.templates.TemplateResponse(
@@ -353,10 +377,17 @@ def _identity_fields_by_clip(
     summary_by_clip: Mapping[int, ClipLabelSummary],
     *,
     unsure_threshold: float,
+    confidence_threshold: float,
 ) -> dict[int, dict[str, object]]:
     """Build the identity fields of every clip on the page with a fixed number of queries."""
     cats = query_cat_subjects(session)
-    identity_by_clip = query_clip_identities(session, [clip.id for clip in clips], unsure_threshold=unsure_threshold, cats=cats)
+    identity_by_clip = query_clip_identities(
+        session,
+        [clip.id for clip in clips],
+        unsure_threshold=unsure_threshold,
+        confidence_threshold=confidence_threshold,
+        cats=cats,
+    )
     cats_by_slug = {subj.slug: subj for subj in cats}
     return {
         clip.id: _identity_fields(
@@ -395,6 +426,25 @@ def _count_stmt(f: ClipsFilter, *, display_tz: tzinfo) -> Select[int]:
     return apply_clip_filters(select(func.count()).select_from(Clip), f, display_tz=display_tz)
 
 
+class _Progress(NamedTuple):
+    """The two progress counts of filter ``f`` with ``reviewed="any"``."""
+
+    total: int
+    reviewed: int
+
+    def list_total(self, f: ClipsFilter) -> int:
+        """Return the row count of the list of ``f``. ``reviewed`` is the only filter the counts leave out."""
+        return {"any": self.total, "yes": self.reviewed, "no": self.total - self.reviewed}[f.reviewed]
+
+
+def _progress_counts(session: Session, f: ClipsFilter, *, display_tz: tzinfo) -> _Progress:
+    """Count the clips of ``f`` with ``reviewed="any"``, and the reviewed ones among them."""
+    count_stmt = _count_stmt(replace(f, reviewed="any"), display_tz=display_tz)
+    total = session.scalar(count_stmt) or 0
+    reviewed = session.scalar(count_stmt.where(Clip.reviewed_at.is_not(None))) or 0
+    return _Progress(total, reviewed)
+
+
 class _ClipsListPage(NamedTuple):
     """One page of list rows, the page it is, and the two halves of the progress count."""
 
@@ -411,18 +461,19 @@ def _query_clips_list(
     *,
     display_tz: tzinfo,
     unsure_threshold: float,
+    confidence_threshold: float,
 ) -> _ClipsListPage:
-    """Run the page COUNT, the list query of one page, and the progress COUNT queries.
+    """Run the progress COUNT queries and the list query of one page.
 
-    The page COUNT uses the whole filter, because it sizes the list. The progress COUNT uses the
-    filter with ``reviewed="any"``. It tells how far the operator is through this camera, day, or
-    cat slice. A count scoped to ``reviewed`` cannot tell that. The reviewed half of the progress
-    comes from the same statement.
+    The progress COUNT uses the filter with ``reviewed="any"``. It tells how far the operator is
+    through this camera, day, or cat slice. A count scoped to ``reviewed`` cannot tell that. The
+    reviewed half of the progress comes from the same statement. The two halves also size the
+    list, because ``reviewed`` is the only filter that the progress count leaves out.
     """
     base_stmt = apply_clip_filters(select(Clip), f, display_tz=display_tz)
-    count_stmt = _count_stmt(replace(f, reviewed="any"), display_tz=display_tz)
     with get_session(engine) as session:
-        info = page_info(requested=f.page, total=session.scalar(_count_stmt(f, display_tz=display_tz)) or 0, page_size=_CLIPS_PAGE_SIZE)
+        progress = _progress_counts(session, f, display_tz=display_tz)
+        info = page_info(requested=f.page, total=progress.list_total(f), page_size=_CLIPS_PAGE_SIZE)
         clips = list(session.scalars(base_stmt.order_by(*_list_order(f.sort)).offset(info.offset).limit(info.limit)))
         summary_by_clip = {
             summary.clip_id: summary
@@ -431,13 +482,17 @@ def _query_clips_list(
             )
         }
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
-        total_count = session.scalar(count_stmt) or 0
-        reviewed_count = session.scalar(count_stmt.where(Clip.reviewed_at.is_not(None))) or 0
-        identity_fields = _identity_fields_by_clip(session, clips, summary_by_clip, unsure_threshold=unsure_threshold)
+        identity_fields = _identity_fields_by_clip(
+            session,
+            clips,
+            summary_by_clip,
+            unsure_threshold=unsure_threshold,
+            confidence_threshold=confidence_threshold,
+        )
         clip_rows = [
             _project_one_clip_row(clip, summary_by_clip[clip.id], cameras, identity_fields=identity_fields[clip.id]) for clip in clips
         ]
-    return _ClipsListPage(clip_rows, cameras, info, total_count, reviewed_count)
+    return _ClipsListPage(clip_rows, cameras, info, progress.total, progress.reviewed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,6 +572,7 @@ def _query_detail_identity(
     clip_id: int,
     *,
     unsure_threshold: float,
+    confidence_threshold: float,
     effective_has_cat: bool,
 ) -> _DetailIdentity:
     """Load the model results, the cats, and the clip identity fields in one session.
@@ -525,7 +581,13 @@ def _query_detail_identity(
     """
     with get_session(engine) as session:
         cats = query_cat_subjects(session)
-        identity, model_results = query_clip_detail(session, clip_id, unsure_threshold=unsure_threshold, cats=cats)
+        identity, model_results = query_clip_detail(
+            session,
+            clip_id,
+            unsure_threshold=unsure_threshold,
+            confidence_threshold=confidence_threshold,
+            cats=cats,
+        )
         cats_by_slug = {subj.slug: subj for subj in cats}
         fields = _identity_fields(identity, cats_by_slug, effective_has_cat=effective_has_cat, label_non_cat=True)
         session.expunge_all()
@@ -540,11 +602,7 @@ async def clip_detail(request: Request, clip_id: int) -> object:
     data = _query_clip_detail(state.engine, clip_id, state.config.detector.confidence_threshold)
 
     parsed = parse_clips_filter(request.query_params, camera_names=_camera_names(state.engine))
-    prev_url, next_url = _resolve_nav_urls(state.engine, data.clip, parsed, display_tz=display_tz)
-    # Carrying the filter back keeps the operator's queue alive across a round trip through a clip;
-    # without it "All clips" silently resets to the default queue.
-    filter_qs = build_filter_qs(parsed.clips_filter) if parsed.any_key_present else ""
-    all_clips_url = f"/clips?{filter_qs}" if filter_qs else "/clips"
+    nav = _resolve_nav_urls(state.engine, data.clip, parsed, display_tz=display_tz)
     prev_label, next_label = _NAV_LABELS[parsed.clips_filter.sort]
 
     label_summary = _compute_label_summary(state.engine, clip_id)
@@ -553,6 +611,7 @@ async def clip_detail(request: Request, clip_id: int) -> object:
         state.engine,
         clip_id,
         unsure_threshold=active_unsure_threshold(state.config),
+        confidence_threshold=state.config.detector.confidence_threshold,
         effective_has_cat=label_summary.effective_has_cat,
     )
     frame_tag_rows = _build_frame_tag_rows(clip_id, data.frames, data.subjects_by_kind, data.frame_memberships, identity)
@@ -566,11 +625,11 @@ async def clip_detail(request: Request, clip_id: int) -> object:
             "frames": data.frames,
             "prev_clip_id": data.prev_clip_id,
             "next_clip_id": data.next_clip_id,
-            "prev_url": prev_url,
-            "next_url": next_url,
+            "prev_url": nav.prev_url,
+            "next_url": nav.next_url,
             "prev_label": prev_label,
             "next_label": next_label,
-            "all_clips_url": all_clips_url,
+            "all_clips_url": nav.back_url,
             "filter_notice": build_ignored_notice(parsed.ignored),
             "subjects_by_kind": data.subjects_by_kind,
             "frame_memberships": data.frame_memberships,
@@ -596,6 +655,7 @@ async def clip_label_summary(request: Request, clip_id: int) -> dict[str, object
         state.engine,
         clip_id,
         unsure_threshold=active_unsure_threshold(state.config),
+        confidence_threshold=state.config.detector.confidence_threshold,
         effective_has_cat=label_summary.effective_has_cat,
     )
     identity_html = state.templates.get_template("_clip_identity.html.jinja").render(

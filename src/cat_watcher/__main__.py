@@ -17,7 +17,8 @@ Sub-commands:
 * ``reanalyze [--camera N] [--limit N] [--all | --predictions]``: re-score clips. The default
   mode selects clips whose detection failed. ``--all`` selects every clip. ``--predictions`` needs
   a loaded classifier. It selects clips that the active detector or classifier checkpoint did not
-  score. If a classifier loads, every mode classifies the frames. The command writes only detector
+  score. If a classifier loads, every mode classifies the frames. If ``[classifier]`` is set and
+  the checkpoint does not load, every mode exits before it writes. The command writes only detector
   output and frame predictions. Operator tags and ``clips.reviewed_at`` stay.
 * ``backup`` — proxy to :func:`cat_watcher.backup.run_backup` (same code path the LaunchAgent uses).
 * ``restore-backup <date>`` — copy a dated backup file onto ``<internal_root>/cat_watcher.sqlite``.
@@ -826,10 +827,12 @@ class _ReanalyzeRun:
 
 def _reanalyze(run: _ReanalyzeRun, args: _ParsedArgs) -> int:
     """Re-score the qualifying clips, print one summary line per camera, and return the exit code."""
-    if args.predictions and run.classifier is None:
+    # A re-score writes NULL predictions without a classifier. So a configured checkpoint that did
+    # not load stops every mode, and the stored predictions stay.
+    if run.classifier is None and (args.predictions or run.config.classifier is not None):
+        problem = "--predictions needs a classifier checkpoint" if args.predictions else "the [classifier] checkpoint did not load"
         print(
-            "reanalyze: --predictions needs a classifier checkpoint. "
-            "Set [classifier].model and copy the checkpoint into <internal_root>/models/.",
+            f"reanalyze: {problem}. Set [classifier].model and copy the checkpoint into <internal_root>/models/.",
             file=sys.stderr,
         )
         return _EXIT_MISSING_DEPENDENCY

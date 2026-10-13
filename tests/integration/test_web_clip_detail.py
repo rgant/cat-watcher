@@ -17,6 +17,7 @@ from sqlalchemy import event as sa_event
 
 from cat_watcher.db import Camera, Clip, ClipFrame, ClipFrameSubject, Subject, create_engine, get_session
 from cat_watcher.labels import query_cat_frame_counts
+from cat_watcher.web import clips_routes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -1223,16 +1224,19 @@ def test_filter_scoped_nav_follows_the_default_newest_sort(
     db_session_factory: Callable[[Path], AbstractContextManager[Session]],
     seed_clip: Callable[..., int],
 ) -> None:
-    """With no ``sort`` key, prev is the newer clip and next the older one. ``page`` goes along unchanged."""
+    """With no ``sort`` key, prev is the newer clip and next the older one.
+
+    The links drop the ``page`` of the request. The back link goes to the page that holds the clip.
+    """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
     _, older_id, middle_id, newer_id = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
 
     body = _sorted_nav_page(config, alembic_web_test_client, middle_id, "reviewed=no&page=3")
 
-    assert f'<a href="/clips/{newer_id}?reviewed=no&amp;page=3" rel="prev">← Newer</a>' in body
-    assert f'<a href="/clips/{older_id}?reviewed=no&amp;page=3" rel="next">Older →</a>' in body
-    assert '<a href="/clips?reviewed=no&amp;page=3">All clips</a>' in body
+    assert f'<a href="/clips/{newer_id}?reviewed=no" rel="prev">← Newer</a>' in body
+    assert f'<a href="/clips/{older_id}?reviewed=no" rel="next">Older →</a>' in body
+    assert '<a href="/clips?reviewed=no">All clips</a>' in body
 
 
 def test_filter_scoped_nav_follows_the_oldest_sort(
@@ -1244,7 +1248,7 @@ def test_filter_scoped_nav_follows_the_oldest_sort(
 ) -> None:
     """With ``sort=oldest``, prev is the older clip and next the newer one, and the labels say so.
 
-    The ``page`` value goes along unchanged. The links do not compute the page of the neighbor.
+    The links drop the ``page`` of the request.
     """
     internal_root, storage_root = storage_dirs
     config = make_config(internal_root, storage_root)
@@ -1252,7 +1256,7 @@ def test_filter_scoped_nav_follows_the_oldest_sort(
 
     body = _sorted_nav_page(config, alembic_web_test_client, middle_id, "reviewed=no&sort=oldest&page=3")
 
-    carried = "reviewed=no&amp;sort=oldest&amp;page=3"
+    carried = "reviewed=no&amp;sort=oldest"
     assert f'<a href="/clips/{older_id}?{carried}" rel="prev">← Older</a>' in body
     assert f'<a href="/clips/{newer_id}?{carried}" rel="next">Newer →</a>' in body
     assert f'<a href="/clips?{carried}">All clips</a>' in body
@@ -1274,6 +1278,70 @@ def test_filter_scoped_nav_under_oldest_sort_ends_on_the_newest_clip(
 
     assert f'<a href="/clips/{middle_id}?reviewed=no&amp;sort=oldest" rel="prev">← Older</a>' in body
     assert '<a href="/clips?reviewed=no&amp;sort=oldest" rel="next">Newer →</a>' in body
+
+
+class _ThreeClips(NamedTuple):
+    config: Config
+    internal_root: Path
+    older_id: int
+    middle_id: int
+    newer_id: int
+
+
+@pytest.fixture
+def three_clips(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+    seed_clip: Callable[..., int],
+) -> _ThreeClips:
+    """Seed an older, a middle, and a newer unreviewed clip, one hour apart. Build the config of their database."""
+    internal_root, storage_root = storage_dirs
+    _, older_id, middle_id, newer_id = _seed_three_unreviewed_clips(db_session_factory, seed_clip, internal_root=internal_root)
+    return _ThreeClips(make_config(internal_root, storage_root), internal_root, older_id, middle_id, newer_id)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # Newest first, two rows a page: newer and middle on page 1, older on page 2.
+        ("reviewed=no", "older_id", "/clips?reviewed=no&amp;page=2"),
+        ("reviewed=no&page=2", "newer_id", "/clips?reviewed=no"),
+        # Oldest first: older and middle on page 1, newer on page 2.
+        ("reviewed=no&sort=oldest", "newer_id", "/clips?reviewed=no&amp;sort=oldest&amp;page=2"),
+        ("reviewed=no&sort=oldest&page=2", "older_id", "/clips?reviewed=no&amp;sort=oldest"),
+    ],
+)
+def test_back_link_goes_to_the_page_that_holds_the_clip(
+    three_clips: _ThreeClips,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, str, str],
+) -> None:
+    """The "All clips" link and the end-of-list link go to the page of the clip, not to the page of the request."""
+    query, clip_field, expected_back = case
+    monkeypatch.setattr(clips_routes, "_CLIPS_PAGE_SIZE", 2)
+    clip_id = cast("int", getattr(three_clips, clip_field))
+
+    body = _sorted_nav_page(three_clips.config, alembic_web_test_client, clip_id, query)
+
+    assert f'<a href="{expected_back}">All clips</a>' in body
+    assert f'<a href="{expected_back}" rel="next">' in body or f'<a href="{expected_back}" rel="prev">' in body
+
+
+def test_back_link_of_a_clip_outside_the_filter_goes_to_the_page_of_its_list_position(
+    three_clips: _ThreeClips,
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reviewed clip under ``reviewed=no`` goes back to the page of its place in the list order. That page holds its next neighbor."""
+    monkeypatch.setattr(clips_routes, "_CLIPS_PAGE_SIZE", 1)
+    _mark_clip_reviewed_at(three_clips.internal_root, three_clips.middle_id, datetime(2026, 6, 2, 12, 0, 0, tzinfo=UTC))
+
+    body = _sorted_nav_page(three_clips.config, alembic_web_test_client, three_clips.middle_id, "reviewed=no")
+
+    assert '<a href="/clips?reviewed=no&amp;page=2">All clips</a>' in body
+    assert f'<a href="/clips/{three_clips.older_id}?reviewed=no" rel="next">' in body
 
 
 def _seed_start_ts_tie(

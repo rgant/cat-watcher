@@ -111,13 +111,16 @@ read for no gain.
 
 Each state has a reader:
 
-| `classifier_version` | `predicted_subject_id` | Meaning                      | Reader               |
-| -------------------- | ---------------------- | ---------------------------- | -------------------- |
-| NULL                 | NULL                   | Not classified               | The backfill, the UI |
-| set                  | NULL                   | Classified, no cat box found | The UI               |
-| set                  | set                    | A cat and its confidence     | The UI               |
+| `classifier_version` | `predicted_subject_id` | `bbox_xyxy` | Meaning                      | Reader               |
+| -------------------- | ---------------------- | ----------- | ---------------------------- | -------------------- |
+| NULL                 | NULL                   | any         | Not classified               | The backfill, the UI |
+| set                  | NULL                   | NULL        | Classified, no cat box found | The UI               |
+| set                  | NULL                   | set         | Tried, the classifier failed | The UI               |
+| set                  | set                    | set         | A cat and its confidence     | The UI               |
 
-Without the middle state, a backfill cannot tell "no cat box" from "not done".
+Without the "no cat box" state, a backfill cannot tell "no cat box" from "not
+done". The "tried" state stops a backfill from selecting a failed frame on each
+run. The UI shows it as "not classified".
 
 **Requirements:**
 
@@ -138,7 +141,9 @@ Without the middle state, a backfill cannot tell "no cat box" from "not done".
 - A batch table rebuild on SQLite breaks `clip_label_summary`. The migration
   drops the view before the batch and creates it again after. Upgrade and
   downgrade both do this. `d301291abfcf` holds the pattern.
-- The migration does not change the view SQL.
+- The migration does not change the view SQL. It reads the stored view SQL from
+  `sqlite_master` before the drop, and runs that text after the rebuild. A later
+  change to `cat_watcher.db` then cannot reach this revision.
 
 ### Inference in the poller
 
@@ -157,8 +162,10 @@ process. launchd starts one process per tick.
   expects.
 - The predicted class name comes from the `names` map in the checkpoint, never
   from an index position. The name resolves to a `subjects.id` by slug.
-- If a predicted slug matches no active cat subject, the poller logs an error
-  and leaves that frame not classified.
+- The slug map holds every cat subject, archived cats too. A checkpoint can
+  still name a cat that the operator archived.
+- If a predicted slug matches no cat subject, the poller logs an error. The
+  frame gets the "tried" state.
 - The poller writes the prediction onto the `ClipFrame` objects before the clip
   commits. The clip row, its frames, and their predictions commit together.
 - `classifier_version` uses one public hash helper, shared with
@@ -170,8 +177,8 @@ process. launchd starts one process per tick.
   continues unchanged.
 - If the checkpoint file is absent or fails to load, the poller logs one warning
   and continues the tick without the classifier. Frames stay not classified.
-- If one frame fails in the classifier, the poller logs the error and leaves
-  that frame not classified. The clip and the tick continue.
+- If one frame fails in the classifier, the poller logs the error. The frame
+  gets the "tried" state. The clip and the tick continue.
 - A classifier fault never raises out of the clip pipeline. An exception there
   stops every remaining clip of that camera for the tick.
 
@@ -227,8 +234,12 @@ pipeline, such as the channel order or the box floor, increases it.
   that it wrote for that clip. The clip counts as skipped.
 - The command removes an old `clips.thumb_path` file only after the session
   commits, and only if no frame uses that file.
-- If a frame stays not classified after an error, its clip stays a candidate.
-  The next run tries it again.
+- A frame that fails gets the "tried" state, so its clip is not a candidate
+  again until the checkpoint changes. A failed frame then cannot take the
+  `--limit` budget of each run. `reanalyze --all` tries it again.
+- If `[classifier]` is set and the checkpoint does not load, every mode exits
+  with the missing-dependency code. A re-score without a classifier writes NULL
+  predictions, so the command stops before it writes.
 - The command reports a count for each result: classified, no cat box found, not
   classified after an error, and file missing.
 
@@ -241,12 +252,20 @@ The helper applies these rules in order. The first rule that matches decides:
 
 1. The frame carries a cat tag: the tagged cats. Source: operator.
 2. The clip is reviewed: "no cat". Source: operator.
-3. `classifier_version` is NULL: "not classified".
-4. `predicted_subject_id` is NULL: "no cat box found".
-5. `prediction_confidence` is less than `unsure_threshold`: "unsure".
-6. Otherwise: the predicted cat. Source: model.
+3. `score` is less than `[detector].confidence_threshold`: "no cat box found".
+4. `classifier_version` is NULL: "not classified".
+5. `predicted_subject_id` is NULL and `bbox_xyxy` is set: "not classified".
+6. `predicted_subject_id` is NULL: "no cat box found".
+7. `prediction_confidence` is less than `unsure_threshold`: "unsure".
+8. Otherwise: the predicted cat. Source: model.
 
 An event tag is not a cat tag. A frame with only an event tag goes on to rule 2.
+
+Rule 3 applies only to the clip result. The detector keeps a box down to 0.10,
+and the model always names a cat. A box below the threshold, on the scoop for
+example, then names a cat. The stored prediction stays, so a threshold change
+takes effect without a re-run. The detail page shows the stored model result of
+each frame without rule 3.
 
 For a clip, the helper gives the set of named cats over all frames, with the
 source of each. If no frame names a cat, the clip result is the first of these
@@ -297,8 +316,8 @@ The operator then sees each model error.
   the clip nor the tick. A frame with no box gets the "no cat box found" state.
 - Crop parity: for one frame, the poller and the export give the classifier the
   same pixel array.
-- Class binding: a predicted slug with no active cat subject stores no
-  prediction and logs an error.
+- Class binding: a predicted slug with no cat subject stores no prediction,
+  stores the version, and logs an error.
 - Effective identity: one test for each rule, plus a frame with only an event
   tag, and a clip that names two cats.
 - Backfill: a frame with a stale `classifier_version` makes its clip a

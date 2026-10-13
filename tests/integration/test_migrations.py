@@ -355,3 +355,31 @@ def test_alerts_sent_subject_id_migration_keeps_rows_and_swaps_index(alembic_cfg
             assert conn.execute(text("SELECT COUNT(*) FROM alerts_sent")).scalar_one() == 1
     finally:
         engine.dispose()
+
+
+def _view_sql(db_url: str) -> str:
+    """Return the stored SQL of ``clip_label_summary``."""
+    engine = create_engine(db_url)
+    try:
+        with engine.connect() as conn:
+            return cast("str", conn.execute(text("SELECT sql FROM sqlite_master WHERE name = 'clip_label_summary'")).scalar_one())
+    finally:
+        engine.dispose()
+
+
+def test_frame_predictions_migration_keeps_the_view_text(alembic_cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The predictions revision keeps the view text of the previous revision on upgrade and on downgrade.
+
+    A later revision can change the live view SQL in ``cat_watcher.db``. That change must not reach this revision.
+    """
+    db_url = f"sqlite:///{tmp_path / 'round.sqlite'}"
+    command.upgrade(alembic_cfg, _PRE_PREDICTIONS_REVISION)
+    before = _view_sql(db_url)
+    monkeypatch.setattr("cat_watcher.db.CLIP_LABEL_SUMMARY_VIEW_SQL", "CREATE VIEW clip_label_summary AS SELECT 1 AS later_column")
+
+    command.upgrade(alembic_cfg, _PRE_ALERT_SUBJECT_REVISION)
+    after_upgrade = _view_sql(db_url)
+    command.downgrade(alembic_cfg, _PRE_PREDICTIONS_REVISION)
+
+    assert after_upgrade == before
+    assert _view_sql(db_url) == before

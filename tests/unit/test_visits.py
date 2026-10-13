@@ -13,10 +13,10 @@ from cat_watcher.visits import (
     CatClip,
     Visit,
     group_visits,
-    last_visits_for,
-    query_cat_clips,
-    query_last_visits,
+    last_visits_in_retention,
     query_visits,
+    visits_for,
+    visits_since,
 )
 
 if TYPE_CHECKING:
@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
     from cat_watcher.config import Config
 
-THRESHOLD = 0.70
 T0 = datetime(2026, 5, 1, 6, 0, 0, tzinfo=UTC)
 CLIP_LENGTH = timedelta(seconds=2)  # The length that ``add_clip`` gives every clip.
 
@@ -41,6 +40,14 @@ def _cat_clip(clip_id: int, start: datetime, *, camera_id: int = 1, slugs: tuple
 def _label_summary_view(db_engine: Engine) -> None:
     """Create the ``clip_label_summary`` view, which ``create_all`` does not emit."""
     apply_clip_label_summary_view(db_engine)
+
+
+@pytest.fixture
+def visit_config(make_config: Callable[..., Config], tmp_path: Path) -> Config:
+    """Return a config with no ``[classifier]`` table, so only the operator tags name the cats."""
+    built = make_config(tmp_path, tmp_path)
+    assert built.classifier is None
+    return built
 
 
 def _seed_tagged_clip(engine: Engine, cam: int, subject_ids: list[int], start: datetime, name: str) -> int:
@@ -67,6 +74,29 @@ def test_gap_of_exactly_two_minutes_starts_a_new_visit() -> None:
     visits = group_visits([_cat_clip(1, T0), _cat_clip(2, second_start)])
 
     assert [visit.clip_ids for visit in visits["marcel"]] == [(1,), (2,)]
+
+
+def test_short_clip_inside_a_long_clip_does_not_end_the_visit() -> None:
+    """The gap starts at the latest end in the visit, and the visit ends there."""
+    long_end = T0 + timedelta(minutes=10)
+    long_clip = CatClip(clip_id=1, camera_id=1, start_ts=T0, end_ts=long_end, identity=_cat_clip(1, T0).identity)
+    inside_start = T0 + timedelta(minutes=1)
+    third_start = long_end + VISIT_GAP - timedelta(seconds=1)
+    visits = group_visits([long_clip, _cat_clip(2, inside_start), _cat_clip(3, third_start)])
+
+    assert third_start - (inside_start + CLIP_LENGTH) > VISIT_GAP
+    assert visits == {
+        "marcel": [Visit(slug="marcel", camera_id=1, start_ts=T0, end_ts=third_start + CLIP_LENGTH, clip_ids=(1, 2, 3))],
+    }
+
+
+def test_visit_end_is_the_latest_end_of_its_clips() -> None:
+    """A short last clip inside a long clip does not move the visit end back."""
+    long_end = T0 + timedelta(minutes=10)
+    long_clip = CatClip(clip_id=1, camera_id=1, start_ts=T0, end_ts=long_end, identity=_cat_clip(1, T0).identity)
+    visits = group_visits([long_clip, _cat_clip(2, T0 + timedelta(minutes=1))])
+
+    assert [visit.end_ts for visit in visits["marcel"]] == [long_end]
 
 
 def test_two_cameras_make_two_visits() -> None:
@@ -98,50 +128,29 @@ def test_unknown_cat_clip_makes_no_visit() -> None:
     assert not group_visits([unknown])
 
 
-def test_query_cat_clips_skips_clips_that_are_not_cat_clips(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """A clip without a cat is not in the result. The window includes ``since`` and excludes ``until``."""
+def test_query_visits_skips_clips_that_are_not_cat_clips(db_engine: Engine, seed_camera: Callable[..., int], visit_config: Config) -> None:
+    """A tagged clip that is not a cat clip joins no visit. The window includes ``since`` and excludes ``until``."""
     cam = seed_camera(db_engine)
     marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
     cat = _seed_tagged_clip(db_engine, cam, [marcel], T0, "cat.mp4")
-    _ = add_clip(db_engine, cam, start_ts=T0 + timedelta(minutes=5), name="empty.mp4", has_cat=False)
+    not_cat = add_clip(db_engine, cam, start_ts=T0 + timedelta(seconds=60), name="not-cat.mp4", has_cat=False)
+    tag_frame(db_engine, add_clip_frame(db_engine, not_cat, 0), marcel)
     _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(hours=1), "late.mp4")
 
-    with get_session(db_engine) as session:
-        clips = query_cat_clips(
-            session,
-            since=T0,
-            until=T0 + timedelta(hours=1),
-            unsure_threshold=THRESHOLD,
-            cats=query_cat_subjects(session),
-        )
+    visits = _read_visits(db_engine, visit_config, since=T0, until=T0 + timedelta(hours=1))
 
-    assert [clip.clip_id for clip in clips] == [cat]
-    assert clips[0].identity.cats == (NamedCat("marcel", "operator"),)
-    assert clips[0].end_ts == T0 + CLIP_LENGTH
+    assert visits == {"marcel": [Visit(slug="marcel", camera_id=cam, start_ts=T0, end_ts=T0 + CLIP_LENGTH, clip_ids=(cat,))]}
 
 
-def test_query_last_visits_ignores_visits_outside_retention(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
-    """A visit older than ``retention_days`` is not a last visit."""
-    cam = seed_camera(db_engine)
-    marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
-    rufus = seed_cat_subject(db_engine, slug="rufus", display_name="Rufus", display_order=2)
-    now = T0 + timedelta(days=40)
-    _ = _seed_tagged_clip(db_engine, cam, [marcel], now - timedelta(days=31), "old.mp4")
-    _ = _seed_tagged_clip(db_engine, cam, [rufus], now - timedelta(days=2), "recent.mp4")
-    newest = _seed_tagged_clip(db_engine, cam, [rufus], now - timedelta(hours=1), "newest.mp4")
-
-    with get_session(db_engine) as session:
-        last = query_last_visits(session, now=now, retention_days=30, unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
-
-    assert set(last) == {"rufus"}
-    assert last["rufus"].clip_ids == (newest,)
+def _short_retention(config: Config) -> Config:
+    """Return ``config`` with a 3-day retention window."""
+    return config.model_copy(update={"retention": config.retention.model_copy(update={"clip_days": 3})})
 
 
-def test_last_visits_for_reads_retention_from_config(
+def test_last_visits_in_retention_reads_retention_from_config(
     db_engine: Engine,
     seed_camera: Callable[..., int],
-    make_config: Callable[..., Config],
-    tmp_path: Path,
+    visit_config: Config,
 ) -> None:
     """The config sets the retention window. Without a ``[classifier]`` table, operator tags still name the cats."""
     cam = seed_camera(db_engine)
@@ -149,48 +158,73 @@ def test_last_visits_for_reads_retention_from_config(
     rufus = seed_cat_subject(db_engine, slug="rufus", display_name="Rufus", display_order=2)
     now = T0 + timedelta(days=10)
     _ = _seed_tagged_clip(db_engine, cam, [marcel], now - timedelta(days=4), "old.mp4")
-    recent = _seed_tagged_clip(db_engine, cam, [rufus], now - timedelta(days=2), "recent.mp4")
-    base = make_config(tmp_path, tmp_path)
-    config = base.model_copy(update={"retention": base.retention.model_copy(update={"clip_days": 3})})
-    assert config.classifier is None
+    _ = _seed_tagged_clip(db_engine, cam, [rufus], now - timedelta(days=2), "recent.mp4")
+    newest = _seed_tagged_clip(db_engine, cam, [rufus], now - timedelta(hours=1), "newest.mp4")
+    short = _short_retention(visit_config)
 
     with get_session(db_engine) as session:
-        last = last_visits_for(session, config, now=now, cats=query_cat_subjects(session))
+        visits = visits_for(session, short, now=now, since=now - timedelta(hours=6), cats=query_cat_subjects(session))
 
-    assert {slug: visit.clip_ids for slug, visit in last.items()} == {"rufus": (recent,)}
+    assert {slug: visit.clip_ids for slug, visit in last_visits_in_retention(visits, short, now=now).items()} == {"rufus": (newest,)}
 
 
-def _count_statements(engine: Engine, now: datetime) -> int:
+def test_visits_for_reads_back_to_a_window_that_starts_before_retention(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    visit_config: Config,
+) -> None:
+    """A window longer than the retention window gets its whole span. The last visit stays in retention."""
+    cam = seed_camera(db_engine)
+    marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
+    now = T0 + timedelta(days=10)
+    old = _seed_tagged_clip(db_engine, cam, [marcel], now - timedelta(days=4), "old.mp4")
+    short = _short_retention(visit_config)
+    since = now - timedelta(days=5)
+
+    with get_session(db_engine) as session:
+        visits = visits_for(session, short, now=now, since=since, cats=query_cat_subjects(session))
+
+    assert [visit.clip_ids for visit in visits_since(visits, since)["marcel"]] == [(old,)]
+    assert not last_visits_in_retention(visits, short, now=now)
+
+
+def _count_statements(engine: Engine, config: Config, now: datetime) -> int:
     with recorded_statements(engine) as statements, get_session(engine) as session:
-        _ = query_last_visits(session, now=now, retention_days=30, unsure_threshold=THRESHOLD, cats=query_cat_subjects(session))
+        _ = visits_for(session, config, now=now, since=now - timedelta(hours=6), cats=query_cat_subjects(session))
     return len(statements)
 
 
-def test_query_last_visits_statement_count_does_not_grow_with_clips(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+def test_visits_for_statement_count_does_not_grow_with_clips(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    visit_config: Config,
+) -> None:
     """The statement count is the same for 1 clip and for 20 clips."""
     cam = seed_camera(db_engine)
     marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
     now = T0 + timedelta(days=1)
     _ = _seed_tagged_clip(db_engine, cam, [marcel], T0, "c0.mp4")
-    one_clip = _count_statements(db_engine, now)
+    one_clip = _count_statements(db_engine, visit_config, now)
     for i in range(1, 20):
         _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(minutes=10 * i), f"c{i}.mp4")
 
-    assert _count_statements(db_engine, now) == one_clip
+    assert _count_statements(db_engine, visit_config, now) == one_clip
 
 
-def _visits_since(engine: Engine, since: datetime) -> dict[str, list[Visit]]:
+def _read_visits(engine: Engine, config: Config, *, since: datetime, until: datetime) -> dict[str, list[Visit]]:
     with get_session(engine) as session:
-        return query_visits(
-            session,
-            since=since,
-            until=since + timedelta(hours=1),
-            unsure_threshold=THRESHOLD,
-            cats=query_cat_subjects(session),
-        )
+        return query_visits(session, config, since=since, until=until, cats=query_cat_subjects(session))
 
 
-def test_query_visits_drops_a_visit_that_starts_before_the_window(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+def _visits_since(engine: Engine, config: Config, since: datetime) -> dict[str, list[Visit]]:
+    return _read_visits(engine, config, since=since, until=since + timedelta(hours=1))
+
+
+def test_query_visits_drops_a_visit_that_starts_before_the_window(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    visit_config: Config,
+) -> None:
     """A clip in the window that continues a visit from before the window gives no visit."""
     cam = seed_camera(db_engine)
     marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
@@ -202,34 +236,82 @@ def test_query_visits_drops_a_visit_that_starts_before_the_window(db_engine: Eng
     tag_frame(db_engine, add_clip_frame(db_engine, early, 0), marcel)
     _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(seconds=60), "chained.mp4")
 
-    assert not _visits_since(db_engine, T0)
+    assert not _visits_since(db_engine, visit_config, T0)
 
 
-def test_query_visits_keeps_a_lone_clip_that_starts_in_the_window(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+def test_query_visits_keeps_a_lone_clip_that_starts_in_the_window(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    visit_config: Config,
+) -> None:
     """A clip more than ``VISIT_GAP`` after the last clip before the window starts a visit in the window."""
     cam = seed_camera(db_engine)
     marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
     _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 - timedelta(minutes=10), "before.mp4")
     lone = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(seconds=60), "lone.mp4")
 
-    visits = _visits_since(db_engine, T0)
+    visits = _visits_since(db_engine, visit_config, T0)
 
     assert [visit.clip_ids for visit in visits["marcel"]] == [(lone,)]
 
 
-def _count_query_visits_statements(engine: Engine) -> int:
+def _count_query_visits_statements(engine: Engine, config: Config) -> int:
     with recorded_statements(engine) as statements:
-        _ = _visits_since(engine, T0)
+        _ = _visits_since(engine, config, T0)
     return len(statements)
 
 
-def test_query_visits_statement_count_does_not_grow_with_clips(db_engine: Engine, seed_camera: Callable[..., int]) -> None:
+def test_query_visits_statement_count_does_not_grow_with_clips(
+    db_engine: Engine,
+    seed_camera: Callable[..., int],
+    visit_config: Config,
+) -> None:
     """The statement count is the same for 1 clip and for 20 clips, in and before the window."""
     cam = seed_camera(db_engine)
     marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
     _ = _seed_tagged_clip(db_engine, cam, [marcel], T0, "c0.mp4")
-    one_clip = _count_query_visits_statements(db_engine)
+    one_clip = _count_query_visits_statements(db_engine, visit_config)
     for i in range(1, 20):
         _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(minutes=5 * i - 50), f"c{i}.mp4")
 
-    assert _count_query_visits_statements(db_engine) == one_clip
+    assert _count_query_visits_statements(db_engine, visit_config) == one_clip
+
+
+def _clip_until(engine: Engine, cam: int, subject_id: int, *, start: datetime, end: datetime) -> int:
+    """Seed a tagged clip from ``start`` to ``end``. ``add_clip`` gives every clip 2 seconds."""
+    clip_id = _seed_tagged_clip(engine, cam, [subject_id], start, f"until-{start:%H%M%S}.mp4")
+    with get_session(engine) as session:
+        clip = session.get(Clip, clip_id)
+        assert clip is not None
+        clip.end_ts = end
+    return clip_id
+
+
+def test_visits_since_equals_query_visits_for_the_window(db_engine: Engine, seed_camera: Callable[..., int], visit_config: Config) -> None:
+    """A wide read cut at ``since`` gives the same visits as a read of the window.
+
+    The cases:
+
+    - a visit that crosses ``since``
+    - a visit after ``since``
+    - a lone clip before ``since``
+    - on a second camera, a long clip that overlaps a short clip before ``since``
+    """
+    cam = seed_camera(db_engine)
+    other_cam = seed_camera(db_engine, name="garage")
+    marcel = seed_cat_subject(db_engine, slug="marcel", display_name="Marcel", display_order=1)
+    _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 - timedelta(minutes=30), "lone-before.mp4")
+    _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 - timedelta(seconds=30), "cross-1.mp4")
+    _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(seconds=30), "cross-2.mp4")
+    _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(minutes=10), "after-1.mp4")
+    _ = _seed_tagged_clip(db_engine, cam, [marcel], T0 + timedelta(minutes=11), "after-2.mp4")
+    # The long clip ends 50 seconds before the last clip starts. The short clip in it ends 10 minutes before.
+    _ = _clip_until(db_engine, other_cam, marcel, start=T0 - timedelta(minutes=10), end=T0 + timedelta(seconds=10))
+    _ = _seed_tagged_clip(db_engine, other_cam, [marcel], T0 - timedelta(minutes=9), "short.mp4")
+    _ = _seed_tagged_clip(db_engine, other_cam, [marcel], T0 + timedelta(seconds=60), "late.mp4")
+
+    wide = _read_visits(db_engine, visit_config, since=T0 - timedelta(days=1), until=T0 + timedelta(hours=1))
+    window = _read_visits(db_engine, visit_config, since=T0, until=T0 + timedelta(hours=1))
+
+    assert window["marcel"], "the window must hold a visit, or the comparison proves nothing"
+    assert visits_since(wide, T0) == window

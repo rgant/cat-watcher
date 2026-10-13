@@ -11,11 +11,10 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 
-from cat_watcher.config import active_unsure_threshold
 from cat_watcher.db import Camera, Clip, ClipLabelSummary, get_session
 from cat_watcher.identity import query_cat_subjects
 from cat_watcher.timefmt import ago
-from cat_watcher.visits import last_visits_for, query_visits
+from cat_watcher.visits import last_visits_in_retention, visits_for, visits_since
 from cat_watcher.web._app_state import get_state
 
 if TYPE_CHECKING:
@@ -122,11 +121,11 @@ def _cat_stat_rows(
     """
     tz = ZoneInfo(config.web.display_timezone)
     days = _stat_days(now, tz)
-    threshold = active_unsure_threshold(config)
     cats = query_cat_subjects(session)
     window_start = datetime.combine(days[0], time.min, tzinfo=tz)
-    visits_by_slug = query_visits(session, since=window_start, until=now, unsure_threshold=threshold, cats=cats)
-    last_visits = last_visits_for(session, config, now=now, cats=cats)
+    read = visits_for(session, config, now=now, since=window_start, cats=cats)
+    visits_by_slug = visits_since(read, window_start)
+    last_visits = last_visits_in_retention(read, config, now=now)
     rows: list[dict[str, object]] = []
     for cat in cats:
         visits = visits_by_slug.get(cat.slug, [])

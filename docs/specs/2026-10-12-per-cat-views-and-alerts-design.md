@@ -44,11 +44,12 @@ name more than one cat.
 
 **Unknown-cat clip:** a cat clip that names no cat.
 
-**Visit:** a sequence of clips of one named cat on one camera. A clip joins the
-visit of the previous clip if its start is less than 2 minutes after the end of
-that clip. The end of a clip is its `end_ts`. Otherwise the clip starts a new
-visit. The start of a visit is the start of its first clip. Clips on two cameras
-are never one visit.
+**Visit:** a sequence of clips of one named cat on one camera. A clip joins a
+visit if its start is less than 2 minutes after the latest end in that visit.
+The end of a clip is its `end_ts`. Otherwise the clip starts a new visit. A
+short clip inside a long clip thus does not end the visit early. The start of a
+visit is the start of its first clip. The end of a visit is the latest end of
+its clips. Clips on two cameras are never one visit.
 
 The gap of 2 minutes is a constant in one module. The stats and the alerts call
 the same visit function.
@@ -159,8 +160,10 @@ The strip and `/clips` use one pagination rule:
 
 - The pagination rule above replaces the fixed limit of 200.
 - The page shows 100 clips per page.
-- Each row link carries the page that holds the row. The clip detail back link
-  returns to that page. The prev and next links keep that page value.
+- Each row link carries the page that holds the row.
+- The clip detail back link opens the page that holds the current clip. One
+  COUNT of the clips before it, in `(start_ts, id)` order, gives that page.
+- The prev and next links carry the filter and `sort`, but no `page`.
 - The reviewed-progress count above the list keeps its current scope. Pagination
   does not change it.
 
@@ -170,7 +173,8 @@ The strip and `/clips` use one pagination rule:
   `src/cat_watcher/web/clip_filters.py`.
 - A bad `sort` or `page` value snaps to its default. The filter notice reports
   it, like a bad value of any other key.
-- The clip detail back link and the prev and next links carry both keys.
+- The clip detail back link carries `sort` and `page`. The prev and next links
+  carry `sort` and no `page`.
 
 ## Per-cat stats
 

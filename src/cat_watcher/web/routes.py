@@ -32,10 +32,9 @@ from cat_watcher.db import (
     Subject,
     get_session,
 )
-from cat_watcher.identity import query_cat_subjects
+from cat_watcher.identity import query_cat_subjects, query_clip_identities
 from cat_watcher.labels import is_manual_override
 from cat_watcher.timefmt import local_date, local_stamp
-from cat_watcher.visits import query_cat_clips
 from cat_watcher.web._app_state import get_state
 from cat_watcher.web.clips_routes import clips_router, identity_chip
 from cat_watcher.web.pagination import PageInfo, page_info, parse_page
@@ -433,6 +432,7 @@ def _render_timeline(request: Request, *, view: _TimelineView, page: str | None)
         window=window,
         display_tz=display_tz,
         unsure_threshold=active_unsure_threshold(state.config),
+        confidence_threshold=state.config.detector.confidence_threshold,
     )
     lanes, strip = _build_lanes_view(view=view, data=data, requested_page=parse_page(page))
     next_longer_range_key = _next_longer_range(view.range_key)
@@ -471,8 +471,8 @@ def _render_timeline(request: Request, *, view: _TimelineView, page: str | None)
 class _Window:
     """The time span of the timeline, from ``start`` to ``end``, with ``end`` exclusive.
 
-    The markers and the cat clips read the same span. A clip with a start after ``end`` comes from
-    a camera clock that is fast. It shows in no view.
+    The markers read this span, and the cat clips come from the markers. A clip with a start after
+    ``end`` comes from a camera clock that is fast. It shows in no view.
     """
 
     start: datetime
@@ -500,23 +500,31 @@ def _load_timeline_data(
     window: _Window,
     display_tz: ZoneInfo,
     unsure_threshold: float,
+    confidence_threshold: float,
 ) -> _TimelineData:
     """Pull the cameras, cats, clips, and alerts of the window in one session.
 
     The cameras, clips, and alerts become plain dicts before the session closes. The cat subjects
-    stay ORM objects. The session does not expire them, so their columns stay readable.
+    stay ORM objects. The session does not expire them, so their columns stay readable. The cat
+    clips are the markers with ``has_cat`` set, so one read of the window serves both.
     """
     with get_session(engine) as session:
         cameras = list(session.scalars(select(Camera).order_by(Camera.name)))
         cats = query_cat_subjects(session)
         clip_markers = _query_clip_markers(session, cameras=cameras, window=window, display_tz=display_tz)
-        cat_clips = query_cat_clips(session, since=window.start, until=window.end, unsure_threshold=unsure_threshold, cats=cats)
+        identity_by_clip = query_clip_identities(
+            session,
+            [_marker_id(marker) for marker in clip_markers if marker["has_cat"]],
+            unsure_threshold=unsure_threshold,
+            confidence_threshold=confidence_threshold,
+            cats=cats,
+        )
         alerts = session.scalars(select(AlertSent).where(AlertSent.sent_at >= window.start).order_by(AlertSent.sent_at))
         return _TimelineData(
             camera_rows=[_camera_lane(cam) for cam in cameras],
             cats=cats,
             clip_markers=clip_markers,
-            identity_by_clip={cat_clip.clip_id: cat_clip.identity for cat_clip in cat_clips},
+            identity_by_clip=identity_by_clip,
             alert_markers=[_alert_marker(alert, start_window=window.start, total_seconds=window.total_seconds) for alert in alerts],
         )
 

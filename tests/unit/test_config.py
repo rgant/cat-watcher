@@ -751,6 +751,37 @@ def test_subjects_absent_means_empty_list(tmp_path: Path, monkeypatch: pytest.Mo
     assert cfg.subjects == []
 
 
+def _write_subject_color(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, color: str) -> None:
+    """Point the config loader at ``_TOML_WITH_SUBJECTS`` with the color of ``marcel`` set to ``color``."""
+    config_path = tmp_path / "config.toml"
+    _ = config_path.write_text(_TOML_WITH_SUBJECTS.replace('color = "#ff9900"', f"color = {color!r}"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CAT_WATCHER_CONFIG", str(config_path))
+    _set_env(monkeypatch)
+
+
+@pytest.mark.parametrize("color", ["#1a1a1a", "#ff8c00", "#FFF", "#abc", "darkorange", "Black"])
+def test_subject_color_accepts_hex_and_keyword(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, color: str) -> None:
+    """A ``#rgb`` color, a ``#rrggbb`` color, and a CSS color keyword load."""
+    _write_subject_color(tmp_path, monkeypatch, color)
+
+    cfg = load_config()
+
+    assert next(s for s in cfg.subjects if s.slug == "marcel").color == color
+
+
+@pytest.mark.parametrize(
+    "color",
+    ["red; background: url(x)", "#12345", "#ggg", "#ff8c00 ", "rgb(1,2,3)", "", "dark-orange", "#1a1a1a;"],
+)
+def test_subject_color_rejects_other_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, color: str) -> None:
+    """A color that is not a hex color or a keyword fails the load. The message names the subject and the rule."""
+    _write_subject_color(tmp_path, monkeypatch, color)
+
+    with pytest.raises(ConfigError, match=r"subjects\.0\.color[\s\S]*marcel[\s\S]*#rgb"):
+        _ = load_config()
+
+
 def _load_with_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: str) -> object:
     """Load ``_VALID_TOML`` plus the given ``[classifier]`` table body."""
     config_path = tmp_path / "config.toml"

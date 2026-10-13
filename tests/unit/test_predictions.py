@@ -125,12 +125,15 @@ def test_load_warns_and_returns_none_when_model_load_raises(
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
 
-def test_load_builds_classifier_with_active_cat_subjects_only(
+def test_load_builds_classifier_with_every_cat_subject(
     make_config: Callable[..., Config],
     db_engine: Engine,
     tmp_path: Path,
 ) -> None:
-    """The loader maps only active cat subjects, and versions the weights file."""
+    """The loader maps every cat subject, archived ones too, and versions the weights file.
+
+    A checkpoint can still name a cat that the operator archived. That is a real prediction, not a fault.
+    """
     config = _classifier_config(make_config, tmp_path)
     models = config.internal_root / "models"
     models.mkdir(parents=True)
@@ -150,7 +153,7 @@ def test_load_builds_classifier_with_active_cat_subjects_only(
     make.assert_called_once_with(models / "m.pt")
     assert live.predict is fake
     assert live.version.startswith("m.pt@")
-    assert live.subject_id_by_slug == {"marcel": marcel_id, "rufus": rufus_id}
+    assert live.subject_id_by_slug == {"marcel": marcel_id, "rufus": rufus_id, "gone": gone_id}
     assert live.totals == FrameCounts()
     assert live.load_seconds > 0.0
 
@@ -181,8 +184,11 @@ def test_frame_without_box_gets_no_cat_box_state() -> None:
     )
 
 
-def test_unknown_slug_leaves_frame_unclassified_and_logs_error(caplog: pytest.LogCaptureFixture) -> None:
-    """A slug with no subject leaves the frame not classified, and logs an error."""
+def test_unknown_slug_stamps_version_without_prediction_and_logs_error(caplog: pytest.LogCaptureFixture) -> None:
+    """A slug with no subject gets the version and no prediction, and logs an error.
+
+    The version marks the frame as tried, so ``reanalyze --predictions`` does not select it again.
+    """
     frames = _frames()
     with caplog.at_level(logging.DEBUG, logger=_LOGGER):
         counts = classify_frames(
@@ -194,7 +200,7 @@ def test_unknown_slug_leaves_frame_unclassified_and_logs_error(caplog: pytest.Lo
     assert (frames[0].predicted_subject_id, frames[0].prediction_confidence, frames[0].classifier_version) == (
         None,
         None,
-        None,
+        _VERSION,
     )
     assert [r.levelno for r in caplog.records] == [logging.ERROR, logging.ERROR]
     assert (counts.classified, counts.no_box, counts.errored) == (0, 1, 2)
@@ -210,7 +216,7 @@ def test_predict_failure_on_one_frame_keeps_the_others(caplog: pytest.LogCapture
             _classifier(_FakePredict(raise_on_call=0)),
             clip_label=_LABEL,
         )
-    assert frames[0].classifier_version is None
+    assert (frames[0].predicted_subject_id, frames[0].classifier_version) == (None, _VERSION)
     assert frames[2].classifier_version == _VERSION
     assert frames[2].predicted_subject_id == 1
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
@@ -245,14 +251,14 @@ def test_two_calls_add_up_in_totals() -> None:
 
 
 def test_temp_directory_failure_does_not_escape_and_counts_frames() -> None:
-    """A temp directory fault leaves every frame not classified, and totals still get the counts."""
+    """A temp directory fault stamps the version on every frame without a prediction, and totals still get the counts."""
     classifier = _classifier(_FakePredict())
     frames = _frames()
     with patch("cat_watcher.predictions.tempfile.TemporaryDirectory", side_effect=OSError("disk full")):
         counts = classify_frames(scored_frames_with_boxes(gradient_rgb(60, 80)), frames, classifier, clip_label=_LABEL)
     assert (counts.classified, counts.no_box, counts.errored) == (0, 0, 3)
     assert classifier.totals.errored == 3
-    assert all(frame.classifier_version is None for frame in frames)
+    assert [(frame.predicted_subject_id, frame.classifier_version) for frame in frames] == [(None, _VERSION)] * 3
 
 
 def test_crop_write_failure_on_one_frame_keeps_the_others() -> None:
@@ -271,7 +277,7 @@ def test_crop_write_failure_on_one_frame_keeps_the_others() -> None:
 
     with patch("cat_watcher.predictions.write_crop_jpeg", flaky_write):
         counts = classify_frames(scored_frames_with_boxes(gradient_rgb(60, 80)), frames, classifier, clip_label=_LABEL)
-    assert frames[0].classifier_version is None
+    assert (frames[0].predicted_subject_id, frames[0].classifier_version) == (None, _VERSION)
     assert frames[2].classifier_version == _VERSION
     assert (counts.classified, counts.no_box, counts.errored) == (1, 1, 1)
     assert classifier.totals.classified == 1

@@ -39,7 +39,7 @@ _CROP_FILENAME = "crop.jpg"
 
 @dataclass
 class FrameCounts:
-    """Frame outcomes and wall time. ``errored`` counts frames that stay not classified."""
+    """Frame outcomes and wall time. ``errored`` counts frames that the classifier failed on."""
 
     classified: int = 0
     no_box: int = 0
@@ -56,7 +56,10 @@ class FrameCounts:
 
 @dataclass
 class LiveClassifier:
-    """A loaded checkpoint, its version string, and the cat subjects its slugs map to."""
+    """A loaded checkpoint, its version string, and the cat subjects its slugs map to.
+
+    The map includes archived cats, because a checkpoint can still name a cat that the operator archived.
+    """
 
     predict: PredictFn
     version: str
@@ -87,7 +90,7 @@ def load_live_classifier(config: Config, engine: Engine) -> LiveClassifier | Non
         return None
     with get_session(engine) as session:
         rows = session.execute(
-            select(Subject.slug, Subject.id).where(Subject.kind == "cat", Subject.archived_at.is_(None)),
+            select(Subject.slug, Subject.id).where(Subject.kind == "cat"),
         ).all()
     return LiveClassifier(
         predict=predict,
@@ -107,8 +110,10 @@ def classify_frames(
 ) -> FrameCounts:
     """Set the prediction columns of each ``ClipFrame``, matched to its scored frame by ``ordinal``.
 
-    A frame with no box gets the version only. A frame that fails keeps all three columns ``NULL``.
-    Counts for this call also go into ``classifier.totals``. ``clip_label`` names the clip in error
+    A frame with no box gets the version only. A frame that fails also gets the version only. Its
+    box tells it apart from a frame with no box. The version marks the frame as tried with this
+    checkpoint, so ``reanalyze --predictions`` does not select a failed frame on each run. Counts
+    for this call also go into ``classifier.totals``. ``clip_label`` names the clip in error
     logs, because the clip can lack an id at this point.
     """
     counts = FrameCounts()
@@ -123,6 +128,7 @@ def classify_frames(
                     outcome = _classify_one(scored, clip_frame, classifier, crop_path, clip_label)
                 except Exception:
                     logger.exception("classifier failed on clip %s frame %s", clip_label, clip_frame.ordinal)
+                    clip_frame.classifier_version = classifier.version
                     outcome = "errored"
                 if outcome == "classified":
                     counts.classified += 1
@@ -131,10 +137,12 @@ def classify_frames(
                 else:
                     counts.errored += 1
     except Exception:
-        # The temp directory failed. Every frame not yet counted stays not classified.
+        # The temp directory failed. Every frame not yet counted is an error.
         logger.exception("classifier could not use its temp directory")
         handled = counts.classified + counts.no_box + counts.errored
         counts.errored += max(len(pairs) - handled, 0)
+        for _scored, clip_frame in pairs:
+            clip_frame.classifier_version = classifier.version
     counts.elapsed_seconds = time.perf_counter() - started
     classifier.totals.add(counts)
     return counts
@@ -155,6 +163,7 @@ def _classify_one(
     subject_id = classifier.subject_id_by_slug.get(slug)
     if subject_id is None:
         logger.error("classifier predicted unknown slug %r for clip %s frame %s", slug, clip_label, clip_frame.ordinal)
+        clip_frame.classifier_version = classifier.version
         return "errored"
     clip_frame.predicted_subject_id = subject_id
     clip_frame.prediction_confidence = confidence

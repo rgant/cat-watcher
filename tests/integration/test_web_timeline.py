@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from db_helpers import AUTH_HEADER, add_clip, add_clip_frame, seed_cat_subject, tag_clip_frame, tag_frame
+from sqlalchemy import event as sa_event
+from sqlalchemy.engine import Engine as SaEngine
 
 from cat_watcher.db import AlertSent, AlertType, Camera, Clip, Subject, create_engine, get_session
 
@@ -1287,3 +1289,39 @@ def test_clip_with_a_future_start_shows_in_no_view(
     assert _lane_markers(bodies[""]) == {"Marcel": [past]}
     assert _lane_markers(bodies["?lanes=boxes"]) == {"Pantry Box": [past]}
     assert {query: _strip_clip_ids(body) for query, body in bodies.items()} == {"": [past], "?clips=all": [past], "?lanes=boxes": [past]}
+
+
+def test_timeline_reads_the_clips_of_its_window_once(
+    storage_dirs: tuple[Path, Path],
+    make_config: Callable[..., Config],
+    alembic_web_test_client: Callable[[Config], AbstractContextManager[TestClient]],
+    db_session_factory: Callable[[Path], AbstractContextManager[Session]],
+) -> None:
+    """One statement reads the clips of the window. The cat lanes and the strip still name the cats."""
+    internal_root, storage_root = storage_dirs
+    cam_id = _seed_camera_row(db_session_factory, internal_root)
+    now = datetime.now(UTC)
+    engine = _engine_for(internal_root)
+    try:
+        named = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=2), name="marcel.mp4", subject_ids=(seed_cat_subject(engine),))
+        unknown = _named_clip(engine, cam_id, start_ts=now - timedelta(hours=1), name="unknown.mp4")
+        _ = add_clip(engine, cam_id, start_ts=now - timedelta(minutes=30), name="empty.mp4", has_cat=False)
+    finally:
+        engine.dispose()
+    window_reads: list[str] = []
+
+    def _record(_conn: object, _cursor: object, statement: str, *_rest: object) -> None:
+        if "clips.start_ts >=" in statement:
+            window_reads.append(statement)
+
+    with alembic_web_test_client(make_config(internal_root, storage_root)) as client:
+        sa_event.listen(SaEngine, "before_cursor_execute", _record)
+        try:
+            body = client.get("/timeline", headers=AUTH_HEADER).text
+        finally:
+            sa_event.remove(SaEngine, "before_cursor_execute", _record)
+
+    assert len(window_reads) == 1, window_reads
+    assert _lane_markers(body) == {"Marcel": [named], "Unknown cat": [unknown]}
+    assert _strip_clip_ids(body) == [unknown, named]
+    _assert_no_tripwire(body)

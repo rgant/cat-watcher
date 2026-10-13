@@ -70,9 +70,9 @@
             <g class="lane" data-lane-key="{{ lane.key }}">
             <text x="0" y="{{ lane_y + lane_height / 2 }}" dominant-baseline="middle" class="lane-label">{{ lane.label }}</text>
             <line x1="{{ label_width }}" x2="{{ viewport_width }}" y1="{{ lane_y + lane_height / 2 }}" y2="{{ lane_y + lane_height / 2 }}" class="lane-axis"></line>
-            {# SVG <title> elements are intentionally omitted: the browser would render them as a
-          native hover tooltip that overlaps the custom .timeline-tooltip rendered by timeline.js.
-          Accessibility is preserved via aria-label on the focusable <a> wrapper. #}
+            {# The markers have no SVG <title>. The browser shows a <title> as a native hover tooltip.
+          That tooltip covers the .timeline-tooltip from timeline.js. The aria-label on the <a> wrapper
+          gives the marker its accessible name. #}
             {% for clip in lane.markers %}
               {% set rect_x = label_width + clip.x_frac * track_width %}
               {% set rect_w = [clip.w_frac * track_width, 2]|max %}
