@@ -301,10 +301,12 @@ button {
 
 /* ---------- video (mobile) ---------- */
 
+/* The small-viewport unit keeps the whole video in view when the browser shows its toolbars. */
 video {
   inline-size: 100%;
   max-inline-size: 100%;
   block-size: auto;
+  max-block-size: 90svb;
   margin-block-end: var(--space-md);
 }
 
@@ -473,12 +475,6 @@ video {
   .clip-list img {
     inline-size: auto;
     max-inline-size: 10rem;
-  }
-
-  /* Constrain video back to a sensible width once the viewport is wide enough that stretching it
-     edge-to-edge wastes screen space. */
-  video {
-    max-inline-size: 40rem;
   }
 
   .timeline-header {
@@ -761,10 +757,16 @@ video {
 }
 
 .thumb-strip a {
-  position: relative;
   display: block;
   color: inherit;
   text-decoration: none;
+}
+
+/* The frame holds the photo and its caption strip, so the strip pins to the photo and not to the
+   cat names below it. */
+.thumb-frame {
+  position: relative;
+  display: block;
 }
 
 .thumb-strip img {

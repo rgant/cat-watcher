@@ -122,13 +122,15 @@
         {% for clip in thumb_cards %}
           <li class="{{ clip.css_classes }}">
             <a href="{{ url_for('clip_detail', clip_id=clip.id) }}">
-              <img src="{{ url_for('media_thumb', clip_id=clip.id) }}"
-                   alt="Clip from {{ clip.camera_display_name }} at {{ clip.display_start }}"
-                   loading="lazy"
-                   onerror="this.src='{{ url_for('static', path='clip-placeholder.svg') }}'; this.onerror = null;">
-              <span class="thumb-meta">
-                <span class="thumb-camera">{{ clip.camera_display_name }}</span>
-                <span class="thumb-time">{{ clip.display_start }}</span>
+              <span class="thumb-frame">
+                <img src="{{ url_for('media_thumb', clip_id=clip.id) }}"
+                     alt="Clip from {{ clip.camera_display_name }} at {{ clip.display_start }}"
+                     loading="lazy"
+                     onerror="this.src='{{ url_for('static', path='clip-placeholder.svg') }}'; this.onerror = null;">
+                <span class="thumb-meta">
+                  <span class="thumb-camera">{{ clip.camera_display_name }}</span>
+                  <span class="thumb-time">{{ clip.display_start }}</span>
+                </span>
               </span>
               <span class="thumb-cats">
                 {% with chips=clip.identity_chips, fallback_label=clip.identity_fallback_label %}
