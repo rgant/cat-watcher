@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader
 from sqlalchemy import select
@@ -40,6 +39,7 @@ from cat_watcher.web.routes import (
     review_router,
     timeline_router,
 )
+from cat_watcher.web.static_assets import HashedStaticFiles
 from cat_watcher.web.stats_routes import stats_router
 
 if TYPE_CHECKING:
@@ -102,6 +102,8 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
     # type infers as the union of the six defaults rather than the "anything" the API documents.
     env_globals = cast("MutableMapping[str, object]", jinja_env.globals)
     # Empty string in non-dev builds so the template's ``{{ ... | safe }}`` renders nothing.
+    static_files = HashedStaticFiles(directory=Path(__file__).parent / "static")
+    env_globals["hashed_static_path"] = static_files.hashed_path
     env_globals["dev_hot_reload_script"] = hotreload.script(_HOT_RELOAD_URL) if hotreload is not None else ""
     # Registered as filters rather than projected per route: per-route projection is how /cameras and
     # /alerts came to render UTC while /clips rendered local. With a filter a new route has nothing
@@ -114,7 +116,7 @@ def build_app(config: Config, *, dev_hot_reload: bool = False) -> FastAPI:
         password=config.web_auth.password,
     )
     # Mounted before the routers so a route named ``/static`` can never shadow it.
-    app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+    app.mount("/static", static_files, name="static")
     app.include_router(health_router)
     app.include_router(timeline_router)
     app.include_router(clips_router)

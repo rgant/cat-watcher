@@ -126,7 +126,7 @@
                 <img src="{{ url_for('media_thumb', clip_id=clip.id) }}"
                      alt="Clip from {{ clip.camera_display_name }} at {{ clip.display_start }}"
                      loading="lazy"
-                     onerror="this.src='{{ url_for('static', path='clip-placeholder.svg') }}'; this.onerror = null;">
+                     onerror="this.src='{{ url_for('static', path=hashed_static_path('clip-placeholder.svg')) }}'; this.onerror = null;">
                 <span class="thumb-meta">
                   <span class="thumb-camera">{{ clip.camera_display_name }}</span>
                   <span class="thumb-time">{{ clip.display_start }}</span>
@@ -172,5 +172,6 @@
       {% endif %}
     {% endif %}
   </section>
-  <script src="{{ url_for('static', path='timeline.js') }}" defer></script>
+  <script src="{{ url_for('static', path=hashed_static_path('timeline.js')) }}"
+          defer></script>
 {% endblock content %}

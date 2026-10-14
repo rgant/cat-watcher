@@ -201,8 +201,10 @@
       </dd>
     </dl>
   </section>
-  <script src="{{ url_for('static', path='clip_detail.js') }}" defer></script>
-  <script src="{{ url_for('static', path='clip_detail_keyboard.js') }}" defer></script>
+  <script src="{{ url_for('static', path=hashed_static_path('clip_detail.js')) }}"
+          defer></script>
+  <script src="{{ url_for('static', path=hashed_static_path('clip_detail_keyboard.js')) }}"
+          defer></script>
   <dialog id="kbd-help" class="kbd-help" aria-label="Keyboard shortcuts">
     <form method="dialog">
       <button type="submit" class="kbd-help-close" aria-label="Close">×</button>

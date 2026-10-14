@@ -12,12 +12,15 @@
     </title>
     <link rel="icon"
           type="image/svg+xml"
-          href="{{ url_for('static', path='favicon.svg') }}">
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+          href="{{ url_for('static', path=hashed_static_path('favicon.svg')) }}">
+    <link rel="stylesheet"
+          href="{{ url_for('static', path=hashed_static_path('style.css')) }}">
     {# htmx is vendored, not fetched from a CDN: the box serves a LAN-only UI and must render every
     control when the public internet is unreachable. Same-origin also makes SRI unnecessary. #}
-    <script src="{{ url_for('static', path='vendor/htmx.min.js') }}" defer></script>
-    <script src="{{ url_for('static', path='auto_refresh.js') }}" defer></script>
+    <script src="{{ url_for('static', path=hashed_static_path('vendor/htmx.min.js')) }}"
+            defer></script>
+    <script src="{{ url_for('static', path=hashed_static_path('auto_refresh.js')) }}"
+            defer></script>
     {{ dev_hot_reload_script | safe }}
   </head>
   <body {% block body_attrs %}{% endblock body_attrs %}>

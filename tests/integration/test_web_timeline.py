@@ -458,7 +458,7 @@ def test_timeline_thumb_imgs_reference_placeholder_in_onerror(
         response = client.get("/timeline?range=6h", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert "clip-placeholder.svg" in response.text
+    assert re.search(r"/static/clip-placeholder\.[0-9a-f]{12}\.svg", response.text)
     assert "onerror" in response.text
 
 

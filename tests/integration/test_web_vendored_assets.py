@@ -5,6 +5,7 @@ acts only through htmx attributes. If htmx does not load, the controls render bu
 box must serve htmx itself, not fetch it from a public CDN.
 """
 
+import re
 from typing import TYPE_CHECKING
 
 from db_helpers import AUTH_HEADER
@@ -30,7 +31,7 @@ def test_page_shell_loads_htmx_from_the_apps_own_origin(
     with alembic_web_test_client(config) as client:
         response = client.get("/", headers=AUTH_HEADER)
     assert response.status_code == 200
-    assert "/static/vendor/htmx.min.js" in response.text
+    assert re.search(r'src="[^"]*/static/vendor/htmx\.min\.[0-9a-f]{12}\.js"', response.text)
     assert "unpkg.com" not in response.text
     # A same-origin script needs no subresource-integrity hash, and a stale one blocks the load.
     assert "integrity=" not in response.text
